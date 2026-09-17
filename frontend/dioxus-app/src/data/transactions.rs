@@ -614,8 +614,10 @@ mod line_fix {
     /// `.` or `,` decimal separator with at most two decimals. Refuses signs,
     /// exponents and amounts past `i64`. The cap is [`check_unit_price`]'s job.
     ///
-    /// Private on purpose: a shared CHF parser is being added to `phosk_core`
-    /// separately; this should be folded into it once that lands.
+    /// Kept private: the shared `phosk_core` parser (`Money::parse_chf`) is
+    /// stricter. It refuses a decimal comma and space grouping and wants exact
+    /// groups of three, so switching to it would refuse input this editor
+    /// accepts. Folding the two together is a separate change.
     fn parse_chf_centimes(raw: &str) -> Result<i64, PhoskError> {
         const SHAPE: &str = "Unit price must be an amount in CHF such as 4.20.";
         let mut text = raw.trim();
