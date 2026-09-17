@@ -26,7 +26,7 @@ Every task implies: TDD, all gates green, `CONTRIBUTION.md` respected, docs touc
 - [ ] **T05** — Delete the obsolete React frontend `frontend/app/` (needs: T02)
   - `git rm -r frontend/app`; remove every remaining reference (root `Cargo.toml` comments, docs). Do NOT touch `.gitignore` — it is a protected path; list its now-dead entries under *Noticed, not fixed*. It stays recoverable from git history — say how in the PR body.
   - This PR is almost pure deletion and will exceed the usual size guidance; that is expected. No Rust code may change.
-- [ ] **T04** — Shared `DatabaseAdapter` conformance suite (needs: T01)
+- [x] **T04** — Shared `DatabaseAdapter` conformance suite (needs: T01)
   - One generic test suite exercising every port method, instantiated for `phosk_db_memory` **and** `phosk_db_surreal` (`kv-mem`). Surreal currently has 6 tests vs memory's 18 — close the gap. Must include a test that category/record ids round-trip as typed ids (the old `Thing` deserialisation 500).
 
 ### Phase 1 — backend write side

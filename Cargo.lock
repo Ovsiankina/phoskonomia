@@ -5509,6 +5509,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "phosk_db_conformance"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "phosk_adapter_db",
+ "phosk_core",
+ "phosk_id",
+ "phosk_model",
+]
+
+[[package]]
 name = "phosk_db_memory"
 version = "0.1.0"
 dependencies = [
@@ -5516,6 +5527,7 @@ dependencies = [
  "chrono",
  "phosk_adapter_db",
  "phosk_core",
+ "phosk_db_conformance",
  "phosk_id",
  "phosk_model",
  "tokio",
@@ -5530,6 +5542,7 @@ dependencies = [
  "chrono",
  "phosk_adapter_db",
  "phosk_core",
+ "phosk_db_conformance",
  "phosk_id",
  "phosk_model",
  "serde",
