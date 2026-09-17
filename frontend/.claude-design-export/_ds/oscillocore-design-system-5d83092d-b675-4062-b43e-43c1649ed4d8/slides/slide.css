@@ -1,0 +1,29 @@
+/* Oscillocore slide templates — shared. Each slide is a fixed 1280×720 frame. */
+@import url("../fonts/fonts.css");
+@import url("../colors_and_type.css");
+@import url("../assets/osc-crt.css");
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #06040c; }
+.slide {
+  position: relative; width: 1280px; height: 720px; overflow: hidden;
+  background: #06040c; color: var(--ink); font-family: var(--font-body);
+}
+.slide .sbg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 0; }
+.slide .layer { position: absolute; inset: 0; z-index: 2; }
+/* permanent CRT skin, scoped to the slide frame */
+.slide .scan { position: absolute; inset: 0; pointer-events: none; z-index: 6; background:
+  repeating-linear-gradient(0deg, rgba(204,212,250,.085) 0, rgba(150,158,205,.028) .9px, rgba(0,0,0,0) 1.6px, rgba(3,1,11,.42) 2.5px, rgba(0,0,0,0) 3.1px),
+  repeating-linear-gradient(90deg, rgba(255,72,86,.055) 0 1px, rgba(66,255,150,.05) 1px 2px, rgba(86,120,255,.06) 2px 3px); }
+.slide .vig { position: absolute; inset: 0; pointer-events: none; z-index: 6; background:
+  radial-gradient(135% 130% at 50% 50%, transparent 56%, rgba(3,1,10,.42) 84%, rgba(1,0,6,.86) 100%),
+  radial-gradient(72% 48% at 50% 5%, rgba(152,152,205,.045), transparent 62%); }
+
+/* corner HUD cells */
+.slide .hudcell { position: absolute; z-index: 4; }
+.slide .hud-tl { top: 28px; left: 28px; } .slide .hud-tr { top: 28px; right: 28px; }
+.slide .hud-bl { bottom: 28px; left: 28px; } .slide .hud-br { bottom: 28px; right: 28px; }
+
+/* shared bits */
+.kicker { font-family: var(--font-body); font-size: 15px; letter-spacing: .32em; text-transform: uppercase; color: var(--indigo-2); text-shadow: 0 0 8px rgba(106,95,192,.45); }
+.framed-tag { display: inline-block; font-family: var(--font-display); font-size: 28px; letter-spacing: .14em; text-transform: uppercase; color: var(--neon); border: 2px solid var(--neon); padding: 8px 20px; box-shadow: 0 0 16px rgba(255,94,77,.2); }

@@ -1,0 +1,217 @@
+/* ============================================================================
+   Phoskonomia — Debts page. Outstanding balances read as a decaying waveform:
+   the PAYOFF TRAJECTORY damps the combined balance from history through today
+   down to the projected debt-free point; cards/rows carry per-debt detail with
+   a payoff-progress meter; the dock inspector shows the amortization line,
+   interest cost + AI payoff guidance. Builds on phosk.css + shell.css + tokens.
+   ============================================================================ */
+.debts-wrap { max-width: 1180px; margin: 0 auto; width: 100%; padding: 26px 30px 64px; }
+
+/* ---- page head ---- */
+.debts-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+.debts-top .ttl { font-family: var(--font-display); font-size: 30px; color: var(--ink); line-height: 1; }
+.debts-top .sum { font-size: 11px; color: var(--ink-3); letter-spacing: .04em; margin-top: 9px; }
+.debts-top .sum b { font-family: var(--font-display); color: var(--ink); font-weight: 400; font-size: 13px; }
+.debts-top .sum .coral { color: var(--neon); }
+.debts-top .modes { display: flex; gap: 2px; }
+.debts-top .modes .m { font-size: 9.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3);
+  padding: 7px 12px; border: 1px solid transparent; cursor: pointer; transition: all .12s; background: none; font-family: var(--font-body); }
+.debts-top .modes .m:hover { color: var(--ink); }
+.debts-top .modes .m.on { color: var(--text-blue); border-color: var(--hairline); background: rgba(20,14,44,.4); }
+
+/* ---- KPI band ---- */
+.debts-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; margin-bottom: 16px; }
+.debts-kpi { position: relative; border: 1px solid var(--hairline); background: rgba(10,6,20,.5);
+  -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); padding: 14px 16px 13px; }
+.debts-kpi .lbl { font-size: 9px; letter-spacing: .22em; text-transform: uppercase; color: var(--ink-3); display: flex; justify-content: space-between; }
+.debts-kpi .big { font-family: var(--font-display); font-size: 34px; line-height: 1; color: var(--ink); margin-top: 9px; }
+.debts-kpi .big .cur { font-size: 14px; color: var(--ink-3); margin-right: 5px; vertical-align: 4px; }
+.debts-kpi.accent .big { color: var(--neon); text-shadow: var(--glow-text); }
+.debts-kpi.blue .big { color: var(--text-blue); }
+.debts-kpi .ksub { font-size: 9.5px; color: var(--ink-2); margin-top: 7px; letter-spacing: .03em; }
+@media (max-width: 1240px) { .debts-kpis { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px)  { .debts-kpis { grid-template-columns: 1fr; } }
+
+/* ---- payoff trajectory (hero) ---- */
+.traj { position: relative; border: 1px solid var(--hairline); background: rgba(10,6,20,.46); padding: 17px 18px 14px;
+  margin-bottom: 26px; -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); --legend-bg: #07050f; }
+.traj-h { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 8px; }
+.traj-h .hud { font-size: 11px; letter-spacing: .26em; text-transform: uppercase; color: var(--indigo-2); text-shadow: var(--glow-indigo); }
+.traj-key { display: flex; gap: 16px; }
+.traj-key span { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); display: flex; align-items: center; gap: 6px; }
+.traj-key .k { width: 14px; height: 3px; display: inline-block; }
+.traj-key .k.owed { background: var(--neon); box-shadow: 0 0 6px var(--neon); }
+.traj-key .k.proj { background: var(--indigo-neon); }
+.traj-key .k.free { width: 9px; height: 9px; border-radius: 999px; background: var(--bg); border: 1.6px solid var(--ok); box-shadow: 0 0 6px var(--ok); }
+.traj-svg { display: block; overflow: visible; }
+.traj-foot { display: flex; align-items: center; gap: 24px; margin-top: 12px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--hairline); }
+.traj-foot .tf-stat { font-size: 11px; color: var(--ink); display: flex; align-items: baseline; gap: 6px; }
+.traj-foot .tf-stat i { font-style: normal; font-size: 8.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3); }
+.traj-foot .tf-stat b { font-family: var(--font-display); font-weight: 400; font-size: 15px; }
+.traj-foot .tf-stat b.warn { color: var(--warn); }
+.traj-foot .tf-stat em { font-style: normal; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.traj-foot .tf-note { margin-left: auto; font-size: 10px; color: var(--ink-2); letter-spacing: .03em; display: flex; align-items: center; gap: 7px; }
+
+/* ---- section header ---- */
+.debts-sec { display: flex; align-items: baseline; gap: 13px; margin: 0 0 15px; }
+.debts-sec .lbl { font-size: 11px; letter-spacing: .3em; text-transform: uppercase; color: var(--indigo-2); text-shadow: var(--glow-indigo); white-space: nowrap; }
+.debts-sec .ct { font-family: var(--font-display); font-size: 16px; color: var(--neon); }
+.debts-sec .rule { flex: 1; height: 1px; background: var(--hairline); align-self: center; }
+.debts-sec .meta { font-size: 9.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); }
+
+/* group divider (group-by-type) */
+.debts-group { font-size: 9px; letter-spacing: .26em; text-transform: uppercase; color: var(--text-blue); display: flex; align-items: center; gap: 10px; margin: 4px 2px 12px; }
+.debts-group .gr { flex: 1; height: 1px; background: var(--hairline); }
+.debts-group:not(:first-of-type) { margin-top: 26px; }
+
+/* ---- card grid ---- */
+.debt-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 16px; }
+@media (max-width: 1040px) { .debt-grid { grid-template-columns: 1fr; } }
+
+.debt { position: relative; text-align: left; cursor: pointer; font-family: var(--font-body);
+  border: 1.5px solid var(--hairline); background: rgba(10,6,20,.5); padding: 16px 17px 13px;
+  -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); display: flex; flex-direction: column; gap: 12px;
+  transition: border-color .12s, background .12s, box-shadow .12s; --legend-bg: #07050f; }
+.debt:hover { background: rgba(16,10,32,.62); }
+.debt.coral { border-color: var(--hairline-warm); }
+.debt.coral:hover { box-shadow: 0 0 14px rgba(255,94,77,.16); }
+.debt.warn:hover { box-shadow: 0 0 14px rgba(255,180,84,.14); }
+.debt.blue:hover { box-shadow: 0 0 14px rgba(143,125,255,.16); }
+.debt.on { border-color: var(--indigo-neon); box-shadow: 0 0 16px rgba(143,125,255,.28); }
+.debt.coral.on { border-color: var(--neon); box-shadow: 0 0 16px rgba(255,94,77,.3); }
+.debt.warn.on { border-color: var(--warn); box-shadow: 0 0 16px rgba(255,180,84,.26); }
+/* avalanche/snowball target highlight */
+.debt.target { border-color: var(--neon); box-shadow: inset 0 0 0 1px rgba(255,94,77,.3), 0 0 16px rgba(255,94,77,.18); }
+.debt.target .osc-leg { color: var(--neon); }
+/* auto-detected highlight (tweak) */
+body.hl-auto-debt [data-src="llm"] .debt,
+body.hl-auto-debt [data-src="llm"] .debtrow { box-shadow: inset 2.5px 0 0 var(--indigo-neon); }
+body.hl-auto-debt [data-src="llm"] .debt:hover { box-shadow: inset 2.5px 0 0 var(--indigo-neon), 0 0 14px rgba(143,125,255,.16); }
+
+.debt-h { display: flex; align-items: center; gap: 11px; }
+.debt-gl { flex: 0 0 auto; width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--grid-cell); background: rgba(20,14,44,.5); }
+.debt-gl b { font-family: var(--font-display); font-weight: 400; font-size: 18px; color: var(--indigo-3); line-height: 1; }
+.debt-id { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1; }
+.debt-nm { font-family: var(--font-display); font-size: 18px; letter-spacing: .02em; text-transform: uppercase; color: var(--ink); line-height: 1; }
+.debt-len { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); display: flex; align-items: center; gap: 6px; }
+.debt-type { font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: var(--text-blue); padding: 3px 7px; border: 1px solid rgba(132,116,222,.3); flex: 0 0 auto; align-self: flex-start; }
+
+.debt-amt { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.debt-amt .sp { font-family: var(--font-display); font-size: 30px; line-height: .9; color: var(--ink); }
+.debt-amt .sp .cur { font-size: 12px; color: var(--ink-3); margin-right: 4px; vertical-align: 3px; }
+.debt.coral .debt-amt .sp { color: var(--neon); text-shadow: var(--glow-text); }
+.debt-amt .un { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); }
+.debt-amt .apr { margin-left: auto; font-size: 10px; letter-spacing: .04em; color: var(--ink-2); font-family: var(--font-display); }
+.debt.coral .debt-amt .apr { color: var(--neon-hot); }
+
+/* payoff-progress meter */
+.pay-meter { position: relative; width: 100%; height: 7px; background: rgba(106,95,192,.14); border: 1px solid var(--hairline); }
+.pay-fill { position: absolute; left: 0; top: 0; height: 100%; background: var(--indigo-neon); transition: width .25s; }
+.pay-mk { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 1.5px solid var(--ink-2); opacity: .75; transform: translateX(-1px); }
+
+.debt-prog { display: flex; flex-direction: column; gap: 6px; }
+.debt-progmeta { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+.debt-progmeta span:first-child { color: var(--ink-2); }
+
+.debt-next { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.debt-next .nx { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+.debt-next .nx.warn { color: var(--warn); }
+.debt-next .nx.alert { color: var(--neon); text-shadow: 0 0 8px rgba(255,94,77,.4); }
+.debt-next .pay { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); font-family: var(--font-display); }
+
+.debt-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 10px; border-top: 1px solid var(--hairline); }
+.debt-foot .term { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+.debt-foot .decaytrack { display: flex; align-items: center; gap: 8px; }
+.debt-foot .decaytrack .pl { font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3); }
+
+/* ---- compact rows variant ---- */
+.debt-rows { display: flex; flex-direction: column; border: 1px solid var(--hairline); background: rgba(10,6,20,.4);
+  -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); }
+.debtrow { display: grid; align-items: center; gap: 16px; padding: 11px 16px; border-bottom: 1px solid var(--hairline); cursor: pointer;
+  grid-template-columns: 32px 150px 104px 1fr 54px 96px 110px 96px; transition: background .1s; }
+.debtrow:last-child { border-bottom: 0; }
+.debtrow:hover { background: rgba(36,22,83,.26); }
+.debtrow.on { background: rgba(36,22,83,.4); box-shadow: inset 2px 0 0 var(--indigo-neon); }
+.debtrow.target { box-shadow: inset 2px 0 0 var(--neon); }
+.debtrow .dr-gl { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--grid-cell); background: rgba(20,14,44,.5); }
+.debtrow .dr-gl b { font-family: var(--font-display); font-weight: 400; font-size: 13px; color: var(--indigo-3); }
+.debtrow .dr-nm { font-family: var(--font-display); font-size: 15px; letter-spacing: .03em; text-transform: uppercase; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.debtrow .dr-stat { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; }
+.debtrow .dr-stat.coral { color: var(--neon-hot); } .debtrow .dr-stat.warn { color: var(--warn); } .debtrow .dr-stat.blue { color: var(--text-blue); }
+.debtrow .dr-meter { min-width: 0; }
+.debtrow .dr-apr { font-family: var(--font-display); font-size: 13px; color: var(--ink-2); text-align: right; }
+.debtrow .dr-next { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); white-space: nowrap; text-align: right; }
+.debtrow .dr-amt { font-size: 11px; color: var(--ink-2); text-align: right; white-space: nowrap; }
+.debtrow .dr-amt b { font-family: var(--font-display); font-weight: 400; font-size: 15px; color: var(--ink); }
+.debtrow .dr-pay { font-size: 11px; color: var(--ink-3); text-align: right; white-space: nowrap; font-family: var(--font-display); }
+.debtrow .dr-pay i { font-style: normal; font-size: 9px; font-family: var(--font-body); }
+@media (max-width: 980px) { .debtrow { grid-template-columns: 28px 1fr 96px 110px; } .debtrow .dr-stat, .debtrow .dr-meter, .debtrow .dr-apr, .debtrow .dr-next { display: none; } }
+
+/* ---- inspector additions (reuses .sig-panel chrome) ---- */
+.debt-insp .sig-head .kls { color: var(--text-blue); }
+.debt-insp .sig-head .nm { color: var(--ink); text-shadow: 0 0 10px rgba(132,116,222,.35); }
+.debt-insp .sig-delta .big { color: var(--ink); text-shadow: none; }
+.debt-insp .sig-empty .mk { color: var(--indigo-neon); }
+
+/* ============================================================================
+   PERSONAL · IOU LEDGER — informal money between people. Deliberately set apart
+   from the institutional debt above: a hairline-warm seam, a two-sided net
+   beam, and lighter person cards (avatars, no APR / payoff machinery).
+   ============================================================================ */
+.ious { margin-top: 42px; padding-top: 30px; border-top: 1px dashed var(--hairline); }
+.ious-sec .lbl { color: var(--text-coral); text-shadow: 0 0 10px rgba(245,86,74,.3); }
+.ious-sec .ct { color: var(--text-blue); }
+
+/* ---- net-position beam ---- */
+.iou-beam { position: relative; border: 1px solid var(--hairline); background: rgba(10,6,20,.46); padding: 16px 18px 10px;
+  margin-bottom: 22px; -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); --legend-bg: #07050f; }
+.beam-h { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 2px; }
+.beam-h .hud { font-size: 11px; letter-spacing: .26em; text-transform: uppercase; color: var(--indigo-2); text-shadow: var(--glow-indigo); }
+.beam-net { font-family: var(--font-display); font-size: 17px; letter-spacing: .02em; }
+.beam-net.pos { color: var(--text-blue); }
+.beam-net.neg { color: var(--neon); text-shadow: var(--glow-text); }
+.beam-svg { display: block; overflow: visible; }
+
+/* ---- two columns: owed-to-you / you-owe ---- */
+.iou-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 1040px) { .iou-cols { grid-template-columns: 1fr; } }
+.iou-col { display: flex; flex-direction: column; gap: 12px; }
+.iou-colh { display: flex; align-items: baseline; justify-content: space-between; font-size: 10px; letter-spacing: .2em; text-transform: uppercase; padding-bottom: 4px; border-bottom: 1px solid var(--hairline); }
+.iou-colh.in { color: var(--text-blue); }
+.iou-colh.out { color: var(--neon-hot); }
+.iou-colh .n { font-family: var(--font-display); font-size: 12px; letter-spacing: .02em; color: var(--ink-2); }
+
+/* ---- person card ---- */
+.person { position: relative; border: 1px solid var(--hairline); background: rgba(10,6,20,.5);
+  -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); padding: 13px 15px 11px; display: flex; flex-direction: column; gap: 9px;
+  transition: border-color .12s, background .12s, box-shadow .12s; }
+.person:hover { background: rgba(16,10,32,.62); }
+.person.in:hover  { box-shadow: 0 0 14px rgba(143,125,255,.14); }
+.person.out:hover { box-shadow: 0 0 14px rgba(255,94,77,.14); }
+.person.in  { border-left: 2px solid rgba(143,125,255,.5); }
+.person.out { border-left: 2px solid rgba(255,94,77,.5); }
+
+.person-h { display: flex; align-items: center; gap: 11px; }
+.person-av { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--grid-cell); background: rgba(20,14,44,.5); }
+.person-av b { font-family: var(--font-display); font-weight: 400; font-size: 14px; color: var(--indigo-3); line-height: 1; }
+.person-id { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.person-nm { font-family: var(--font-display); font-size: 16px; letter-spacing: .02em; text-transform: uppercase; color: var(--ink); line-height: 1; }
+.person-dir { font-size: 8px; letter-spacing: .14em; text-transform: uppercase; }
+.person-dir.in { color: var(--text-blue); }
+.person-dir.out { color: var(--neon-hot); }
+.person-amt { font-family: var(--font-display); font-size: 22px; line-height: 1; color: var(--ink); flex: 0 0 auto; }
+.person.in .person-amt { color: var(--text-blue); }
+.person.out .person-amt { color: var(--neon); text-shadow: 0 0 8px rgba(255,94,77,.3); }
+.person-amt .cur { font-size: 10px; color: var(--ink-3); margin-right: 3px; vertical-align: 2px; }
+
+.person-reason { font-size: 11px; line-height: 1.45; color: var(--ink-2); letter-spacing: .01em; }
+
+.person-prog { display: flex; flex-direction: column; gap: 4px; }
+.person-prog .pp-bar { position: relative; width: 100%; height: 5px; background: rgba(106,95,192,.14); border: 1px solid var(--hairline); }
+.person-prog .pp-fill { position: absolute; left: 0; top: 0; height: 100%; background: var(--indigo-neon); box-shadow: 0 0 6px var(--indigo-neon); }
+.person-prog .pp-meta { font-size: 8px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+
+.person-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 9px; border-top: 1px solid var(--hairline); }
+.person-foot .since { font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); }
+.person-acts { display: flex; gap: 6px; }
+.person-acts .gbtn { font-size: 8.5px; padding: 5px 9px; }

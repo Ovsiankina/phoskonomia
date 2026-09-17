@@ -1,0 +1,33 @@
+[package]
+name = "phosk_queue"
+version.workspace = true
+edition.workspace = true
+
+# phosk_queue — the Raspberry-Pi DMZ blob queue (ADR-007, the ONE legitimate
+# inbound network boundary in the whole system).
+#
+# This is an axum server that runs on an *untrusted* Pi. It exposes an
+# OPAQUE-BLOB FIFO queue: phones POST receipt photos in, the trusted desktop
+# daemon polls them OUT. The Pi NEVER runs OCR/LLM and never inspects the blob
+# beyond cheap, hostile-input gating (size + magic-byte MIME sniff). It stores
+# bytes opaquely and hands them back, in order, to the first drainer.
+#
+# Composition root only: it imports NO feature crate. It depends on phosk_core
+# solely for the one error taxonomy. All axum/tokio types stay inside this bin.
+[dependencies]
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+phosk_core = { path = "../../crates/phosk_core" }
+# Instrumentation: live in debug, compiled out in release (release_max_level_off).
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Integration tests bind an ephemeral loopback port and drive the real router
+# over a real socket with a real client.
+reqwest = { workspace = true }
+
+[lints]
+workspace = true

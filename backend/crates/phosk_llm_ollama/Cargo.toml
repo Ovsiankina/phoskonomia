@@ -1,0 +1,30 @@
+[package]
+name = "phosk_llm_ollama"
+version.workspace = true
+edition.workspace = true
+
+# The CONCRETE L3 Ollama adapter: an `LlmAdapter` impl over the local Ollama HTTP
+# API (`localhost:11434`, ADR-008 constrained output / ADR-010 layering). It is a
+# *composition-root-only* dependency — wired in by `bin/*` or the Dioxus server
+# context, NEVER imported by a feature crate. Hence it is the one place reqwest /
+# the raw Ollama response JSON live: vendor types die here and only the L2 port's
+# vendor-neutral shapes (`String`, `serde_json::Value`, `PhoskError`) cross out.
+[dependencies]
+phosk_adapter_llm = { path = "../phosk_adapter_llm" }
+phosk_core = { path = "../phosk_core" }
+# reqwest: the HTTP transport to Ollama's `/api/generate` + `/api/tags`.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# tracing: debug-only (release_max_level_off compiles the macros out of release).
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# Test-only runtime. The live smoke test does real network I/O, so it needs the
+# multi-threaded reactor (`rt-multi-thread`) plus the `net`/`time` drivers reqwest
+# relies on — beyond the bare `macros, rt` the workspace tokio dev-dep declares.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+
+[lints]
+workspace = true

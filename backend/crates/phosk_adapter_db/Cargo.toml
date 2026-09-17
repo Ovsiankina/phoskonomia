@@ -1,0 +1,31 @@
+[package]
+name = "phosk_adapter_db"
+version.workspace = true
+edition.workspace = true
+
+# The DatabaseAdapter PORT (ADR-000): one fat async trait, the L2 contract
+# boundary. Depends only on the domain (phosk_model) + foundation (phosk_core,
+# for PhoskError) + async-trait (object-safe `async fn` in a `dyn` trait) +
+# chrono (NaiveDate range args). NO concrete adapter, NO feature crate, NO HTTP
+# deps here — this is the seam feature crates depend on, not an implementation.
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_id = { path = "../phosk_id" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+
+[features]
+# `contract`: exposes the reusable port-conformance suite (`pub mod contract`) so
+# any concrete adapter (`phosk_db_memory`, `phosk_db_surreal`) can assert it obeys
+# the PORT behaviour against the SAME deterministic Swiss seed. Off by default so
+# the bare port crate carries no test-helper surface in normal builds; concrete
+# adapters opt in via a dev-dependency `features = ["contract"]`.
+contract = []
+
+[dev-dependencies]
+# Test-only: drive the async trait object via `#[tokio::test]`.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

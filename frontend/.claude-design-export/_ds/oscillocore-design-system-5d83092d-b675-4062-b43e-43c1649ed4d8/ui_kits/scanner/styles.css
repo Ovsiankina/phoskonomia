@@ -1,0 +1,57 @@
+/* Scanner brand-site kit — styles. Built on colors_and_type.css tokens. */
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: #06040c; color: var(--ink); font-family: var(--font-body); overflow: hidden; }
+.site { height: 100vh; display: flex; flex-direction: column; }
+.sbg { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; z-index: 0; }
+
+/* nav */
+.site-nav { position: relative; z-index: 3; display: flex; align-items: center; justify-content: space-between; padding: 16px 28px; border-bottom: 1px solid var(--hairline); background: rgba(8,5,20,.55); backdrop-filter: blur(7px); }
+.logo { font-family: var(--font-display); font-size: 26px; color: var(--indigo-neon); text-shadow: 0 0 14px rgba(143,125,255,.4); cursor: pointer; }
+.logo span { color: var(--neon); text-shadow: var(--glow-text); }
+.site-nav nav { display: flex; align-items: center; gap: 6px; }
+.nv { font-family: var(--font-body); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); background: transparent; border: 1px solid transparent; border-radius: 2px; padding: 8px 13px; cursor: pointer; transition: all .12s; }
+.nv:hover { color: var(--ink); }
+.nv.on { color: var(--neon-hot); border-color: var(--hairline-warm); }
+
+/* buttons */
+.sbtn { font-family: var(--font-body); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; padding: 11px 20px; border-radius: 3px; cursor: pointer; border: 1px solid var(--grid-bold); background: #150c33; color: var(--ink); transition: all .12s; }
+.sbtn:hover { background: #241653; color: #fff; }
+.sbtn.primary { border-color: var(--neon); background: rgba(255,94,77,.14); color: var(--neon-hot); }
+.sbtn.primary:hover { background: rgba(255,94,77,.24); box-shadow: 0 0 16px rgba(255,94,77,.35); }
+
+.page { position: relative; z-index: 2; flex: 1; overflow-y: auto; }
+.page::-webkit-scrollbar { width: 8px; } .page::-webkit-scrollbar-thumb { background: #2a2160; }
+
+/* hero */
+.home { display: grid; grid-template-rows: 1fr auto; }
+.hero { align-self: center; max-width: 620px; padding: 0 28px; }
+.hero-title { font-family: var(--font-display); font-size: clamp(52px, 9vw, 116px); line-height: .92; color: var(--neon); text-shadow: var(--glow-neon); margin: 12px 0 0; }
+.hero-sub { font-family: var(--font-body); font-size: 16px; line-height: 1.55; color: var(--ink-2); max-width: 440px; margin: 18px 0 24px; }
+.hero-cta { display: flex; gap: 12px; }
+.home-talks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 28px 28px; }
+
+/* talk cards */
+.talk { cursor: pointer; }
+.talk-frame { position: relative; border: 2px solid rgba(86,72,191,.5); background: linear-gradient(180deg, rgba(40,28,90,.2), rgba(8,4,18,.06)); padding: 18px 20px; min-height: 132px; display: flex; flex-direction: column; transition: border-color .14s, box-shadow .14s; }
+.talk:hover .talk-frame { border-color: var(--neon); box-shadow: 0 0 22px rgba(255,94,77,.16) inset; }
+.talk-idx { font-family: var(--font-display); font-size: 14px; color: var(--neon); letter-spacing: .1em; }
+.talk-title { font-family: var(--font-display); font-size: 23px; line-height: 1.06; color: var(--ink); margin: 8px 0 auto; font-weight: 400; }
+.talk-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; }
+.talk-spk { font-family: var(--font-body); font-size: 13px; color: var(--indigo-neon); }
+.talk-tag { font-family: var(--font-display); font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--neon); border: 1.5px solid var(--neon); padding: 3px 9px; }
+.corner-tick { position: absolute; top: -1px; right: -1px; width: 14px; height: 14px; border-top: 2px solid var(--neon); border-right: 2px solid var(--neon); opacity: 0; transition: opacity .14s; }
+.talk:hover .corner-tick { opacity: 1; }
+
+/* talks page */
+.talks-inner { max-width: 940px; margin: 0 auto; padding: 30px 28px 50px; }
+.page-h1 { font-family: var(--font-display); font-size: 64px; color: var(--neon); text-shadow: var(--glow-text); margin: 8px 0 24px; font-weight: 400; }
+.talks-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* scanner page dock */
+.scanpage { }
+.dock { position: absolute; top: 22px; right: 22px; width: 230px; z-index: 4; background: rgba(8,5,20,.86); backdrop-filter: blur(7px); border: 1px solid var(--grid-cell); border-radius: 3px; padding: 16px 16px 18px; box-shadow: var(--shadow-pop); display: flex; flex-direction: column; gap: 12px; }
+.dock-row { display: flex; flex-direction: column; gap: 6px; font-family: var(--font-body); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--indigo-3); }
+.dock-row input[type=range] { accent-color: #ff5e4d; }
+.seed-in { width: 44px; height: 38px; text-align: center; font: 400 22px var(--font-display); background: #11092a; color: var(--neon); border: 1px solid var(--grid-cell); border-radius: 2px; text-shadow: 0 0 8px var(--neon); }
+.readout { font-family: var(--font-body); font-size: 10px; color: var(--neon-dim); letter-spacing: .04em; text-shadow: var(--glow-text); border-top: 1px solid var(--hairline); padding-top: 10px; }

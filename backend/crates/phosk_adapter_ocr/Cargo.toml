@@ -1,0 +1,28 @@
+[package]
+name = "phosk_adapter_ocr"
+version.workspace = true
+edition.workspace = true
+
+# The OcrAdapter PORT (ADR-005/010): the L2 contract for turning a raw receipt
+# image into text + positioned regions. Depends only on the foundation
+# (phosk_core, for PhoskError) + serde (the result types round-trip across the
+# in-process boundary) + async-trait (OCR is I/O — a microservice / subprocess —
+# so the trait is async and must stay object-safe for `Arc<dyn OcrAdapter>`) +
+# tracing. NO concrete adapter (PaddleOCR / vision-LLM), NO feature crate, NO
+# vendor type here — this is the seam, not an implementation. Concrete adapters
+# are wired in only by a composition root; vendor types die at the adapter.
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+serde = { workspace = true }
+async-trait = { workspace = true }
+# tracing: debug-only (release_max_level_off compiles macros out of release).
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# Test-only: drive the async port via `#[tokio::test]`.
+tokio = { workspace = true }
+# Test-only: assert the result types round-trip across the serde boundary.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

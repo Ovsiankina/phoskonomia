@@ -1,0 +1,29 @@
+[package]
+name = "phosk_adapter_storage"
+version.workspace = true
+edition.workspace = true
+
+# The PhotoStorage PORT (ADR-005/010): the L2 contract for opaque blob storage
+# (receipt photos). Depends only on the foundation (phosk_core, for PhoskError) +
+# serde (StorageRef round-trips at the seed/persistence boundary) + async-trait
+# (object-safe `async fn` in a `dyn` trait) + tracing (debug-only spans). NO
+# concrete adapter (encrypted-fs, S3, …), NO feature crate, NO HTTP deps here —
+# this is the seam feature code depends on, never an implementation. Vendor types
+# (paths, file handles, encryption keys) die in the L3 concrete adapter.
+#
+# A small `InMemoryStorage` fake ships here (gated to the crate, no extra deps) so
+# feature/integration tests get a real, working PhotoStorage without touching disk.
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+serde = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Test-only: drive the async trait object via `#[tokio::test]`.
+tokio = { workspace = true }
+# Test-only: assert the StorageRef transparent-string serde round-trip.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

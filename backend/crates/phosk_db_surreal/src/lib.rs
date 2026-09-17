@@ -1,0 +1,723 @@
+//! `phosk_db_surreal` — the embedded-SurrealDB [`DatabaseAdapter`] (ADR-005/010).
+//!
+//! A SECOND concrete L3 implementation of the `phosk_adapter_db` PORT, kept in
+//! **lockstep** with `phosk_db_memory` by the shared
+//! [`contract`](phosk_adapter_db::contract) suite. It embeds SurrealDB — there is
+//! **no external server**:
+//!
+//! * [`SurrealDb::memory`] opens the in-memory `kv-mem` engine (tests).
+//! * [`SurrealDb::file`] opens a file-backed `kv-surrealkv` store (the prod path).
+//!
+//! ## Layering & vendor confinement (ADR-010)
+//!
+//! This crate depends on the PORT trait, the domain, and the surreal driver only.
+//! It is wired in **only** by a composition root (`bin/*` or the Dioxus server
+//! context) and is **never** imported by a feature crate — they see `&dyn
+//! DatabaseAdapter`. The surreal [`Thing`](surrealdb::sql::Thing) and the query
+//! layer are confined **entirely** here (the [`store`] module); only typed
+//! [`phosk_id`] ids and domain types cross the boundary, never a `Thing`.
+//!
+//! ## Storage shape
+//!
+//! Every domain entity already derives `serde`, so each is stored as its full
+//! serialized object under a single `doc` field of a per-entity table, keyed by a
+//! natural string key (the entity's UUID id, or a synthetic relation key). The
+//! surreal record `id` (a `Thing`) is therefore **never read back** — we only ever
+//! deserialize `doc` — which both confines `Thing` and sidesteps SurrealDB's
+//! reserved `id` field clashing with the model's own `id`.
+//!
+//! ## No panics (ADR §0)
+//!
+//! Every surreal/serde failure is mapped into a [`PhoskError`]; there is no
+//! `unwrap`, `expect`, or `panic!` in non-test code.
+
+// Style lints deliberately allowed, matching `phosk_db_memory`:
+// - `assigning_clones`: the `x = s.to_owned()` writes read clearer than
+//   `clone_into`, and obscuring them buys nothing for these tiny fields.
+// - `redundant_pub_crate`: the internal `store`/`seed`/`migrate` modules expose
+//   `pub(crate)` helpers on purpose — the visibility documents the crate-internal
+//   seam even though the modules are private.
+// - `option_if_let_else`: the explicit `match`/`if let` reads clearer than a
+//   `map_or_else` with a multi-line closure.
+// - `doc_markdown`: prose mentions `SurrealDB`/`SurrealKv`/`kv-*` proper nouns
+//   that are not code items.
+#![allow(
+    clippy::assigning_clones,
+    clippy::redundant_pub_crate,
+    clippy::option_if_let_else,
+    clippy::doc_markdown
+)]
+
+use async_trait::async_trait;
+use chrono::NaiveDate;
+use phosk_adapter_db::DatabaseAdapter;
+use phosk_core::error::PhoskError;
+use phosk_core::money::Money;
+use phosk_id::{
+    AlertId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId, SuggestionId,
+};
+use phosk_model::{
+    AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
+    CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
+    Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription, Transaction,
+};
+use surrealdb::Surreal;
+use surrealdb::engine::local::{Db, Mem, SurrealKv};
+
+mod migrate;
+mod seed;
+mod store;
+
+use store::{Bucket, Store};
+
+/// The embedded-SurrealDB adapter handle.
+///
+/// Holds an owned [`Surreal<Db>`] connection to an embedded engine. Cheap to
+/// share behind `Arc<dyn DatabaseAdapter>`; the handle is internally
+/// reference-counted, so [`Clone`] yields another view of the same store.
+#[derive(Debug, Clone)]
+pub struct SurrealDb {
+    store: Store,
+}
+
+impl SurrealDb {
+    /// The fixed namespace/database the adapter pins (single-tenant desktop app).
+    const NS: &'static str = "phoskonomia";
+    const DB: &'static str = "main";
+
+    /// Open the **in-memory** engine (`kv-mem`) — ephemeral, for tests. Runs the
+    /// versioned migration on connect.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the engine fails to start or the migration fails.
+    pub async fn memory() -> Result<Self, PhoskError> {
+        let db = Surreal::new::<Mem>(())
+            .await
+            .map_err(|e| PhoskError::Invalid(format!("surreal mem engine: {e}")))?;
+        Self::init(db).await
+    }
+
+    /// Open a **file-backed** store (`kv-surrealkv`) at `path` — the prod path.
+    /// The directory is created by the engine if absent. Runs the migration.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the engine fails to open `path` or the migration fails.
+    pub async fn file(path: &str) -> Result<Self, PhoskError> {
+        let db = Surreal::new::<SurrealKv>(path)
+            .await
+            .map_err(|e| PhoskError::Invalid(format!("surreal file engine at {path}: {e}")))?;
+        Self::init(db).await
+    }
+
+    /// Select the namespace/database and run the versioned migration.
+    async fn init(db: Surreal<Db>) -> Result<Self, PhoskError> {
+        db.use_ns(Self::NS)
+            .use_db(Self::DB)
+            .await
+            .map_err(|e| PhoskError::Invalid(format!("surreal use ns/db: {e}")))?;
+        let store = Store::new(db);
+        migrate::run(&store).await?;
+        Ok(Self { store })
+    }
+
+    /// An in-memory adapter loaded with the deterministic Swiss seed — the
+    /// fixture both adapters share so behaviour matches (ADR: lockstep).
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the engine, migration, or seed insert fails.
+    pub async fn seeded() -> Result<Self, PhoskError> {
+        let me = Self::memory().await?;
+        seed::load(&me.store).await?;
+        Ok(me)
+    }
+
+    /// A **file-backed** adapter, seeded only if the store is empty (first run).
+    /// Idempotent: re-opening an existing store does not re-seed.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the engine, migration, or seed insert fails.
+    pub async fn file_seeded(path: &str) -> Result<Self, PhoskError> {
+        let me = Self::file(path).await?;
+        if me.store.count(Bucket::BudgetConfig).await? == 0 {
+            seed::load(&me.store).await?;
+        }
+        Ok(me)
+    }
+}
+
+#[async_trait]
+impl DatabaseAdapter for SurrealDb {
+    // ── Dashboard slice ────────────────────────────────────────────────────────
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn transactions_between(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<Transaction>, PhoskError> {
+        if from > to {
+            return Err(PhoskError::Invalid(format!(
+                "transactions_between: from ({from}) is after to ({to})"
+            )));
+        }
+        let all: Vec<Transaction> = self.store.list(Bucket::Transaction).await?;
+        Ok(all
+            .into_iter()
+            .filter(|t| t.date >= from && t.date <= to)
+            .collect())
+    }
+
+    async fn categories(&self) -> Result<Vec<Category>, PhoskError> {
+        self.store.list(Bucket::Category).await
+    }
+
+    async fn budget_config(&self) -> Result<BudgetConfig, PhoskError> {
+        self.store
+            .get::<BudgetConfig>(Bucket::BudgetConfig, "singleton")
+            .await?
+            .ok_or_else(|| PhoskError::NotFound("budget config".to_owned()))
+    }
+
+    // ── Ledger ─────────────────────────────────────────────────────────────────
+
+    async fn receipts_between(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<Receipt>, PhoskError> {
+        if from > to {
+            return Err(PhoskError::Invalid(format!(
+                "receipts_between: from ({from}) is after to ({to})"
+            )));
+        }
+        let all: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
+        Ok(all
+            .into_iter()
+            .filter(|r| r.date >= from && r.date <= to)
+            .collect())
+    }
+
+    async fn receipt(&self, id: ReceiptId) -> Result<Receipt, PhoskError> {
+        self.store
+            .get::<Receipt>(Bucket::Receipt, &id.to_string())
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("receipt {id}")))
+    }
+
+    async fn receipt_by_slug(&self, slug: &str) -> Result<Receipt, PhoskError> {
+        let all: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
+        all.into_iter()
+            .find(|r| r.slug == slug)
+            .ok_or_else(|| PhoskError::NotFound(format!("receipt slug {slug}")))
+    }
+
+    async fn line_items(&self, receipt: ReceiptId) -> Result<Vec<LineItem>, PhoskError> {
+        let all: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        Ok(all
+            .into_iter()
+            .filter(|l| l.receipt_id == receipt)
+            .collect())
+    }
+
+    async fn all_receipts(&self) -> Result<Vec<Receipt>, PhoskError> {
+        self.store.list(Bucket::Receipt).await
+    }
+
+    async fn insert_receipt(
+        &self,
+        r: Receipt,
+        lines: Vec<LineItem>,
+    ) -> Result<ReceiptId, PhoskError> {
+        // Idempotency: the receipt's stable `slug` is the key. A re-import of the
+        // same slug REPLACES the prior receipt (keeping its stored id) and swaps
+        // its lines; a fresh slug is appended. Mirrors `phosk_db_memory`.
+        let existing: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
+        let stable_id = existing
+            .iter()
+            .find(|x| x.slug == r.slug)
+            .map_or(r.id, |x| x.id);
+
+        let mut receipt = r;
+        receipt.id = stable_id;
+        self.store
+            .put(Bucket::Receipt, &stable_id.to_string(), &receipt)
+            .await?;
+
+        // Drop old lines for this receipt, then attach the new set rebound to it.
+        let old_lines: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        for old in old_lines.into_iter().filter(|l| l.receipt_id == stable_id) {
+            self.store
+                .delete(Bucket::LineItem, &old.id.to_string())
+                .await?;
+        }
+        for mut line in lines {
+            line.receipt_id = stable_id;
+            self.store
+                .put(Bucket::LineItem, &line.id.to_string(), &line)
+                .await?;
+        }
+        Ok(stable_id)
+    }
+
+    async fn update_line_item(&self, line: LineItem) -> Result<(), PhoskError> {
+        let key = line.id.to_string();
+        if self
+            .store
+            .get::<LineItem>(Bucket::LineItem, &key)
+            .await?
+            .is_none()
+        {
+            return Err(PhoskError::NotFound(format!("line item {}", line.id)));
+        }
+        self.store.put(Bucket::LineItem, &key, &line).await
+    }
+
+    async fn record_correction(&self, ev: CorrectionEvent) -> Result<(), PhoskError> {
+        self.store
+            .put(Bucket::Correction, &ev.id.to_string(), &ev)
+            .await
+    }
+
+    // ── Signals ────────────────────────────────────────────────────────────────
+
+    async fn signals(&self) -> Result<Vec<Signal>, PhoskError> {
+        self.store.list(Bucket::Signal).await
+    }
+
+    async fn signal(&self, id: SignalId) -> Result<Signal, PhoskError> {
+        self.store
+            .get::<Signal>(Bucket::Signal, &id.to_string())
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("signal {id}")))
+    }
+
+    async fn signal_by_slug(&self, slug: &str) -> Result<Signal, PhoskError> {
+        let all: Vec<Signal> = self.store.list(Bucket::Signal).await?;
+        all.into_iter()
+            .find(|s| s.slug == slug)
+            .ok_or_else(|| PhoskError::NotFound(format!("signal slug {slug}")))
+    }
+
+    async fn signal_occurrences(&self, id: SignalId) -> Result<Vec<SignalOccurrence>, PhoskError> {
+        let all: Vec<SignalOccurrence> = self.store.list(Bucket::SignalOccurrence).await?;
+        Ok(all.into_iter().filter(|o| o.signal_id == id).collect())
+    }
+
+    async fn set_signal_tracked(&self, id: SignalId, tracked: bool) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        let mut s = self
+            .store
+            .get::<Signal>(Bucket::Signal, &key)
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("signal {id}")))?;
+        s.tracked = tracked;
+        self.store.put(Bucket::Signal, &key, &s).await
+    }
+
+    async fn delete_signal(&self, id: SignalId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self
+            .store
+            .get::<Signal>(Bucket::Signal, &key)
+            .await?
+            .is_none()
+        {
+            return Err(PhoskError::NotFound(format!("signal {id}")));
+        }
+        self.store.delete(Bucket::Signal, &key).await
+    }
+
+    // ── Planning ───────────────────────────────────────────────────────────────
+
+    async fn category_caps(&self) -> Result<Vec<CategoryCap>, PhoskError> {
+        self.store.list(Bucket::CategoryCap).await
+    }
+
+    async fn category_cap_by_name(&self, name: &str) -> Result<CategoryCap, PhoskError> {
+        let all: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        all.into_iter()
+            .find(|c| c.name == name)
+            .ok_or_else(|| PhoskError::NotFound(format!("category {name}")))
+    }
+
+    async fn set_category_cap(&self, name: &str, cap: Option<Money>) -> Result<(), PhoskError> {
+        let all: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        let mut c = all
+            .into_iter()
+            .find(|c| c.name == name)
+            .ok_or_else(|| PhoskError::NotFound(format!("category {name}")))?;
+        c.cap = cap;
+        c.provenance = Provenance {
+            source: Source::UserModified,
+            confidence: 1.0,
+        };
+        self.store
+            .put(Bucket::CategoryCap, &c.id.to_string(), &c)
+            .await
+    }
+
+    async fn budget_history(&self, category: &str) -> Result<Vec<BudgetHistory>, PhoskError> {
+        let caps: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        let Some(cap) = caps.iter().find(|c| c.name == category) else {
+            return Ok(Vec::new());
+        };
+        let id = cap.id;
+        let all: Vec<BudgetHistory> = self.store.list(Bucket::BudgetHistory).await?;
+        Ok(all.into_iter().filter(|h| h.category_id == id).collect())
+    }
+
+    async fn alerts(&self) -> Result<Vec<Alert>, PhoskError> {
+        self.store.list(Bucket::Alert).await
+    }
+
+    async fn alert(&self, id: AlertId) -> Result<Alert, PhoskError> {
+        self.store
+            .get::<Alert>(Bucket::Alert, &id.to_string())
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))
+    }
+
+    async fn update_alert_status(&self, id: AlertId, status: &str) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        let mut a = self
+            .store
+            .get::<Alert>(Bucket::Alert, &key)
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
+        a.status = status.to_owned();
+        self.store.put(Bucket::Alert, &key, &a).await
+    }
+
+    // ── Recurring ──────────────────────────────────────────────────────────────
+
+    async fn subscriptions(&self) -> Result<Vec<Subscription>, PhoskError> {
+        self.store.list(Bucket::Subscription).await
+    }
+
+    async fn subscription(&self, id: SubscriptionId) -> Result<Subscription, PhoskError> {
+        self.store
+            .get::<Subscription>(Bucket::Subscription, &id.to_string())
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("subscription {id}")))
+    }
+
+    async fn subscription_by_slug(&self, slug: &str) -> Result<Subscription, PhoskError> {
+        let all: Vec<Subscription> = self.store.list(Bucket::Subscription).await?;
+        all.into_iter()
+            .find(|s| s.slug == slug)
+            .ok_or_else(|| PhoskError::NotFound(format!("subscription slug {slug}")))
+    }
+
+    async fn subscription_charges(&self, id: SubscriptionId) -> Result<Vec<Charge>, PhoskError> {
+        let all: Vec<Charge> = self.store.list(Bucket::Charge).await?;
+        Ok(all
+            .into_iter()
+            .filter(|c| c.subscription_id == id)
+            .collect())
+    }
+
+    async fn upsert_subscription(&self, s: Subscription) -> Result<SubscriptionId, PhoskError> {
+        let id = s.id;
+        self.store
+            .put(Bucket::Subscription, &id.to_string(), &s)
+            .await?;
+        Ok(id)
+    }
+
+    async fn record_charge(&self, c: Charge) -> Result<(), PhoskError> {
+        self.store.put(Bucket::Charge, &c.id.to_string(), &c).await
+    }
+
+    // ── Debts ──────────────────────────────────────────────────────────────────
+
+    async fn debts(&self) -> Result<Vec<Debt>, PhoskError> {
+        self.store.list(Bucket::Debt).await
+    }
+
+    async fn debt(&self, id: DebtId) -> Result<Debt, PhoskError> {
+        self.store
+            .get::<Debt>(Bucket::Debt, &id.to_string())
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("debt {id}")))
+    }
+
+    async fn debt_by_slug(&self, slug: &str) -> Result<Debt, PhoskError> {
+        let all: Vec<Debt> = self.store.list(Bucket::Debt).await?;
+        all.into_iter()
+            .find(|d| d.slug == slug)
+            .ok_or_else(|| PhoskError::NotFound(format!("debt slug {slug}")))
+    }
+
+    async fn debt_payments(&self, id: DebtId) -> Result<Vec<DebtPayment>, PhoskError> {
+        let all: Vec<DebtPayment> = self.store.list(Bucket::DebtPayment).await?;
+        Ok(all.into_iter().filter(|p| p.debt_id == id).collect())
+    }
+
+    async fn upsert_debt(&self, d: Debt) -> Result<DebtId, PhoskError> {
+        let id = d.id;
+        self.store.put(Bucket::Debt, &id.to_string(), &d).await?;
+        Ok(id)
+    }
+
+    async fn record_debt_payment(&self, p: DebtPayment) -> Result<(), PhoskError> {
+        self.store
+            .put(Bucket::DebtPayment, &p.id.to_string(), &p)
+            .await
+    }
+
+    async fn personal_ious(&self) -> Result<Vec<PersonalIou>, PhoskError> {
+        self.store.list(Bucket::PersonalIou).await
+    }
+
+    async fn upsert_personal_iou(&self, i: PersonalIou) -> Result<PersonalIouId, PhoskError> {
+        let id = i.id;
+        self.store
+            .put(Bucket::PersonalIou, &id.to_string(), &i)
+            .await?;
+        Ok(id)
+    }
+
+    // ── Analytics support ──────────────────────────────────────────────────────
+
+    async fn spend_history(
+        &self,
+        _cycles: u32,
+        _as_of: NaiveDate,
+    ) -> Result<Vec<BudgetHistory>, PhoskError> {
+        self.store.list(Bucket::BudgetHistory).await
+    }
+
+    // ── Settings ───────────────────────────────────────────────────────────────
+
+    async fn preferences(&self) -> Result<Vec<Preference>, PhoskError> {
+        self.store.list(Bucket::Preference).await
+    }
+
+    async fn preference(&self, key: &str) -> Result<Preference, PhoskError> {
+        // Keyed by the natural `key` string (the user-facing preference key).
+        self.store
+            .get::<Preference>(Bucket::Preference, key)
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("preference {key}")))
+    }
+
+    async fn set_preference(&self, key: &str, value: &str) -> Result<(), PhoskError> {
+        let pref = match self
+            .store
+            .get::<Preference>(Bucket::Preference, key)
+            .await?
+        {
+            Some(mut p) => {
+                p.value = value.to_owned();
+                p.provenance = Provenance {
+                    source: Source::UserModified,
+                    confidence: 1.0,
+                };
+                p
+            }
+            None => Preference {
+                id: phosk_id::PreferenceId::new(),
+                key: key.to_owned(),
+                value: value.to_owned(),
+                surface: String::new(),
+                stored_on_device: true,
+                provenance: Provenance {
+                    source: Source::UserModified,
+                    confidence: 1.0,
+                },
+            },
+        };
+        self.store.put(Bucket::Preference, key, &pref).await
+    }
+
+    async fn reset_preference(&self, key: &str, default_value: &str) -> Result<(), PhoskError> {
+        let pref = match self
+            .store
+            .get::<Preference>(Bucket::Preference, key)
+            .await?
+        {
+            Some(mut p) => {
+                p.value = default_value.to_owned();
+                p.provenance = Provenance {
+                    source: Source::RuleGenerated,
+                    confidence: 1.0,
+                };
+                p
+            }
+            None => Preference {
+                id: phosk_id::PreferenceId::new(),
+                key: key.to_owned(),
+                value: default_value.to_owned(),
+                surface: String::new(),
+                stored_on_device: true,
+                provenance: Provenance {
+                    source: Source::RuleGenerated,
+                    confidence: 1.0,
+                },
+            },
+        };
+        self.store.put(Bucket::Preference, key, &pref).await
+    }
+
+    // ── AI ─────────────────────────────────────────────────────────────────────
+
+    async fn feed_items(&self) -> Result<Vec<FeedItem>, PhoskError> {
+        self.store.list(Bucket::FeedItem).await
+    }
+
+    async fn dismiss_feed_item(&self, id: &str) -> Result<(), PhoskError> {
+        let all: Vec<FeedItem> = self.store.list(Bucket::FeedItem).await?;
+        let Some(item) = all.into_iter().find(|f| f.id.to_string() == id) else {
+            return Err(PhoskError::NotFound(format!("feed item {id}")));
+        };
+        self.store
+            .delete(Bucket::FeedItem, &item.id.to_string())
+            .await
+    }
+
+    async fn chat_messages(&self, chat: ChatId) -> Result<Vec<Message>, PhoskError> {
+        let all: Vec<Message> = self.store.list(Bucket::Message).await?;
+        Ok(all.into_iter().filter(|m| m.chat_id == chat).collect())
+    }
+
+    async fn latest_chat(&self) -> Result<Option<Chat>, PhoskError> {
+        let all: Vec<Chat> = self.store.list(Bucket::Chat).await?;
+        Ok(all.into_iter().max_by_key(|c| c.started))
+    }
+
+    async fn append_message(&self, m: Message) -> Result<(), PhoskError> {
+        self.store.put(Bucket::Message, &m.id.to_string(), &m).await
+    }
+
+    async fn clear_chat(&self, chat: ChatId) -> Result<(), PhoskError> {
+        let all: Vec<Message> = self.store.list(Bucket::Message).await?;
+        for m in all.into_iter().filter(|m| m.chat_id == chat) {
+            self.store
+                .delete(Bucket::Message, &m.id.to_string())
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ai_suggestions(&self) -> Result<Vec<AiSuggestion>, PhoskError> {
+        self.store.list(Bucket::AiSuggestion).await
+    }
+
+    async fn enqueue_suggestion(&self, s: AiSuggestion) -> Result<SuggestionId, PhoskError> {
+        let id = s.id;
+        self.store
+            .put(Bucket::AiSuggestion, &id.to_string(), &s)
+            .await?;
+        Ok(id)
+    }
+
+    async fn update_suggestion_status(
+        &self,
+        id: SuggestionId,
+        status: &str,
+    ) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        let mut s = self
+            .store
+            .get::<AiSuggestion>(Bucket::AiSuggestion, &key)
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("suggestion {id}")))?;
+        s.status = status.to_owned();
+        self.store.put(Bucket::AiSuggestion, &key, &s).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn naive(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid test date")
+    }
+
+    #[tokio::test]
+    async fn empty_memory_db_has_no_config() {
+        let db = SurrealDb::memory().await.expect("mem engine");
+        assert!(
+            db.budget_config().await.is_err(),
+            "no config before seeding"
+        );
+        assert!(db.categories().await.expect("ok").is_empty());
+    }
+
+    #[tokio::test]
+    async fn seeded_dashboard_matches_the_swiss_seed() {
+        let db = SurrealDb::seeded().await.expect("seeded");
+        let june = db
+            .transactions_between(naive(2026, 6, 1), naive(2026, 6, 30))
+            .await
+            .expect("query ok");
+        assert_eq!(june.len(), 28);
+        let cfg = db.budget_config().await.expect("config");
+        assert_eq!(cfg.monthly_budget.centimes(), 420_000);
+    }
+
+    #[tokio::test]
+    async fn inverted_window_is_rejected() {
+        let db = SurrealDb::seeded().await.expect("seeded");
+        let err = db
+            .transactions_between(naive(2026, 6, 30), naive(2026, 6, 1))
+            .await
+            .expect_err("inverted rejected");
+        assert_eq!(err.code(), "invalid_input");
+    }
+
+    #[tokio::test]
+    async fn usable_as_arc_dyn_database_adapter() {
+        use std::sync::Arc;
+        let db: Arc<dyn DatabaseAdapter> = Arc::new(SurrealDb::seeded().await.expect("seeded"));
+        assert_eq!(
+            db.budget_config()
+                .await
+                .expect("config")
+                .savings_target
+                .centimes(),
+            90_000
+        );
+    }
+
+    /// The **file-backed** prod engine (`kv-surrealkv`): data survives a close +
+    /// re-open, and `file_seeded` is idempotent (the first-run seed guard does not
+    /// re-seed an existing store, and a write made between opens persists).
+    #[tokio::test]
+    async fn file_engine_persists_across_reopen() {
+        let dir = std::env::temp_dir().join(format!("phosk_surreal_test_{}", uuid()));
+        let path = dir.to_string_lossy().into_owned();
+
+        // First open: empty store gets seeded; mutate one record.
+        {
+            let db = SurrealDb::file_seeded(&path).await.expect("first open");
+            assert_eq!(db.categories().await.expect("cats").len(), 8);
+            db.set_preference("currency", "EUR").await.expect("write");
+        }
+        // Re-open the SAME path: the seed is not duplicated and the write survived.
+        {
+            let db = SurrealDb::file_seeded(&path).await.expect("reopen");
+            assert_eq!(
+                db.categories().await.expect("cats").len(),
+                8,
+                "first-run guard did not re-seed"
+            );
+            assert_eq!(
+                db.preference("currency").await.expect("pref").value,
+                "EUR",
+                "the write persisted to disk"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tiny random suffix so concurrent test runs use distinct store dirs
+    /// (the crate forbids the `uuid` dep elsewhere; a nanos-based token suffices).
+    fn uuid() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+}

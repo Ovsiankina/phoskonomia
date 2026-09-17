@@ -1,0 +1,17 @@
+[application]
+# Web is the default target: `dx serve` opens the app in the browser on localhost.
+# The same codebase also builds desktop (`dx serve --platform desktop`) and mobile.
+default_platform = "web"
+
+[web.app]
+title = "Phoskonomia"
+
+[web.resource]
+# All styles/scripts are injected from Rust via document::Stylesheet/Script with
+# asset!()'d (content-hashed) URLs — see src/main.rs — so nothing is declared here.
+style = []
+script = []
+
+[web.resource.dev]
+style = []
+script = []

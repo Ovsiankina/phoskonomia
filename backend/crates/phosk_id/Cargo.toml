@@ -1,0 +1,17 @@
+[package]
+name = "phosk_id"
+version.workspace = true
+edition.workspace = true
+
+# Typed-id newtypes (ADR-008 identity, L0 foundation). Each id wraps a uuid::Uuid
+# and is opaque inside the domain; at the edge it becomes a String. No internal
+# deps — sits below phosk_model, depended on by it and the adapters.
+[dependencies]
+uuid = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

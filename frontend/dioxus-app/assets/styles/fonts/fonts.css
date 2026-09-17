@@ -1,0 +1,35 @@
+/* ============================================================
+   OSCILLOCORE — Font faces
+   Pilowlava  → display / numerals / headers / tags (organic, molten)
+   VG5000     → body / UI / data (CRT pixel-grotesque, 1980s Philips VG5000)
+   ============================================================ */
+
+@font-face {
+  font-family: "Pilowlava";
+  src: url("Pilowlava-Regular.woff2") format("woff2"),
+       url("Pilowlava-Regular.woff") format("woff"),
+       url("Pilowlava-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Atome = alternate molten cut with connected lava ligatures. Decorative. */
+@font-face {
+  font-family: "Pilowlava Atome";
+  src: url("Pilowlava-Atome.woff2") format("woff2"),
+       url("Pilowlava-Atome.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "VG5000";
+  src: url("VG5000-Regular.woff2") format("woff2"),
+       url("VG5000-Regular.woff") format("woff"),
+       url("VG5000-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

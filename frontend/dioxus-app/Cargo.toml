@@ -1,0 +1,107 @@
+[package]
+name = "dioxus-app"
+version = "0.1.0"
+authors = ["ovsiankina <ovsiankina@proton.me>"]
+edition = "2021"
+
+[dependencies]
+# Fullstack: one codebase -> web (default) + desktop + mobile. `router` for the
+# 7 routes. The client compiles to WASM (web) or native (desktop/mobile) — no JS.
+# Pinned to =0.7.6 to match the installed `dx` CLI (dx and the dioxus crate must
+# share a minor+patch line, else `dx build` aborts with a version-mismatch error).
+dioxus = { version = "=0.7.6", features = ["fullstack", "router"] }
+
+# Shared domain types — pure Rust, compile to WASM too, so the UI renders the real
+# Money newtype on every target (no JSON float, even on web).
+phosk_core = { path = "../../backend/crates/phosk_core" }
+phosk_model = { path = "../../backend/crates/phosk_model" }
+
+# serde: the `mod data` view structs are the #[server] wire form. They derive
+# Serialize/Deserialize and use `#[serde(with = "phosk_model::money_centimes")]`
+# so `Money` crosses as exact i64 centimes (never a CHF float). Needed on BOTH
+# sides of every server fn (server serializes, client deserializes), so it is a
+# plain (non-optional, all-target) dependency.
+serde = { workspace = true }
+
+# Server-only service crates: used ONLY inside `#[server]` fns, compiled into the
+# native/server side, never the WASM client bundle. Gated behind `server-deps`.
+phosk_insights = { path = "../../backend/crates/phosk_insights", optional = true }
+phosk_ledger = { path = "../../backend/crates/phosk_ledger", optional = true }
+phosk_planning = { path = "../../backend/crates/phosk_planning", optional = true }
+phosk_recurring = { path = "../../backend/crates/phosk_recurring", optional = true }
+phosk_debts = { path = "../../backend/crates/phosk_debts", optional = true }
+phosk_ai = { path = "../../backend/crates/phosk_ai", optional = true }
+# The L2 database PORT trait — the seam through which the server context (`Session`)
+# hands feature services a `&dyn DatabaseAdapter`. Server-only (the trait and the
+# concrete adapter live behind `server-deps`; neither enters the WASM client bundle).
+phosk_adapter_db = { path = "../../backend/crates/phosk_adapter_db", optional = true }
+# Server-only too: the seeded in-memory adapter the #[server] fns drive the REAL
+# feature-service logic against, plus `chrono` for resolving the seeded "today" /
+# cycle labels. Both live behind `server-deps` (the WASM client never runs a
+# server-fn body, so neither enters the client bundle).
+phosk_db_memory = { path = "../../backend/crates/phosk_db_memory", optional = true }
+chrono = { workspace = true, optional = true }
+
+# ── COMPOSITION ROOT: concrete L3 adapters (ADR-010) ──────────────────────────
+# Named ONLY here and used ONLY inside `src/data/mod.rs`'s `composition` module,
+# all behind `server-deps`. The WASM client (`web`) does NOT enable `server-deps`,
+# so neither these crates nor their vendor deps (surrealdb, reqwest, chacha20,
+# rand) ever reach the client bundle. The `#[server]` fn bodies see only the L2
+# PORT trait objects via `Session`; they never import a concrete adapter.
+# The L2 PORT trait crates (so `Session` can expose `&dyn LlmAdapter`/OCR/storage):
+phosk_adapter_llm = { path = "../../backend/crates/phosk_adapter_llm", optional = true }
+phosk_adapter_ocr = { path = "../../backend/crates/phosk_adapter_ocr", optional = true }
+phosk_adapter_storage = { path = "../../backend/crates/phosk_adapter_storage", optional = true }
+# DB: file-backed embedded SurrealDB (PHOSK_DB=surreal), kept in lockstep with memory.
+phosk_db_surreal = { path = "../../backend/crates/phosk_db_surreal", optional = true }
+# LLM: local Ollama (default qwen3.6:35b-custom at localhost:11434).
+phosk_llm_ollama = { path = "../../backend/crates/phosk_llm_ollama", optional = true }
+# STORAGE: encrypted-at-rest photo store under PHOSK_DATA_DIR.
+phosk_storage_fs = { path = "../../backend/crates/phosk_storage_fs", optional = true }
+# OCR: PaddleOCR / Ollama-vision, falling back to the deterministic fake when
+# neither is reachable on this machine.
+phosk_ocr_paddle = { path = "../../backend/crates/phosk_ocr_paddle", optional = true }
+phosk_ocr_vision = { path = "../../backend/crates/phosk_ocr_vision", optional = true }
+# tokio: the composition root caches the assembled adapter stack in a
+# `tokio::sync::OnceCell` (async one-time init: open the SurrealDB file / probe
+# OCR reachability exactly once per process). Needs the `sync` feature for
+# `OnceCell` (the workspace dep only carries `macros, rt`). Server-only; never in
+# the WASM client.
+tokio = { version = "1", features = ["sync"], optional = true }
+
+# WASM client (`web`) only: the shared domain types (`phosk_id`/`phosk_model`)
+# pull in `uuid` with v4, which needs a randomness source to even COMPILE on
+# `wasm32-unknown-unknown`. The client only ever DESERIALIZES ids off the wire
+# (it never mints a v4), but the crate still won't build without a backend — so
+# enable uuid's browser `js` source for the wasm target. This is a client-target
+# build requirement, not a server concern (the native server already has OsRng).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop", "server-deps"]
+mobile = ["dioxus/mobile", "server-deps"]
+server = ["dioxus/server", "server-deps"]
+server-deps = [
+    "dep:phosk_insights",
+    "dep:phosk_ledger",
+    "dep:phosk_planning",
+    "dep:phosk_recurring",
+    "dep:phosk_debts",
+    "dep:phosk_ai",
+    "dep:phosk_adapter_db",
+    "dep:phosk_db_memory",
+    "dep:chrono",
+    # composition root: L2 ports + concrete L3 adapters + the OnceCell runtime dep.
+    "dep:phosk_adapter_llm",
+    "dep:phosk_adapter_ocr",
+    "dep:phosk_adapter_storage",
+    "dep:phosk_db_surreal",
+    "dep:phosk_llm_ollama",
+    "dep:phosk_storage_fs",
+    "dep:phosk_ocr_paddle",
+    "dep:phosk_ocr_vision",
+    "dep:tokio",
+]

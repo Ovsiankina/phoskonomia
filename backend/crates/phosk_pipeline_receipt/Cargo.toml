@@ -1,0 +1,56 @@
+# phosk_pipeline_receipt — the zero-trust receipt-intake pipeline (ADR-011,
+# philosophy #4 "queued photos are hostile input"). An L6 orchestration crate: it
+# composes the L2 PORTS (OCR, LLM, PhotoStorage, DatabaseAdapter) + the AI
+# approval gate to turn one untrusted photo into an enqueued, human-approval
+# Receipt proposal — NEVER an auto-write to the ledger.
+#
+# Layering (ADR-010): depends ONLY on PORT trait crates + foundation crates +
+# phosk_ai (the approval-gate shapes). It NEVER imports a concrete adapter
+# (phosk_db_*, phosk_ocr_*, phosk_llm_*, phosk_storage_*); those are wired in only
+# at a bin/* composition root / the Dioxus server context. The concrete adapters
+# appear here ONLY as dev-dependencies' fakes (FakeOcr/FakeLlm/InMemoryStorage/
+# MemoryDb) to drive hermetic tests with no live model, OCR service, or disk.
+[package]
+name = "phosk_pipeline_receipt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_id = { path = "../phosk_id" }
+phosk_model = { path = "../phosk_model" }
+# The four L2 PORTs the pipeline orchestrates. It holds them as `&dyn _`; a
+# technology swap is a new adapter impl wired at composition, never an edit here.
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+phosk_adapter_ocr = { path = "../phosk_adapter_ocr" }
+phosk_adapter_llm = { path = "../phosk_adapter_llm" }
+phosk_adapter_storage = { path = "../phosk_adapter_storage" }
+# phosk_ai: the effect-typed approval gate. The pipeline's terminal step builds an
+# AiSuggestion proposal and ENQUEUES it (db.enqueue_suggestion) — it reuses the
+# AI crate's CONFIDENCE_THRESHOLD so the coral-flag rule is defined in one place.
+phosk_ai = { path = "../phosk_ai" }
+# infer: pure-Rust magic-byte MIME sniff for the hostile-input validation gate.
+infer = { workspace = true }
+# sha2: SHA-256 content hash of the validated bytes = the idempotency key.
+sha2 = { workspace = true }
+# chrono: the `as_of` capture date stamped on the Receipt + CorrectionEvent-free
+# provenance.
+chrono = { workspace = true }
+# serde / serde_json: the LLM constrained-output path crosses a serde_json::Value
+# JSON Schema; the structured receipt-extraction result is parsed from it.
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# tracing (debug-only): instrument the pipeline seams (validate / store / ocr /
+# llm / enqueue). release_max_level_off compiles every macro out of release.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# The PORT fakes — the whole pipeline runs hermetically against these, proving the
+# layering (only ports are needed) and the security invariants, with no live
+# model / OCR service / disk.
+phosk_db_memory = { path = "../phosk_db_memory" }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

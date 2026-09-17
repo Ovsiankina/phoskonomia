@@ -1,0 +1,58 @@
+# phosk_ai — the AI read-slice + spine SERVICE crate (ADR-002 L5 feature crate).
+#
+# Composes the shared AiPanel read-model (live feed + chat transcript + model
+# status) and the dashboard AI insight one-liner from the PORT, and exposes the
+# suggestion/feed/chat write skeletons. The real Ollama/GEMMA4 wiring (LlmAdapter,
+# tool registry, approval queue) is deferred — see backend-features-todo.md §7;
+# today this crate is a SKELETON (todo!() bodies, no computation).
+#
+# Layering (ADR-010): every service fn takes a `&dyn DatabaseAdapter` (the PORT)
+# and depends only on the PORT trait crate + the foundation crates (core, model,
+# id) — NEVER on a concrete adapter. `phosk_db_memory` is a *dev*-dependency,
+# used only to drive tests against the deterministic Swiss seed.
+[package]
+name = "phosk_ai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_id = { path = "../phosk_id" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+# phosk_adapter_llm: the L2 LlmAdapter PORT. The AI text/structured-generation
+# paths (chat reply, narrative insight, auto-categorize, suggestions) take a
+# `&dyn LlmAdapter` so composition injects the real Ollama adapter; feature code
+# never imports a concrete LLM adapter (ADR-010). The constrained-output path
+# (generate_structured) is how AI write-tools get schema-checked JSON BEFORE the
+# effect-typed gate enqueues it for approval — never an auto-write.
+phosk_adapter_llm = { path = "../phosk_adapter_llm" }
+# serde: the DTOs are the in-process #[server] wire form — money serialized as
+# exact i64 centimes (phosk_model::money_centimes), keys renamed to the
+# frontend's camelCase contract.
+serde = { workspace = true }
+# serde_json: the LlmAdapter PORT's constrained-output path crosses a
+# vendor-neutral `serde_json::Value` (the JSON Schema in, the schema-valid JSON
+# out). The AI write-tools build their schemas + read the model's structured
+# answer here. (Also the in-process #[server] wire form for the AI DTOs.)
+serde_json = { workspace = true }
+# chrono: NaiveDate is the `as_of` parameter of the dashboard-insight service.
+chrono = { workspace = true }
+# tracing (debug-only): instrument the read-model composition. release_max_level_off
+# keys off debug_assertions, so spans/events vanish in release. Never installs a
+# subscriber — this is a library.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# phosk_db_memory: the concrete in-memory adapter, used ONLY in tests to exercise
+# the read-model against the deterministic Swiss seed.
+phosk_db_memory = { path = "../phosk_db_memory" }
+# phosk_adapter_llm (dev): the FakeLlm test double drives the LLM-backed paths
+# (chat reply, narrative insight, auto-categorize, suggestions) hermetically, with
+# no live model. The real Ollama adapter is wired only at composition, never here.
+phosk_adapter_llm = { path = "../phosk_adapter_llm" }
+# tokio: test-only runtime to drive the async PORT via `#[tokio::test]`.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

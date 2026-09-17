@@ -1,0 +1,36 @@
+[package]
+name = "phosk_ocr_paddle"
+version.workspace = true
+edition.workspace = true
+
+# The CONCRETE L3 PaddleOCR adapter: an `OcrAdapter` impl over a PaddleOCR HTTP
+# microservice (default `http://localhost:8868`, override via `PHOSK_OCR_URL`;
+# ADR-010 layering). It is a *composition-root-only* dependency — wired in by
+# `bin/*` or the Dioxus server context, NEVER imported by a feature crate. Hence
+# it is the one place reqwest / the raw PaddleOCR response JSON live: vendor types
+# die here and only the L2 port's vendor-neutral shapes (`OcrResult`,
+# `PhoskError`) cross out.
+[dependencies]
+phosk_adapter_ocr = { path = "../phosk_adapter_ocr" }
+phosk_core = { path = "../phosk_core" }
+# reqwest: the HTTP transport to the PaddleOCR `/predict/ocr_system` endpoint.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# base64: PaddleOCR's hubserving API takes the image as a base64-encoded string in
+# a JSON body. Pure-Rust, no system deps.
+base64 = "0.22"
+# tracing: debug-only (release_max_level_off compiles the macros out of release).
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# Test-only runtime. The gated live smoke test does real network I/O, so it needs
+# the multi-threaded reactor (`rt-multi-thread`) plus the `net`/`time` drivers
+# reqwest relies on — beyond the bare `macros, rt` the workspace tokio dev-dep
+# declares.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

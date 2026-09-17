@@ -1,0 +1,39 @@
+# phosk_settings — the preferences / user-settings service crate (ADR-002 L5).
+#
+# This crate is the SERVICE that backs the `/config` page reads and writes:
+# listing preferences, a settings summary, setting/resetting a preference value,
+# and the canonical `momentum_baseline_cycles` accessor that every analytics /
+# signal service reads to size its trailing-N momentum baseline (build-contract §6).
+#
+# Layering (ADR-010): it takes a `&dyn DatabaseAdapter` (the PORT) and depends
+# only on the PORT trait crate + the foundation crates — NEVER on a concrete
+# adapter. `phosk_db_memory` is a *dev*-dependency, used only to drive the tests
+# against the deterministic Swiss seed.
+[package]
+name = "phosk_settings"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+phosk_id = { path = "../phosk_id" }
+# serde: the DTOs are the wire form the Dioxus `#[server]` fns return — camelCase
+# keys, plain string preference values.
+serde = { workspace = true }
+# tracing (debug-only): instrument the service fns. release_max_level_off keys off
+# debug_assertions, so spans/events vanish in release. Never installs a subscriber.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# phosk_db_memory: the concrete in-memory adapter, used ONLY in tests to exercise
+# the service against the deterministic Swiss seed.
+phosk_db_memory = { path = "../phosk_db_memory" }
+# serde_json: assert the exact serialized JSON shape / camelCase keys.
+serde_json = { workspace = true }
+# tokio: test-only runtime to drive the async PORT via `#[tokio::test]`.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

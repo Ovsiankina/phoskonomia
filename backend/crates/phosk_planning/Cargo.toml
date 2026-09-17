@@ -1,0 +1,45 @@
+# phosk_planning — the cycle-budgeting bounded context (ADR-002 L5 feature crate).
+#
+# A SERVICE over the DatabaseAdapter PORT (ADR-010 gateway): it takes a
+# `&dyn DatabaseAdapter` and computes the dashboard's headline cycle KPIs
+# (`GET /cycle/current/totals`) — budget vs. spent, savings progress, pace, and
+# the last-cycle comparison. Per ADR-010 layering it depends on the PORT trait
+# crate (`phosk_adapter_db`) and the domain/foundation crates — NEVER on a
+# concrete adapter. `phosk_db_memory` is a *dev*-dependency only, used to drive
+# the tests against the deterministic Swiss seed.
+[package]
+name = "phosk_planning"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+# phosk_model: the budgets/alerts service DTOs serialize their Money fields via
+# `phosk_model::money_centimes` (the locked exact-i64-centimes wire form).
+phosk_model = { path = "../phosk_model" }
+# serde: the new feature DTOs (budgets, alerts) derive Serialize/Deserialize and
+# carry `#[serde(rename_all = "camelCase")]`, mirroring the Dioxus view structs.
+serde = { workspace = true }
+# chrono: NaiveDate appears in an internal helper's signature (the previous-cycle
+# date math) — a real (non-dev) dependency, even though the public `totals` API
+# takes a `CycleWindow` and surfaces no chrono type.
+chrono = { workspace = true }
+# tracing (debug-only): instrument the service + its compute steps. The
+# release_max_level_off feature keys off debug_assertions, so spans/events vanish
+# in release builds (the project's "tracing only in debug" rule). Never installs
+# a subscriber — this is a library.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# phosk_db_memory: the concrete in-memory adapter, used ONLY in tests to exercise
+# the service against the deterministic Swiss seed (ADR-010: a feature crate may
+# depend on a concrete adapter for its own tests, never in its public surface).
+phosk_db_memory = { path = "../phosk_db_memory" }
+# tokio: test-only runtime to drive the async PORT via `#[tokio::test]`.
+tokio = { workspace = true }
+# serde_json: assert the new DTOs round-trip / serialize to the camelCase wire shape.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

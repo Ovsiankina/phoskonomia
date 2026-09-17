@@ -1,0 +1,41 @@
+# phosk_ledger — the spending-record bounded context (ADR-002 L5 feature crate).
+#
+# A SERVICE over the DatabaseAdapter PORT (ADR-010 gateway): it takes a
+# `&dyn DatabaseAdapter` and answers the dashboard's spend-aggregation reads
+# (top shops, daily spend series). Per ADR-010 layering it depends on the PORT
+# trait crate (`phosk_adapter_db`) and the domain/foundation crates — NEVER on a
+# concrete adapter. `phosk_db_memory` is a *dev*-dependency only, used to drive
+# the tests against the deterministic Swiss seed.
+[package]
+name = "phosk_ledger"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+# phosk_id: typed id newtypes (LineItemId &c.) used in write-path signatures.
+phosk_id = { path = "../phosk_id" }
+# serde: the feature DTOs are the wire form (camelCase, money as exact centimes).
+serde = { workspace = true }
+# chrono: NaiveDate is the `as_of` parameter of the list/signal service fns.
+chrono = { workspace = true }
+# tracing (debug-only): instrument the service + its compute steps. The
+# release_max_level_off feature keys off debug_assertions, so spans/events vanish
+# in release builds (the project's "tracing only in debug" rule). Never installs
+# a subscriber — this is a library.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# phosk_db_memory: the concrete in-memory adapter, used ONLY in tests to exercise
+# the service against the deterministic Swiss seed (ADR-010: a feature crate may
+# depend on a concrete adapter for its own tests, never in its public surface).
+phosk_db_memory = { path = "../phosk_db_memory" }
+# tokio: test-only runtime to drive the async PORT via `#[tokio::test]`.
+tokio = { workspace = true }
+# serde_json: assert the exact serialized JSON / camelCase keys / centime form.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

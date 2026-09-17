@@ -1,0 +1,47 @@
+/* Shared styling for Oscillocore design-system preview cards.
+   Each card is ~700px wide, dark void, minimal chrome — specimens shown direct. */
+@import url("../fonts/fonts.css");
+@import url("../colors_and_type.css");
+@import url("../assets/osc-crt.css");
+
+html, body { margin: 0; }
+body.card {
+  background: #06040c;
+  color: var(--ink);
+  font-family: var(--font-body);
+  padding: 22px 24px;
+  position: relative;
+  overflow: hidden;
+}
+/* faint grid wash on every card for brand continuity */
+body.card::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(rgba(58,47,122,.18) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(58,47,122,.18) 1px, transparent 1px);
+  background-size: 39px 39px;
+}
+body.card::after { /* scanline mesh — soft beam rows + faint vertical aperture grille */
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 40;
+  background:
+    repeating-linear-gradient(0deg, rgba(200,208,248,.07) 0, rgba(150,158,205,.022) .9px, rgba(0,0,0,0) 1.6px, rgba(3,1,11,.34) 2.5px, rgba(0,0,0,0) 3.1px),
+    repeating-linear-gradient(90deg, rgba(255,72,86,.045) 0 1px, rgba(66,255,150,.04) 1px 2px, rgba(86,120,255,.05) 2px 3px);
+}
+.card > * { position: relative; z-index: 1; }
+
+.kicker {
+  font-family: var(--font-body); font-size: 10px; letter-spacing: .3em;
+  text-transform: uppercase; color: var(--indigo); margin: 0 0 14px;
+  text-shadow: 0 0 8px rgba(106,95,192,.4);
+}
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: stretch; }
+.col { display: flex; flex-direction: column; gap: 10px; }
+.spread { display: flex; gap: 0; }
+
+/* swatch */
+.sw { flex: 1; min-width: 0; height: 76px; border-radius: 2px; position: relative; display: flex; align-items: flex-end; padding: 7px 8px; }
+.sw .nm { font-size: 10px; letter-spacing: .04em; color: var(--ink); opacity: .92; }
+.sw .hx { font-size: 9px; letter-spacing: .02em; color: rgba(255,255,255,.55); margin-left: auto; }
+.sw.dark .nm { color: var(--ink); }
+.swatch-cap { display: flex; flex-direction: column; gap: 2px; }
+.swatch-cap .hx { margin: 0; color: var(--ink-3); }

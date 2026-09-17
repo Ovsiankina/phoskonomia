@@ -1,0 +1,99 @@
+# Phoskonomia — unified workspace (ADR-002 modular monolith + Dioxus desktop UI).
+#
+# ONE workspace; frontend and backend stay SEPARATE crates. Per the 2026-06 decision
+# to drop the hand-written REST boundary, the UI is Dioxus *fullstack* — one Rust
+# codebase shipping web (default), desktop, and mobile, with NO JavaScript/npm (the
+# client is Rust->WASM). Front<->back is `#[server]` functions: you call a plain Rust
+# async fn with shared types and the LSP checks it end-to-end. On desktop/mobile that
+# call is in-process (no wire); on web Dioxus auto-generates the transport (you never
+# hand-write JSON or routes). `Money` crosses as the real i64-centime newtype.
+#
+# Backend crates grow in per ADR-005 (grow-into-crates). The frontend lives in
+# frontend/dioxus-app. The React prototype in frontend/app/ is the migration source
+# (and the fidelity reference) until the port reaches parity, then it is deleted.
+[workspace]
+resolver = "3"
+members = [
+    "backend/crates/*",
+    "backend/bin/*",
+    "frontend/dioxus-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# [workspace.dependencies] — declared here as each crate's TDD needs them.
+[workspace.dependencies]
+# serde: domain types round-trip for the in-memory seed / persistence boundary
+# (NOT the CHF-float HTTP edge — that conversion stays at the edge, ADR-010).
+serde = { version = "1", features = ["derive"] }
+# chrono: NaiveDate for transaction dates; `serde` feature for date round-trips.
+chrono = { version = "0.4", features = ["serde"] }
+# uuid: backs the typed-id newtypes in phosk_id (ADR-008 identity). v4 = random
+# ids; serde = transparent string round-trip at the seed / persistence boundary.
+uuid = { version = "1", features = ["v4", "serde"] }
+# serde_json: test-only, to assert the JSON round-trips / exact-centime wire form.
+serde_json = "1"
+# async-trait: the DatabaseAdapter port is one fat *async* trait that must stay
+# object-safe (`Arc<dyn DatabaseAdapter + Send + Sync>`, ADR-000) — async-trait
+# desugars `async fn` in the trait to a boxed future so `dyn` works.
+async-trait = "0.1"
+# tokio: test-only runtime to drive the async port's `#[tokio::test]` cases.
+# Libraries never spawn a runtime in production; it is a dev-dependency only.
+tokio = { version = "1", features = ["macros", "rt"] }
+# reqwest: HTTP client used ONLY by concrete L3 adapters that talk to a network
+# service (the Ollama LLM at localhost:11434). `json` = serde (de)serialization of
+# request/response bodies; `rustls-tls` keeps the TLS stack pure-Rust (no system
+# OpenSSL). Never a dependency of an L2 port or a feature crate — reqwest/HTTP
+# types die at the adapter (ADR-010 layering).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# surrealdb: the EMBEDDED engine backing the second `DatabaseAdapter` impl
+# (phosk_db_surreal, ADR-005/010 L3). No external server — tests use the in-memory
+# `kv-mem` engine, the prod path uses the file-backed `kv-surrealkv` engine. A
+# composition-root / adapter dependency ONLY; the surreal `Thing`/query layer dies
+# inside phosk_db_surreal and never leaks past the L2 PORT.
+surrealdb = { version = "2", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
+# tracing: debug-only structured spans/events at adapter seams. The pinned
+# `release_max_level_off` feature compiles every tracing macro OUT of release
+# builds — zero runtime cost and zero telemetry in shipped binaries (the strict
+# zero-telemetry rule), tracing exists only as a debug-build diagnostic aid.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+# chacha20poly1305: AEAD for encryption-at-rest of receipt photos (ADR §0
+# security: photos encrypted at rest). Pure-Rust, audited, constant-time;
+# misuse-resistant XChaCha20-Poly1305 (24-byte random nonce, no counter state to
+# track). The L3 phosk_storage_fs adapter owns the key + nonce handling — the
+# cipher never crosses the PhotoStorage port.
+chacha20poly1305 = "0.10"
+# rand: cryptographically-secure randomness for the per-blob nonce and the
+# data-key generation in phosk_storage_fs (OsRng). Pinned to the 0.8 line that
+# the RustCrypto AEAD `rand_core` 0.6 boundary expects.
+rand = "0.8"
+# infer: pure-Rust magic-byte sniffer — the libmagic-style content-signature
+# check the zero-trust receipt-intake pipeline runs on hostile photo bytes
+# (ADR-011). No FFI, no system libmagic dependency; it inspects leading bytes
+# only, so a forged extension can never get a non-image past validation.
+infer = { version = "0.19", default-features = false }
+# sha2: content-hash (SHA-256) of the validated photo bytes — the idempotency key
+# for the intake pipeline (ADR-010), so re-submitting the same receipt photo is a
+# no-op rather than a duplicate enqueue. Pure-Rust RustCrypto, constant-time.
+sha2 = "0.10"
+
+# Lint policy (backend crates opt in with `[lints]\nworkspace = true`; the frontend
+# crate does NOT opt in — UI code keeps default lint levels). `unwrap`/`expect`/`panic`
+# are DENIED in production backend code — a financial backend must surface every
+# failure through `phosk_core::error::PhoskError`, never paper over it with a panic.
+# `expect`/`unwrap` stay allowed in tests via clippy.toml.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_in_result = "deny"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+must_use_candidate = "allow"            # flags nearly every pure getter — noise for internal crates
+missing_errors_doc = "allow"            # error conditions are self-evident via the single PhoskError taxonomy
+too_long_first_doc_paragraph = "allow"  # stylistic; our module docs lead with a full sentence on purpose
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

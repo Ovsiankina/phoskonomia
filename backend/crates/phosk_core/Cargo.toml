@@ -1,0 +1,19 @@
+[package]
+name = "phosk_core"
+version.workspace = true
+edition.workspace = true
+
+# Foundation crate (ADR-002 L0). Deps land as features need them (ADR-005).
+# thiserror: the one error taxonomy (ADR-010). chrono: the cycle/period engine.
+#
+# tracing with `release_max_level_off`: the feature keys off `debug_assertions`,
+# so every span/event below compiles to a no-op in release builds — instrumentation
+# is "debug-mode only" with zero release cost (per project convention).
+[dependencies]
+thiserror = "2"
+chrono = "0.4"
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+# Enforce the workspace lint policy (deny unwrap/expect/panic; pedantic + nursery).
+[lints]
+workspace = true

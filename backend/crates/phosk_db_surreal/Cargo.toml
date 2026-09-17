@@ -1,0 +1,40 @@
+# phosk_db_surreal — the embedded-SurrealDB `DatabaseAdapter` (ADR-005/010, L3).
+#
+# A SECOND, swappable concrete impl of the `phosk_adapter_db` PORT, kept in
+# LOCKSTEP with `phosk_db_memory` via the shared `contract` suite. It runs an
+# EMBEDDED SurrealDB (no external server): tests use the in-memory `kv-mem`
+# engine, the prod path opens a file-backed `kv-surrealkv` store. Per ADR-010 it
+# depends only on the PORT + domain + the surreal driver; it is wired in ONLY by
+# a `bin/*` / Dioxus-server composition root and NEVER imported by a feature
+# crate. The surreal `Thing` and query layer are confined ENTIRELY to this crate
+# (the `thing` module) — typed `phosk_id` ids cross the boundary, never `Thing`.
+[package]
+name = "phosk_db_surreal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+phosk_id = { path = "../phosk_id" }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# surrealdb embedded engine (kv-mem for tests, kv-surrealkv for the file path).
+surrealdb = { workspace = true }
+# tracing (debug-only): instrument adapter queries; release_max_level_off keys
+# off debug_assertions so spans/events vanish from release builds.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# tokio: multi-threaded runtime — the embedded surreal engine spawns background
+# tasks, so the bare `macros, rt` current-thread runtime is not enough.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+# Re-list the PORT crate with the `contract` feature so this adapter runs the
+# SAME shared conformance suite as `phosk_db_memory` (ADR: lockstep).
+phosk_adapter_db = { path = "../phosk_adapter_db", features = ["contract"] }
+
+[lints]
+workspace = true

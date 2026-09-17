@@ -1,0 +1,33 @@
+# phosk_db_memory — the in-memory `DatabaseAdapter` (ADR-005, L3 concrete adapter).
+#
+# A swappable, dependency-free `MemoryDb` impl of the `phosk_adapter_db` PORT,
+# used for cheap test mocking and to drive the read-only dashboard slice from a
+# deterministic Swiss seed. Per ADR-010 it depends on the PORT trait crate and
+# the domain, never the other way round; it is wired in ONLY by a `bin/*`
+# composition root and never imported by feature crates.
+[package]
+name = "phosk_db_memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+phosk_id = { path = "../phosk_id" }
+chrono = { workspace = true }
+# async-trait: implement the object-safe async PORT trait (ADR-000).
+async-trait = { workspace = true }
+# tracing (debug-only): instrument adapter queries; the release_max_level_off
+# feature keys off debug_assertions, so spans/events vanish in release builds.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# tokio: test-only runtime to drive the async adapter via `#[tokio::test]`.
+tokio = { workspace = true }
+# Re-list the PORT crate with the `contract` feature so tests can run the shared
+# conformance suite (ADR: memory + surreal kept in lockstep on the SAME seed).
+phosk_adapter_db = { path = "../phosk_adapter_db", features = ["contract"] }
+
+[lints]
+workspace = true

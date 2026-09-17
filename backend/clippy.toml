@@ -1,0 +1,5 @@
+# Workspace clippy config. The `unwrap_used` / `expect_used` denials in
+# [workspace.lints.clippy] (Cargo.toml) apply to PRODUCTION code only — test code
+# may use `unwrap()`/`expect("…")` freely so assertions stay terse.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

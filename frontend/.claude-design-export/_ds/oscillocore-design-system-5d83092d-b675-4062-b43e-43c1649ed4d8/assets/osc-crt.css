@@ -1,0 +1,246 @@
+/* ============================================================================
+   OSCILLOCORE · osc-crt.css
+   The permanent CRT skin: scanlines + vignette + HUD chrome.
+   These overlays must be present on EVERY Oscillocore surface.
+
+     <div class="osc-scan"></div>     fixed scanline veil (multiply)
+     <div class="osc-vig"></div>      fixed corner vignette
+   Both are pointer-events:none and sit at the very top of the z-stack.
+
+   Pure-CSS grid backdrop for surfaces that don't run the live canvas scanner:
+     <div class="osc-gridbg"></div>
+   ============================================================================ */
+
+.osc-scan {
+  position: fixed; inset: 0; pointer-events: none; z-index: 60;
+  /* A real tube's skin is a woven mesh of two crossed phosphor structures —
+     not flat lines:
+       · APERTURE GRILLE — fine vertical R/G/B phosphor stripes (Trinitron).
+       · SCANLINES — horizontal beam rows with a SOFT intensity falloff: a
+         faint lit centre (so they read on the near-black void) ramping into
+         dark gaps (so they read over bright neon). The soft ramp is what
+         makes them look like a beam, not a ruler. */
+  background:
+    repeating-linear-gradient(0deg,
+      rgba(204,212,250,.085) 0,
+      rgba(150,158,205,.028) 0.9px,
+      rgba(0,0,0,0)          1.6px,
+      rgba(3,1,11,.42)       2.5px,
+      rgba(0,0,0,0)          3.1px),
+    repeating-linear-gradient(90deg,
+      rgba(255,72,86,.055)  0 1px,
+      rgba(66,255,150,.05)  1px 2px,
+      rgba(86,120,255,.06)  2px 3px);
+}
+
+.osc-vig {
+  position: fixed; inset: 0; pointer-events: none; z-index: 60;
+  /* Curved-tube vignette: a gentle barrel darkening that only bites at the
+     corners (so the blueprint grid survives across the field) plus a faint
+     phosphor sheen near the top where the glass catches light. */
+  background:
+    radial-gradient(135% 130% at 50% 50%, transparent 56%, rgba(3,1,10,.42) 84%, rgba(1,0,6,.86) 100%),
+    radial-gradient(72% 48% at 50% 5%, rgba(152,152,205,.045), transparent 62%);
+}
+
+/* Optional faint flicker — tasteful, slow. Disabled under reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .osc-scan.osc-flicker { animation: oscFlicker 5.5s steps(60) infinite; }
+}
+@keyframes oscFlicker { 0%,100% { opacity: 1; } 50% { opacity: .94; } 96% { opacity: .88; } }
+
+/* ---- Pure-CSS 39px blueprint grid (when not using the canvas scanner) ---- */
+.osc-gridbg {
+  position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background-color: #06040c;
+  background-image:
+    linear-gradient(rgba(58,47,122,.30) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(58,47,122,.30) 1px, transparent 1px);
+  background-size: 39px 39px;
+}
+.osc-gridbg.osc-framed { box-shadow: inset 0 0 0 2px rgba(86,72,191,.55); }
+
+/* ---- HUD corner cell: a framed Pilowlava glyph, scanner style ---- */
+.osc-cell {
+  position: relative; width: 118px; height: 118px;
+  border: 2px solid #4a3aa8;
+  background: linear-gradient(180deg, rgba(40,28,90,.18), rgba(8,4,18,.05));
+  display: grid; place-items: center; overflow: hidden;
+}
+.osc-cell::before {
+  content: ""; position: absolute; inset: 0;
+  background-image:
+    linear-gradient(#4a3aa8 1px, transparent 1px),
+    linear-gradient(90deg, #4a3aa8 1px, transparent 1px);
+  background-size: 39px 39px; opacity: .45;
+}
+.osc-cell > b {
+  position: relative; font-family: "Pilowlava", "Arial Black", sans-serif; font-weight: 400;
+  font-size: 84px; line-height: 1; color: #ff3b2e;
+  text-shadow: 0 0 4px #ff3b2e, 0 0 14px #ff3b2e, 0 0 30px #ff1e0f;
+  transform: translateY(-4px);
+}
+
+/* ---- Ruled frame: a blueprint panel whose top & left edges carry a fine
+   tick ruler, like graph-paper axes. Reusable container. ---- */
+.osc-ruled {
+  position: relative;
+  border: 2px solid rgba(86,72,191,.6);
+  background-color: rgba(18,11,38,.18);
+  background-image:
+    linear-gradient(rgba(58,47,122,.45) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(58,47,122,.45) 1px, transparent 1px);
+  background-size: 39px 39px;
+}
+.osc-ruled::before { /* top-edge ruler ticks — short, bright, inset past the corner so the two edges never cross */
+  content: ""; position: absolute; left: 8px; right: 0; top: 0; height: 4px; pointer-events: none;
+  background: repeating-linear-gradient(90deg, rgba(160,144,255,.85) 0 1px, transparent 1px 7px);
+}
+.osc-ruled::after { /* left-edge ruler ticks — inset from the top so it doesn't meet the top band */
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 0; width: 4px; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(160,144,255,.85) 0 1px, transparent 1px 7px);
+}
+/* add .osc-ruled.all to also rule the right & bottom edges */
+.osc-ruled.all { box-shadow: none; }
+.osc-ruled.all > .osc-ruled-r { content: ""; position: absolute; right: 0; top: 8px; bottom: 0; width: 4px; pointer-events: none; background: repeating-linear-gradient(0deg, rgba(160,144,255,.85) 0 1px, transparent 1px 7px); }
+.osc-ruled.all > .osc-ruled-b { content: ""; position: absolute; left: 8px; right: 0; bottom: 0; height: 4px; pointer-events: none; background: repeating-linear-gradient(90deg, rgba(160,144,255,.85) 0 1px, transparent 1px 7px); }
+
+/* ---- Readout box: a framed panel with diagonal corner brackets (top-left +
+   bottom-right) and a "legend" label that sits connected into the top edge.
+   Set the accent with .acc-coral / .acc-blue. The legend's background must match
+   the surface behind it (default = the void) so it cuts the frame line cleanly. ---- */
+.osc-readout {
+  position: relative;
+  border: 1.5px solid var(--acc, #fc6a60);
+  background: rgba(10,6,20,.45);
+  padding: 24px 24px 22px;
+  --legend-bg: #06040c;
+}
+.osc-readout.acc-coral { --acc: #fc6a60; }
+.osc-readout.acc-blue  { --acc: #8f7dff; }
+.osc-readout::before { /* top-left: thickened border corner (sits ON the frame) */
+  content: ""; position: absolute; left: -1px; top: -1px; width: 26px; height: 26px;
+  border-left: 3px solid var(--acc, #fc6a60); border-top: 3px solid var(--acc, #fc6a60); pointer-events: none;
+}
+.osc-readout::after { /* bottom-right: thickened border corner */
+  content: ""; position: absolute; right: -1px; bottom: -1px; width: 26px; height: 26px;
+  border-right: 3px solid var(--acc, #fc6a60); border-bottom: 3px solid var(--acc, #fc6a60); pointer-events: none;
+}
+.osc-readout > .legend {
+  position: absolute; top: -16px; left: 16px; z-index: 1;
+  font-family: "Pilowlava", "Arial Black", sans-serif; font-weight: 400; font-size: 26px; line-height: 1;
+  letter-spacing: .02em; color: var(--acc, #fc6a60);
+  background: var(--legend-bg); padding: 0 9px;
+  text-shadow: 0 0 12px color-mix(in srgb, var(--acc, #fc6a60) 45%, transparent);
+}
+
+/* ---- Scanner ruler: a thin vertical spine with SHORT 8px ticks + marker ----
+   Mirrors drawRulers() in the canonical growth scanner: a 2px spine, ticks
+   only 8px wide (b-4 → b+4) every 8px, and a 12px neon marker. */
+.osc-ruler {
+  position: relative; width: 14px; height: 100%;
+}
+.osc-ruler::before { /* the spine — bright blueprint axis */
+  content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px;
+  transform: translateX(-50%); background: rgba(160,144,255,.85);
+}
+.osc-ruler::after { /* short ticks, centered on the spine — kept very short */
+  content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 5px;
+  transform: translateX(-50%);
+  background: repeating-linear-gradient(180deg, rgba(160,144,255,.6) 0 1px, transparent 1px 8px);
+}
+/* optional marker: <span class="osc-ruler-mark"></span> positioned by top: */
+.osc-ruler-mark {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  width: 12px; height: 3px; background: var(--neon); box-shadow: 0 0 8px var(--neon);
+}
+
+/* ============================================================================
+   GLASS — the OFFICIAL surface for content laid over the live scanner.
+   ----------------------------------------------------------------------------
+   The scanner field is intentional and busy. Text must NEVER sit raw on top of
+   a growth shape. When content has to overlap the field, put it on a glass
+   panel: a frosted slab that blurs + darkens whatever mass is behind it so the
+   phosphor text stays legible, while the colour of the shape still bleeds
+   through as a halo. This is the canonical fix — reach for it before moving a
+   shape. (Frame / readout / ruled panels also work; glass is the soft one.)
+
+     <div class="osc-glass"> … legible content … </div>
+
+   Two ingredients do all the work: (a) a nearly-transparent fill (--glass-fill;
+   an opaque fill would waste the compositing pass and kill the blur), and
+   (b) backdrop-filter: blur(--blur-glass). 9px is the canonical radius — exactly
+   what both side panels use in the Phoskonomia app. ALWAYS ship the -webkit- prefix.
+
+   Modifiers:
+     .tint-coral / .tint-blue   warm or cool edge + halo (match the shape behind)
+     .dim                       heavier blur (≈14px) + darker fill, for body-copy regions
+     .soft                      lighter blur (--blur-glass-soft) — large docks read cleaner
+     .hair                      hairline border instead of the 2px frame (large / edge-to-edge)
+   ============================================================================ */
+.osc-glass {
+  position: relative; z-index: 1;
+  background: var(--glass-fill, rgba(8,5,20,.34));   /* translucent — MUST show through */
+  -webkit-backdrop-filter: blur(var(--blur-glass, 9px)) saturate(116%);
+  backdrop-filter: blur(var(--blur-glass, 9px)) saturate(116%);
+  border: var(--bw, 2px) solid rgba(86,72,191,.48);
+  border-radius: 0;
+  box-shadow:
+    inset 0 1px 0 rgba(152,152,205,.10),   /* top phosphor sheen */
+    0 8px 30px rgba(0,0,0,.42);            /* float off the field */
+}
+.osc-glass.dim {
+  background: rgba(6,4,16,.74);
+  -webkit-backdrop-filter: blur(14px) saturate(112%);
+  backdrop-filter: blur(14px) saturate(112%);
+}
+.osc-glass.soft {
+  -webkit-backdrop-filter: blur(var(--blur-glass-soft, 6px)) saturate(116%);
+  backdrop-filter: blur(var(--blur-glass-soft, 6px)) saturate(116%);
+}
+.osc-glass.hair { border-color: var(--hairline); }
+.osc-glass.tint-coral {
+  border-color: rgba(255,94,77,.42);
+  box-shadow: inset 0 1px 0 rgba(255,180,160,.10), 0 0 26px rgba(255,70,48,.16), 0 8px 30px rgba(0,0,0,.42);
+}
+.osc-glass.tint-blue {
+  border-color: rgba(143,125,255,.5);
+  box-shadow: inset 0 1px 0 rgba(180,170,255,.12), 0 0 26px rgba(143,125,255,.16), 0 8px 30px rgba(0,0,0,.42);
+}
+/* Drawers / sheets float over CONTENT, not just the field — give them a heavier fill. */
+.osc-glass.over-content { background: rgba(8,5,20,.97); }
+
+/* ============================================================================
+   FROST — text-legibility glass (canonical, opt-in per box).
+   ----------------------------------------------------------------------------
+   A box that carries running text DIRECTLY over the scanner (transaction rows,
+   filter controls, dashboard readout boxes) gets the SAME blur as the side
+   panels — no saturate, so it matches them exactly. The box must already carry
+   its own translucent fill (e.g. rgba(10,6,20,.4)); frost only adds the blur.
+
+     <div class="trow osc-frost"> … line item over the field … </div>
+
+   Rule of thumb: running text over the canvas → frost at --blur-glass. A bare
+   label or a number with its own glow does not need it.
+
+   PERFORMANCE: backdrop-filter is cheap on a few big panels, costly on dozens of
+   small boxes. Prefer frosting the CONTAINER (one .osc-glass for a whole region)
+   over N children. When rows must each frost (a long scrolling list), keep the
+   radius modest and don't also animate the box. The frost is purely visual, so
+   it is dropped under reduced-motion / low-power without affecting function.
+   ============================================================================ */
+.osc-frost {
+  -webkit-backdrop-filter: blur(var(--blur-glass, 9px));
+  backdrop-filter: blur(var(--blur-glass, 9px));
+}
+@media (prefers-reduced-motion: reduce) {
+  .osc-frost { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+
+/* ---- Parallax shape layer: a canvas that bleeds past the viewport so the
+   drift (OscScanner parallax) never exposes an empty edge. Stack a static CSS
+   grid (.osc-gridbg) BELOW it and content ABOVE it. ---- */
+.osc-shape-layer {
+  position: fixed; inset: -6%; width: 112%; height: 112%;
+  display: block; pointer-events: none; z-index: 0;
+}

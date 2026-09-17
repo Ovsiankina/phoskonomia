@@ -1,0 +1,34 @@
+[package]
+name = "phosk_ocr_vision"
+version.workspace = true
+edition.workspace = true
+
+# The CONCRETE L3 vision-LLM OCR adapter: an `OcrAdapter` impl that transcribes a
+# receipt image with a *vision-capable* Ollama model (env `PHOSK_OCR_VISION_MODEL`)
+# via `/api/generate` with the `images[]` field, asking for text + regions JSON
+# (ADR-008 constrained output / ADR-010 layering). It is the swappable alternative
+# to the PaddleOCR microservice. Composition-root-only: wired in by `bin/*` or the
+# Dioxus server context, NEVER imported by a feature crate. reqwest / the raw
+# Ollama response JSON live ONLY here — vendor types die at this adapter; only the
+# L2 port's `OcrResult` / `PhoskError` cross out.
+[dependencies]
+phosk_adapter_ocr = { path = "../phosk_adapter_ocr" }
+phosk_core = { path = "../phosk_core" }
+# reqwest: the HTTP transport to Ollama's `/api/generate` + `/api/tags`.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# base64: Ollama's `/api/generate` takes images as base64 strings in `images[]`.
+base64 = "0.22"
+# tracing: debug-only (release_max_level_off compiles the macros out of release).
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# Test-only runtime. The gated live smoke test does real network I/O, so it needs
+# the multi-threaded reactor plus net/time drivers reqwest relies on.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

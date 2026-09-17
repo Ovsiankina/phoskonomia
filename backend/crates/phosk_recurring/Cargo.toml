@@ -1,0 +1,36 @@
+# phosk_recurring — the recurring-charges bounded context (ADR-002 L5 feature crate).
+#
+# A SERVICE over the DatabaseAdapter PORT (ADR-010 gateway): it takes a
+# `&dyn DatabaseAdapter` plus an `as_of` cycle anchor and answers the
+# Subscriptions page reads (list, KPI stats, billing sweep, inspector) and the
+# dashboard recurring panel, plus the AI recurring-detection skeleton. Per
+# ADR-010 layering it depends only on the PORT trait crate (`phosk_adapter_db`)
+# and the domain/foundation crates — NEVER on a concrete adapter.
+# `phosk_db_memory` is a *dev*-dependency only, used to drive tests against the
+# deterministic Swiss seed.
+[package]
+name = "phosk_recurring"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+phosk_id = { path = "../phosk_id" }
+serde = { workspace = true }
+chrono = { workspace = true }
+# tracing (debug-only): instrument the service. The release_max_level_off feature
+# keys off debug_assertions, so spans/events vanish in release builds. Never
+# installs a subscriber — this is a library.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# phosk_db_memory: the concrete in-memory adapter, used ONLY in tests to exercise
+# the service against the deterministic Swiss seed.
+phosk_db_memory = { path = "../phosk_db_memory" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

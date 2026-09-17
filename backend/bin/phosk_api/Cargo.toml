@@ -1,0 +1,39 @@
+[package]
+name = "phosk_api"
+version.workspace = true
+edition.workspace = true
+
+# The real frontend-facing HTTP API. Routes + DTO contract are real; handlers are
+# honest 501 stubs until the feature crates behind them are built (TDD). Feature
+# crates are wired in one at a time as handlers go green (see
+# backend/documentation/backend-features-todo.md §10). First wired: phosk_core
+# (cycle/period engine + error taxonomy) behind /cycle/current.
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+phosk_core = { path = "../../crates/phosk_core" }
+# First feature wired behind the dashboard reads: the read-model gateway
+# (phosk_insights) + the PORT trait (phosk_adapter_db, for the injected
+# Arc<dyn DatabaseAdapter>) + the concrete in-memory adapter (phosk_db_memory),
+# which — per ADR-010 — is wired in ONLY here, the bin composition root.
+phosk_insights = { path = "../../crates/phosk_insights" }
+phosk_adapter_db = { path = "../../crates/phosk_adapter_db" }
+phosk_db_memory = { path = "../../crates/phosk_db_memory" }
+serde = { version = "1", features = ["derive"] }
+# Instrumentation: live in debug, compiled out in release (release_max_level_off).
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+# Subscriber is installed only under cfg(debug_assertions) (see main.rs).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Integration tests drive the router in-process (no socket) via
+# `ServiceExt::oneshot`, then read the response body.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+# Enforce the workspace lint policy (deny unwrap/expect/panic; pedantic + nursery).
+[lints]
+workspace = true

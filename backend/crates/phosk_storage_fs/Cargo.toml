@@ -1,0 +1,31 @@
+[package]
+name = "phosk_storage_fs"
+version.workspace = true
+edition.workspace = true
+
+# The encrypted-filesystem PhotoStorage adapter (L3, ADR-005/010): a concrete
+# impl of the `phosk_adapter_storage::PhotoStorage` port that persists receipt
+# photos to a configurable data dir, ENCRYPTED AT REST and EXIF-STRIPPED on
+# import. Depends on the L2 port (the seam it implements) + phosk_core (PhoskError)
+# + the crypto + randomness crates. It is wired in ONLY by a bin/* composition
+# root / the Dioxus server context; feature crates never import it. Vendor types
+# (cipher state, file handles, nonces) die here and never cross the port.
+[dependencies]
+phosk_adapter_storage = { path = "../phosk_adapter_storage" }
+phosk_core = { path = "../phosk_core" }
+# XChaCha20-Poly1305 AEAD for encryption-at-rest (24-byte random nonce per blob).
+chacha20poly1305 = { workspace = true }
+# OsRng for the per-blob nonce and one-time data-key generation.
+rand = { workspace = true }
+# async-trait: implement the object-safe async PhotoStorage port.
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Test-only: drive the async PhotoStorage impl under a runtime.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# Test-only: per-test scratch data dir, auto-removed on drop.
+tempfile = "3"
+
+[lints]
+workspace = true

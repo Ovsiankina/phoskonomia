@@ -1,0 +1,47 @@
+# phosk_insights — the dashboard read-model gateway (ADR-002 L5/L6 feature crate).
+#
+# This crate is the SERVICE that backs the three dashboard "current cycle" reads
+# (`GET /cycle/current/totals`, `/spend-series`, `/top-shops`). It composes the
+# two lower bounded-context services — `phosk_planning::totals` (the headline
+# KPIs) and `phosk_ledger::{top_shops,daily_spend}` (the spend aggregates) —
+# into serde-`Serialize` DTOs whose JSON shape matches the frontend contract
+# EXACTLY (camelCase keys, money as exact i64 centimes).
+#
+# Layering (ADR-010): it takes a `&dyn DatabaseAdapter` (the PORT) and depends
+# only on the PORT trait crate + the feature services + the foundation crates —
+# NEVER on a concrete adapter. `phosk_db_memory` is a *dev*-dependency, used only
+# to drive the tests against the deterministic Swiss seed.
+[package]
+name = "phosk_insights"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+phosk_ledger = { path = "../phosk_ledger" }
+phosk_planning = { path = "../phosk_planning" }
+# serde: the DTOs are the HTTP-edge wire form — money serialized as exact i64
+# centimes (phosk_model::money_centimes), keys renamed to the frontend's camelCase contract.
+serde = { workspace = true }
+# chrono: NaiveDate is the `as_of` parameter of every public service fn (the HTTP
+# edge passes "today"); a real (non-dev) dependency, surfaced in the public API.
+chrono = { workspace = true }
+# tracing (debug-only): instrument the read-model composition. release_max_level_off
+# keys off debug_assertions, so spans/events vanish in release. Never installs a
+# subscriber — this is a library.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# phosk_db_memory: the concrete in-memory adapter, used ONLY in tests to exercise
+# the read-model against the deterministic Swiss seed (ADR-010: a feature crate
+# may depend on a concrete adapter for its own tests, never in its public surface).
+phosk_db_memory = { path = "../phosk_db_memory" }
+# serde_json: assert the exact serialized JSON shape / camelCase keys / CHF numbers.
+serde_json = { workspace = true }
+# tokio: test-only runtime to drive the async PORT via `#[tokio::test]`.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

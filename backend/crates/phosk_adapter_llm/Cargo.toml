@@ -1,0 +1,28 @@
+[package]
+name = "phosk_adapter_llm"
+version.workspace = true
+edition.workspace = true
+
+# The LlmAdapter PORT (ADR-008 constrained output, ADR-010 layering): the L2
+# contract seam between feature code and whatever language model answers. Like
+# the DatabaseAdapter port, it depends ONLY on the foundation — phosk_core (for
+# PhoskError), serde/serde_json (the structured-output JSON shape crosses here as
+# `serde_json::Value`, the one vendor-neutral wire) + async-trait (object-safe
+# `async fn` in a `dyn` trait). NO concrete adapter (ollama/HTTP/reqwest), NO
+# feature crate deps: vendor types (the ollama response JSON) die at the L3
+# adapter, never in this seam.
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# tracing: debug-only (release_max_level_off compiles the macros out of release
+# builds, keying off `debug_assertions`). Never installs a subscriber.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# Test-only: drive the async port via `#[tokio::test]`.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,40 @@
+# phosk_debts — the debts + personal-IOU bounded context (ADR-002 L5 feature crate).
+#
+# A SERVICE over the DatabaseAdapter PORT (ADR-010 gateway): it takes a
+# `&dyn DatabaseAdapter` and computes the Debts page read-model — the open-balance
+# grid with amortization (months-to-payoff, interest-remaining, paid-off meters),
+# the KPI band + strategy targets, the combined-balance trajectory, the inspector
+# decay series + payment history, and the personal-IOU net position. Per ADR-010
+# layering it depends ONLY on the PORT trait crate (`phosk_adapter_db`) and the
+# domain/foundation crates — NEVER on a concrete adapter. `phosk_db_memory` is a
+# *dev*-dependency only, used to drive tests against the deterministic Swiss seed.
+[package]
+name = "phosk_debts"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+phosk_model = { path = "../phosk_model" }
+phosk_id = { path = "../phosk_id" }
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+# serde: the DTOs are Serialize/Deserialize, mirroring the dioxus wire structs.
+serde = { workspace = true }
+# chrono: NaiveDate flows in as `as_of` and through the amortization/label math.
+chrono = { workspace = true }
+# tracing (debug-only): instrument the services. The release_max_level_off
+# feature keys off debug_assertions, so spans/events vanish in release builds
+# (the project's "tracing only in debug" rule). Never installs a subscriber.
+tracing = { version = "0.1", features = ["release_max_level_off"] }
+
+[dev-dependencies]
+# phosk_db_memory: the concrete in-memory adapter, used ONLY in tests to exercise
+# the services against the deterministic Swiss seed.
+phosk_db_memory = { path = "../phosk_db_memory" }
+# serde_json: JSON-shape assertions on the DTOs in tests.
+serde_json = { workspace = true }
+# tokio: test-only runtime to drive the async PORT via `#[tokio::test]`.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

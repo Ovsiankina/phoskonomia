@@ -1,0 +1,37 @@
+[package]
+name = "phosk_daemon"
+version.workspace = true
+edition.workspace = true
+
+# phosk_daemon — the trusted desktop poller (ADR-007).
+#
+# The desktop NEVER exposes an inbound socket. Instead this daemon polls the Pi
+# `phosk_queue` OUTBOUND, drains opaque blobs one at a time, and hands each to
+# the receipt-import pipeline. The pipeline itself runs in a network-less
+# sandbox and is reached here only through a port seam ([`ReceiptIngest`]); the
+# real OCR/LLM adapters are composed elsewhere. Until that pipeline crate exists
+# this bin ships the seam + a deterministic fake so the poll/drain loop is real,
+# tested, and ready to wire.
+#
+# Composition root: it imports NO feature crate, only phosk_core (the one error
+# taxonomy). The reqwest/HTTP client stays inside this bin.
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+phosk_core = { path = "../../crates/phosk_core" }
+# Instrumentation: live in debug, compiled out in release (release_max_level_off).
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# The integration test spins up the REAL phosk_queue on an ephemeral loopback
+# port and drives the daemon against it.
+phosk_queue = { path = "../phosk_queue" }
+axum = { version = "0.8" }
+# The round-trip test reads the queue's JSON enqueue ack.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

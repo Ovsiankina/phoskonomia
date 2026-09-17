@@ -1,0 +1,23 @@
+[package]
+name = "phosk_model"
+version.workspace = true
+edition.workspace = true
+
+# Pure domain data (ADR-002 L4 stability surface): no behaviour, no adapter deps.
+# Depends only on phosk_core (Money/PhoskError), chrono (NaiveDate), and serde.
+# serde lets these entities round-trip at the in-memory-seed / persistence
+# boundary; the CHF-float HTTP edge conversion is NOT here (ADR-010).
+[dependencies]
+phosk_core = { path = "../phosk_core" }
+# phosk_id: typed-id newtypes (ADR-008). Every richer entity carries a typed id
+# (the relation key) alongside its human name.
+phosk_id = { path = "../phosk_id" }
+chrono = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+# Test-only: JSON (de)serialisation round-trips + exact-centime wire-form assertions.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
