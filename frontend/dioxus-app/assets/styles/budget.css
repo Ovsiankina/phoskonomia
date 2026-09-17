@@ -149,7 +149,7 @@
 /* ---- inline cap edit (click the cap value; tokens only) ---- */
 .cap-val { background: none; border: 0; border-bottom: var(--bw-hair) dashed var(--hairline); border-radius: var(--r-0);
   padding: 0; cursor: text; transition: color .12s, border-color .12s, text-shadow .12s; }
-.cap-val:hover, .cap-val:focus-visible { outline: none; color: var(--indigo-neon); border-bottom-color: var(--indigo-neon); text-shadow: var(--glow-indigo); }
+.cap-val:not(:disabled):hover, .cap-val:focus-visible { outline: none; color: var(--indigo-neon); border-bottom-color: var(--indigo-neon); text-shadow: var(--glow-indigo); }
 .cap-edit { display: flex; flex-direction: column; align-items: flex-end; min-width: 0; }
 .insp-cap .cap-edit { align-items: flex-start; }
 .cap-in { display: flex; align-items: baseline; gap: var(--s-1); padding: var(--s-1) var(--s-2); cursor: text;
@@ -165,4 +165,4 @@
 .cap-act:hover { background: var(--bg-chip-hi); color: var(--ink); border-color: var(--indigo-neon); }
 .cap-act.ok { color: var(--indigo-neon); border-color: var(--indigo-neon); }
 .cap-act.ok:hover { box-shadow: var(--glow-indigo); text-shadow: var(--glow-indigo); }
-.cap-act:disabled, .cap-in input:disabled { cursor: progress; opacity: .5; }
+.cap-act:disabled, .cap-in input[readonly], .cap-val:disabled { cursor: progress; opacity: .5; }

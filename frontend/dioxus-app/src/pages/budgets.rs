@@ -23,7 +23,10 @@
 //! an inline CHF field. SAVE (or Enter) sends the raw text to the
 //! `set_category_cap` server fn, which parses and validates it; the page shows
 //! its message on failure and, on success, refetches the envelopes, totals,
-//! allocation and inspector detail. The −/+ stepper is still a LOCAL preview (a
+//! allocation and inspector detail. The open field, its draft and its error
+//! belong to the category it was opened for (`CapEdit`), so moving the
+//! inspector selection never carries a draft over. The −/+ stepper is still a
+//! LOCAL preview (a
 //! `use_signal<HashMap<String,i64>>` of centimes deltas on top of the fetched
 //! cap) and is not persisted; a successful save clears that category's delta.
 //!
@@ -731,16 +734,99 @@ fn EnvMeter(
 
 // ── CapStepper — tune the threshold ───────────────────────────────────────────
 
+/// Inline cap editor state for one [`CapStepper`].
+///
+/// Everything here belongs to `target`, the category the field was opened
+/// for. The inspector keeps one `CapStepper` alive while the selection moves
+/// between variable categories, so the view only shows the field when
+/// [`CapEdit::is_open_for`] matches the category on screen, and a save always
+/// goes to `target`, never to whatever the props say by then.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CapEdit {
+    /// Category the field is open for; `None` while closed.
+    target: Option<String>,
+    /// Raw text in the field.
+    draft: String,
+    /// The last rejection for `target`, already page-safe.
+    error: Option<String>,
+    /// A save for `target` is in flight. `target` is frozen until it lands:
+    /// the field can be neither cancelled nor reopened elsewhere.
+    saving: bool,
+}
+
+impl CapEdit {
+    /// Open the field for `name`, seeded with `draft`. Any other draft and
+    /// error are dropped. Ignored while a save is in flight.
+    fn open(&mut self, name: &str, draft: String) {
+        if self.saving {
+            return;
+        }
+        *self = Self {
+            target: Some(name.to_string()),
+            draft,
+            error: None,
+            saving: false,
+        };
+    }
+
+    /// The field is open, and it was opened for `name`.
+    fn is_open_for(&self, name: &str) -> bool {
+        self.target.as_deref() == Some(name)
+    }
+
+    /// New field text. A stale rejection should not sit next to it.
+    fn set_draft(&mut self, text: String) {
+        if self.saving {
+            return;
+        }
+        self.draft = text;
+        self.error = None;
+    }
+
+    /// Close the field and drop the draft. Ignored while a save is in flight.
+    fn cancel(&mut self) {
+        if !self.saving {
+            *self = Self::default();
+        }
+    }
+
+    /// Start a save: `(target, draft)` to send, or `None` if the field is
+    /// closed or a save is already running.
+    fn begin_save(&mut self) -> Option<(String, String)> {
+        if self.saving {
+            return None;
+        }
+        let target = self.target.clone()?;
+        self.saving = true;
+        self.error = None;
+        Some((target, self.draft.clone()))
+    }
+
+    /// Land a save. On success the field closes and the saved category comes
+    /// back (for the refetch); a rejection keeps the field open with `msg`.
+    fn finish_save(&mut self, result: Result<(), String>) -> Option<String> {
+        self.saving = false;
+        match result {
+            Ok(()) => std::mem::take(self).target,
+            Err(msg) => {
+                self.error = Some(msg);
+                None
+            }
+        }
+    }
+}
+
 /// Faithful port of React `CapStepper`. `disabled` → the FIXED CHARGE label.
 ///
 /// The −/+ buttons step the local preview (`on_step`). The cap value itself is a
 /// button that swaps the control for an inline CHF field: SAVE or Enter sends
 /// the raw text to `set_category_cap` (the server parses and validates it),
-/// CANCEL or Escape drops the draft. While the save runs the field is locked
+/// CANCEL or Escape drops the draft. While the save runs the field is read-only
 /// and an [`InlineStatus`] says so; a rejection keeps the field open with the
 /// server's message. On success the field closes and `on_saved` gets the name
-/// so the page can refetch. `inspector` switches to the larger dock styling
-/// (no `CAP` label).
+/// so the page can refetch. The open field, its draft and its error belong to
+/// the category it was opened for ([`CapEdit`]). `inspector` switches to the
+/// larger dock styling (no `CAP` label).
 #[component]
 fn CapStepper(
     name: String,
@@ -751,46 +837,41 @@ fn CapStepper(
     #[props(default = false)] inspector: bool,
 ) -> Element {
     // Hooks first, unconditionally (rules of hooks), before any early return.
-    let mut editing = use_signal(|| false);
-    let mut draft = use_signal(String::new);
-    let mut pending = use_signal(|| false);
-    let mut error = use_signal(|| Option::<String>::None);
+    let mut edit = use_signal(CapEdit::default);
 
-    let save_name = name.clone();
+    // Reads only `edit`, never the props: the save goes to the category the
+    // field was opened for.
     let save = use_callback(move |()| {
-        if pending() {
+        let Some((target, amount)) = edit.write().begin_save() else {
             return;
-        }
-        let name = save_name.clone();
-        let amount = draft();
-        pending.set(true);
-        error.set(None);
+        };
         spawn(async move {
-            let result = set_category_cap(name.clone(), amount).await;
-            pending.set(false);
-            match result {
-                Ok(()) => {
-                    editing.set(false);
-                    on_saved.call(name);
-                }
-                Err(e) => error.set(Some(cap_error_text(&e))),
+            let result = set_category_cap(target, amount).await;
+            let saved = edit
+                .write()
+                .finish_save(result.map_err(|e| cap_error_text(&e)));
+            if let Some(name) = saved {
+                on_saved.call(name);
             }
         });
     });
-    let mut cancel = move || {
-        if !pending() {
-            editing.set(false);
-            error.set(None);
-        }
-    };
+    let mut cancel = move || edit.write().cancel();
 
     if disabled {
         return rsx! { span { class: "cap-fixed", "FIXED CHARGE" } };
     }
     let wrap_cls = if inspector { "insp-step" } else { "cap-step" };
+    let (open, busy, draft, error) = {
+        let e = edit.read();
+        (
+            e.is_open_for(&name),
+            e.saving,
+            e.draft.clone(),
+            e.error.clone(),
+        )
+    };
 
-    if editing() {
-        let busy = pending();
+    if open {
         let field_label = format!("New cap for {name}, in CHF");
         return rsx! {
             div {
@@ -809,17 +890,14 @@ fn CapStepper(
                             spellcheck: "false",
                             aria_label: "{field_label}",
                             value: "{draft}",
-                            disabled: busy,
+                            // Read-only, not disabled, so focus stays put and a
+                            // rejected amount can be fixed and re-sent with Enter.
+                            readonly: busy,
+                            aria_busy: busy,
                             onmounted: move |e: Event<MountedData>| async move {
                                 let _ = e.set_focus(true).await;
                             },
-                            oninput: move |e: Event<FormData>| {
-                                draft.set(e.value());
-                                // A stale rejection should not sit next to new text.
-                                if error.peek().is_some() {
-                                    error.set(None);
-                                }
-                            },
+                            oninput: move |e: Event<FormData>| edit.write().set_draft(e.value()),
                             onkeydown: move |e: Event<KeyboardData>| {
                                 // Keep keys away from the card's Enter/Space select.
                                 e.stop_propagation();
@@ -854,7 +932,7 @@ fn CapStepper(
                 }
                 InlineStatus {
                     pending: busy,
-                    error: error(),
+                    error,
                     pending_label: "Saving cap…".to_string(),
                 }
             }
@@ -874,11 +952,9 @@ fn CapStepper(
                 class: "cv cap-val",
                 r#type: "button",
                 title: "Edit cap",
-                onclick: move |_| {
-                    draft.set(cap_input_text(value));
-                    error.set(None);
-                    editing.set(true);
-                },
+                // Another category's save is still landing.
+                disabled: busy,
+                onclick: move |_| edit.write().open(&name, cap_input_text(value)),
                 "CHF {v}"
             }
             button { class: "cs", title: "Raise cap CHF 10", onclick: move |_| on_step.call(10), "+" }
@@ -1559,10 +1635,11 @@ fn BudgetInspector(
             if !cat.fixed {
                 div { class: "insp-cap",
                     div { class: "h", "Tune cap" }
-                    // Keyed by name: a new selection starts with a closed editor.
+                    // This CapStepper stays mounted while the selection moves
+                    // between variable categories; `CapEdit` keeps its open
+                    // field with the category it was opened for.
                     CapStepper {
-                        key: "{name_for_step}",
-                        name: name_for_step.clone(),
+                        name: name_for_step,
                         value: cap,
                         disabled: false,
                         inspector: true,
@@ -1594,3 +1671,379 @@ fn BudgetInspector(
 
 /// Em-dash default used in pre-computed strings.
 const DASH: &str = "—";
+
+// ── cap editor state tests ───────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cap_edit_tests {
+    use super::CapEdit;
+
+    fn open_for(name: &str, draft: &str) -> CapEdit {
+        let mut e = CapEdit::default();
+        e.open(name, draft.to_string());
+        e
+    }
+
+    #[test]
+    fn closed_until_opened_and_open_only_for_its_own_category() {
+        let e = CapEdit::default();
+        assert!(!e.is_open_for("Groceries"));
+
+        let e = open_for("Groceries", "400");
+        assert!(e.is_open_for("Groceries"));
+        assert!(!e.is_open_for("Transport"));
+        assert_eq!(e.draft, "400");
+    }
+
+    #[test]
+    fn a_save_goes_to_the_category_the_field_was_opened_for() {
+        let mut e = open_for("Groceries", "400");
+        e.set_draft("420".to_string());
+        // Whatever the inspector shows now, the target is the stored name.
+        assert_eq!(
+            e.begin_save(),
+            Some(("Groceries".to_string(), "420".to_string()))
+        );
+        assert!(e.saving);
+    }
+
+    #[test]
+    fn nothing_to_save_while_closed_or_already_saving() {
+        assert_eq!(CapEdit::default().begin_save(), None);
+
+        let mut e = open_for("Groceries", "420");
+        assert!(e.begin_save().is_some());
+        assert_eq!(e.begin_save(), None, "second save while one is in flight");
+    }
+
+    #[test]
+    fn target_is_frozen_while_a_save_is_in_flight() {
+        let mut e = open_for("Groceries", "420");
+        let _ = e.begin_save();
+
+        e.open("Transport", "150".to_string());
+        e.cancel();
+        e.set_draft("999".to_string());
+
+        assert!(e.is_open_for("Groceries"));
+        assert_eq!(e.draft, "420");
+        assert!(e.saving);
+    }
+
+    #[test]
+    fn success_closes_the_field_and_names_the_saved_category() {
+        let mut e = open_for("Groceries", "420");
+        let _ = e.begin_save();
+
+        assert_eq!(e.finish_save(Ok(())), Some("Groceries".to_string()));
+        assert_eq!(e, CapEdit::default());
+    }
+
+    #[test]
+    fn a_rejection_stays_with_its_category_and_clears_on_new_text() {
+        let mut e = open_for("Groceries", "-5");
+        let _ = e.begin_save();
+
+        assert_eq!(
+            e.finish_save(Err("Cap cannot be negative.".to_string())),
+            None
+        );
+        assert!(e.is_open_for("Groceries"));
+        assert!(!e.saving);
+        assert_eq!(e.error.as_deref(), Some("Cap cannot be negative."));
+
+        e.set_draft("5".to_string());
+        assert_eq!(e.error, None);
+    }
+
+    #[test]
+    fn opening_another_category_drops_the_old_draft_and_error() {
+        let mut e = open_for("Groceries", "abc");
+        let _ = e.begin_save();
+        let _ = e.finish_save(Err("Not an amount.".to_string()));
+
+        e.open("Transport", "150".to_string());
+        assert_eq!(
+            e,
+            CapEdit {
+                target: Some("Transport".to_string()),
+                draft: "150".to_string(),
+                error: None,
+                saving: false,
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_drops_everything() {
+        let mut e = open_for("Groceries", "420");
+        e.cancel();
+        assert_eq!(e, CapEdit::default());
+    }
+}
+
+// ── cap editor UI tests ──────────────────────────────────────────────────────
+
+/// Drives the real `BudgetInspector` in a headless `VirtualDom`. No server fn
+/// is ever called, so nothing touches the shared store. Clicks and keystrokes
+/// go in as platform events on the element ids the renderer reported, through
+/// a test-only converter; the result is read back through SSR.
+#[cfg(all(test, feature = "server"))]
+mod cap_editor_ui_tests {
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use dioxus::core::{ElementId, Mutation, Mutations, ScopeId, VirtualDom};
+    use dioxus::html::geometry::{ClientPoint, ElementPoint, PagePoint, ScreenPoint};
+    use dioxus::html::input_data::{MouseButton, MouseButtonSet};
+    use dioxus::html::point_interaction::{
+        InteractionElementOffset, InteractionLocation, ModifiersInteraction, PointerInteraction,
+    };
+    use dioxus::html::{
+        set_event_converter, AnimationData, CancelData, ClipboardData, CompositionData, DragData,
+        FileData, FocusData, FormValue, HasFileData, HasFormData, HasMouseData, HtmlEventConverter,
+        ImageData, KeyboardData, MediaData, Modifiers, MountedData, PlatformEventData, PointerData,
+        ResizeData, ScrollData, SelectionData, ToggleData, TouchData, TransitionData, VisibleData,
+        WheelData,
+    };
+    use dioxus::prelude::*;
+    use phosk_core::money::Money;
+
+    use super::BudgetInspector;
+    use crate::data::budgets::CategoryDto;
+
+    /// A plain primary-button click at the origin.
+    #[derive(Clone)]
+    struct Click;
+
+    impl InteractionLocation for Click {
+        fn client_coordinates(&self) -> ClientPoint {
+            ClientPoint::new(0.0, 0.0)
+        }
+        fn screen_coordinates(&self) -> ScreenPoint {
+            ScreenPoint::new(0.0, 0.0)
+        }
+        fn page_coordinates(&self) -> PagePoint {
+            PagePoint::new(0.0, 0.0)
+        }
+    }
+    impl InteractionElementOffset for Click {
+        fn element_coordinates(&self) -> ElementPoint {
+            ElementPoint::new(0.0, 0.0)
+        }
+    }
+    impl ModifiersInteraction for Click {
+        fn modifiers(&self) -> Modifiers {
+            Modifiers::empty()
+        }
+    }
+    impl PointerInteraction for Click {
+        fn trigger_button(&self) -> Option<MouseButton> {
+            Some(MouseButton::Primary)
+        }
+        fn held_buttons(&self) -> MouseButtonSet {
+            MouseButtonSet::empty()
+        }
+    }
+    impl HasMouseData for Click {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// The text field's value after a keystroke.
+    #[derive(Clone)]
+    struct Typed(String);
+
+    impl HasFileData for Typed {
+        fn files(&self) -> Vec<FileData> {
+            Vec::new()
+        }
+    }
+    impl HasFormData for Typed {
+        fn value(&self) -> String {
+            self.0.clone()
+        }
+        fn valid(&self) -> bool {
+            true
+        }
+        fn values(&self) -> Vec<(String, FormValue)> {
+            Vec::new()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Converts only what the tests send; any other event kind is a test bug.
+    struct TestConverter;
+
+    macro_rules! not_sent {
+        ($($f:ident -> $t:ty),* $(,)?) => {
+            $(fn $f(&self, _: &PlatformEventData) -> $t {
+                unreachable!(concat!(stringify!($f), " is never sent by these tests"))
+            })*
+        };
+    }
+
+    impl HtmlEventConverter for TestConverter {
+        fn convert_mouse_data(&self, event: &PlatformEventData) -> MouseData {
+            let click = event.downcast::<Click>().cloned();
+            MouseData::new(click.expect("a mouse event carries a Click"))
+        }
+        fn convert_form_data(&self, event: &PlatformEventData) -> FormData {
+            let typed = event.downcast::<Typed>().cloned();
+            FormData::from(typed.expect("an input event carries Typed"))
+        }
+        not_sent! {
+            convert_animation_data -> AnimationData,
+            convert_cancel_data -> CancelData,
+            convert_clipboard_data -> ClipboardData,
+            convert_composition_data -> CompositionData,
+            convert_drag_data -> DragData,
+            convert_focus_data -> FocusData,
+            convert_image_data -> ImageData,
+            convert_keyboard_data -> KeyboardData,
+            convert_media_data -> MediaData,
+            convert_mounted_data -> MountedData,
+            convert_pointer_data -> PointerData,
+            convert_resize_data -> ResizeData,
+            convert_scroll_data -> ScrollData,
+            convert_selection_data -> SelectionData,
+            convert_toggle_data -> ToggleData,
+            convert_touch_data -> TouchData,
+            convert_transition_data -> TransitionData,
+            convert_visible_data -> VisibleData,
+            convert_wheel_data -> WheelData,
+        }
+    }
+
+    thread_local! {
+        /// The inspector's selection, owned by the test thread.
+        static SELECTED: RefCell<Option<CategoryDto>> = const { RefCell::new(None) };
+    }
+
+    fn category(name: &str, cap_chf: i64) -> CategoryDto {
+        let budget = Money::from_chf(cap_chf, 0).expect("valid test cap");
+        CategoryDto {
+            name: name.to_string(),
+            budget,
+            spent: Money::ZERO,
+            proj: Money::ZERO,
+            remaining: budget,
+            used_pct: 0,
+            fixed: false,
+            items: 0,
+            spark: Vec::new(),
+            hist: Vec::new(),
+            next: String::new(),
+            note: String::new(),
+        }
+    }
+
+    #[component]
+    fn Harness() -> Element {
+        let cat = SELECTED.with(|s| s.borrow().clone());
+        let cap = cat.as_ref().map_or(Money::ZERO, |c| c.budget);
+        rsx! {
+            BudgetInspector {
+                cat,
+                cap,
+                days_left: 10,
+                cycle_label: String::new(),
+                detail: None,
+                txns: Vec::new(),
+                variant: None,
+                on_close: move |()| {},
+                on_step: move |_: (String, i64)| {},
+                on_saved: move |_: String| {},
+            }
+        }
+    }
+
+    /// Element ids that got a listener for `event` in this batch of edits.
+    fn listeners(m: &Mutations, event: &str) -> Vec<ElementId> {
+        m.edits
+            .iter()
+            .filter_map(|e| match e {
+                Mutation::NewEventListener { name, id } if name == event => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn fire<T: Clone + 'static>(dom: &VirtualDom, event: &str, data: &T, ids: &[ElementId]) {
+        assert!(!ids.is_empty(), "no `{event}` listener to fire");
+        for id in ids {
+            let platform = PlatformEventData::new(Box::new(data.clone()));
+            let payload: Rc<dyn Any> = Rc::new(platform);
+            dom.runtime()
+                .handle_event(event, Event::new(payload, false), *id);
+        }
+    }
+
+    fn select(dom: &mut VirtualDom, cat: CategoryDto) -> Mutations {
+        SELECTED.with(|s| *s.borrow_mut() = Some(cat));
+        dom.mark_dirty(ScopeId::APP);
+        dom.render_immediate_to_vec()
+    }
+
+    /// Mounts the inspector on Groceries (cap 400), opens its cap editor and
+    /// types `420` into it.
+    fn groceries_with_open_draft() -> VirtualDom {
+        set_event_converter(Box::new(TestConverter));
+        SELECTED.with(|s| *s.borrow_mut() = Some(category("Groceries", 400)));
+        let mut dom = VirtualDom::new(Harness);
+        let built = dom.rebuild_to_vec();
+        let html = dioxus::ssr::render(&dom);
+        assert!(html.contains("cap-val"), "cap value button missing: {html}");
+        assert!(!html.contains("cap-edit"), "editor open before any click");
+
+        // Every click handler in the inspector is harmless here (close and
+        // −/+ go to no-op handlers), so click them all rather than depend on
+        // listener order.
+        fire(&dom, "click", &Click, &listeners(&built, "click"));
+        let opened = dom.render_immediate_to_vec();
+        let html = dioxus::ssr::render(&dom);
+        assert!(html.contains("cap-edit"), "editor did not open: {html}");
+        assert!(html.contains("New cap for Groceries"), "{html}");
+        assert!(html.contains("value=\"400\""), "draft not seeded: {html}");
+
+        fire(
+            &dom,
+            "input",
+            &Typed("420".to_string()),
+            &listeners(&opened, "input"),
+        );
+        dom.render_immediate_to_vec();
+        let html = dioxus::ssr::render(&dom);
+        assert!(html.contains("value=\"420\""), "draft not shown: {html}");
+        dom
+    }
+
+    #[test]
+    fn switching_selection_does_not_carry_an_open_draft_to_the_new_category() {
+        let mut dom = groceries_with_open_draft();
+
+        // The inspector keeps its CapStepper across selections; the Groceries
+        // draft must not show up (or be saveable) under Transport.
+        let moved = select(&mut dom, category("Transport", 150));
+        let html = dioxus::ssr::render(&dom);
+        assert!(html.contains("Tune cap"), "inspector body missing: {html}");
+        assert!(
+            !html.contains("cap-edit"),
+            "editor still open after switching category: {html}"
+        );
+        assert!(!html.contains("420"), "Groceries draft leaked: {html}");
+        assert!(html.contains("CHF 150"), "Transport cap not shown: {html}");
+
+        // Opening the field under Transport starts from Transport's own cap.
+        fire(&dom, "click", &Click, &listeners(&moved, "click"));
+        dom.render_immediate_to_vec();
+        let html = dioxus::ssr::render(&dom);
+        assert!(html.contains("New cap for Transport"), "{html}");
+        assert!(html.contains("value=\"150\""), "{html}");
+        assert!(!html.contains("420"), "Groceries draft leaked: {html}");
+    }
+}
