@@ -2,8 +2,9 @@
 //!
 //! A SECOND concrete L3 implementation of the `phosk_adapter_db` PORT, kept in
 //! **lockstep** with `phosk_db_memory` by the shared
-//! [`contract`](phosk_adapter_db::contract) suite. It embeds SurrealDB — there is
-//! **no external server**:
+//! [`contract`](phosk_adapter_db::contract) suite and the per-method
+//! `phosk_db_conformance` suite (`tests/conformance.rs`). It embeds SurrealDB —
+//! there is **no external server**:
 //!
 //! * [`SurrealDb::memory`] opens the in-memory `kv-mem` engine (tests).
 //! * [`SurrealDb::file`] opens a file-backed `kv-surrealkv` store (the prod path).
@@ -25,6 +26,10 @@
 //! surreal record `id` (a `Thing`) is therefore **never read back** — we only ever
 //! deserialize `doc` — which both confines `Thing` and sidesteps SurrealDB's
 //! reserved `id` field clashing with the model's own `id`.
+//!
+//! A table scan comes back in record-key order, not insertion order, so reads
+//! the port documents as oldest→newest sort on the entity's date after
+//! filtering. Rows that share a date keep scan order.
 //!
 //! ## No panics (ADR §0)
 //!
@@ -363,7 +368,11 @@ impl DatabaseAdapter for SurrealDb {
         };
         let id = cap.id;
         let all: Vec<BudgetHistory> = self.store.list(Bucket::BudgetHistory).await?;
-        Ok(all.into_iter().filter(|h| h.category_id == id).collect())
+        // The store scans in record-key order; the port promises oldest→newest.
+        let mut rows: Vec<BudgetHistory> =
+            all.into_iter().filter(|h| h.category_id == id).collect();
+        rows.sort_by_key(|h| h.cycle_start);
+        Ok(rows)
     }
 
     async fn alerts(&self) -> Result<Vec<Alert>, PhoskError> {
@@ -410,10 +419,13 @@ impl DatabaseAdapter for SurrealDb {
 
     async fn subscription_charges(&self, id: SubscriptionId) -> Result<Vec<Charge>, PhoskError> {
         let all: Vec<Charge> = self.store.list(Bucket::Charge).await?;
-        Ok(all
+        // Record-key scan order is arbitrary; the port promises oldest→newest.
+        let mut charges: Vec<Charge> = all
             .into_iter()
             .filter(|c| c.subscription_id == id)
-            .collect())
+            .collect();
+        charges.sort_by_key(|c| c.date);
+        Ok(charges)
     }
 
     async fn upsert_subscription(&self, s: Subscription) -> Result<SubscriptionId, PhoskError> {
@@ -450,7 +462,10 @@ impl DatabaseAdapter for SurrealDb {
 
     async fn debt_payments(&self, id: DebtId) -> Result<Vec<DebtPayment>, PhoskError> {
         let all: Vec<DebtPayment> = self.store.list(Bucket::DebtPayment).await?;
-        Ok(all.into_iter().filter(|p| p.debt_id == id).collect())
+        // Record-key scan order is arbitrary; the port promises oldest→newest.
+        let mut payments: Vec<DebtPayment> = all.into_iter().filter(|p| p.debt_id == id).collect();
+        payments.sort_by_key(|p| p.date);
+        Ok(payments)
     }
 
     async fn upsert_debt(&self, d: Debt) -> Result<DebtId, PhoskError> {
@@ -577,7 +592,11 @@ impl DatabaseAdapter for SurrealDb {
 
     async fn chat_messages(&self, chat: ChatId) -> Result<Vec<Message>, PhoskError> {
         let all: Vec<Message> = self.store.list(Bucket::Message).await?;
-        Ok(all.into_iter().filter(|m| m.chat_id == chat).collect())
+        // Record-key scan order is arbitrary; the port promises oldest→newest.
+        // `at` is a date, so messages sent on the same day keep scan order.
+        let mut messages: Vec<Message> = all.into_iter().filter(|m| m.chat_id == chat).collect();
+        messages.sort_by_key(|m| m.at);
+        Ok(messages)
     }
 
     async fn latest_chat(&self) -> Result<Option<Chat>, PhoskError> {

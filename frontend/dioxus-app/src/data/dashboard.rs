@@ -332,15 +332,26 @@ pub async fn act_on_alert(id: String, action: String) -> Result<(), ServerFnErro
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        phosk_planning::alerts::act_on_alert(session.db(), &id, &action)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))
+        act_on_alert_with(session.db(), &id, &action).await
     }
     #[cfg(not(feature = "server-deps"))]
     {
         let _ = (id, action);
         Err(ServerFnError::new("server-only"))
     }
+}
+
+/// [`act_on_alert`]'s logic over an explicit DB port (tests pass a fresh store).
+/// `action` is the backend verb: `dismiss` | `snooze` | `apply`.
+#[cfg(feature = "server-deps")]
+pub(crate) async fn act_on_alert_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    id: &str,
+    action: &str,
+) -> Result<(), ServerFnError> {
+    phosk_planning::alerts::act_on_alert(db, id, action)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
 /// `GET /insights/dashboard` — the GEMMA4 one-liner + estimated saving.

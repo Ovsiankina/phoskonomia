@@ -58,11 +58,24 @@ cargo check --no-default-features --features server   # server side
 cargo check --target wasm32-unknown-unknown            # WASM client side
 ```
 
-This crate's own tests run on the server side:
+## Test
+
+The data-layer tests (`src/data/tests/`) and the page tests run natively with
+the server feature:
 
 ```bash
 cargo test --no-default-features --features server
 ```
+
+With that feature a `#[server]` fn runs its body in-process, so the tests call
+the real fns. In test builds the composition root always uses the seeded
+in-memory database and the in-process OCR / LLM / storage fakes, so no `PHOSK_*`
+variable, local service or data directory is involved. All tests share that
+store and never write through it: each write path has a
+`pub(crate) <name>_with(db, …)` inner fn that tests drive on a fresh
+`MemoryDb::seeded()`.
+
+## Backend gates
 
 The backend gates (from the repository root) exclude this crate:
 

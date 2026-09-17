@@ -2,15 +2,15 @@
 
 **Status:** AUTHORITATIVE. Every downstream swarm agent reads THIS file. It is derived from the
 real wire spec (`frontend/dioxus-app/src/data/*.rs` — the ~30 `#[server]` view DTOs), the mock
-data shapes (`frontend/app/src/data/phosk.js`), the feature checklist
+data shapes of the since-deleted React prototype, the feature checklist
 (`backend/documentation/backend-features-todo.md`), and the existing built crates. Where this
 document and the AI-written `architectural-design-and-philosophy.md` disagree, THIS wins.
 
 ## Locked decisions (2026-06-22) — non-negotiable
 
 1. **Transport: NO REST.** The frontend is Dioxus `#[server]` fns calling backend service crates
-   in-process. We build & test the **service layer** (`phosk_*` crates), NOT the axum `phosk_api`
-   bin. Ignore `phosk_api`.
+   in-process. We build & test the **service layer** (`phosk_*` crates). The old axum `phosk_api`
+   REST bin (mostly `501` stubs) has been deleted; do not recreate it.
 2. **Money: CENTIMES EVERYWHERE.** `phosk_core::money::Money` is `i64` centimes. Every DTO money
    field serializes via `phosk_model::money_centimes` / `opt_money_centimes` (exact `i64`).
    `Vec<Money>` via the local `money_vec_centimes` / `opt_money_vec_centimes` (see

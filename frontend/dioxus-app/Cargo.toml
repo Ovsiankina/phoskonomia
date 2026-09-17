@@ -82,11 +82,12 @@ tokio = { version = "1", features = ["sync"], optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
 
-# tokio (test-only): the runtime behind the `#[tokio::test]` data-layer tests that
-# drive the server-side inner fns against a fresh seeded `MemoryDb`. The
-# workspace pin carries `macros, rt`. Dev-dependencies never reach a shipped
-# build, and the WASM client bundle in particular.
+# Test-only, both already workspace dependencies used the same way by the
+# backend crates: `tokio` drives the async `#[server]` fn tests and the
+# data-layer tests on a fresh seeded `MemoryDb` (`#[tokio::test]`),
+# `serde_json` asserts the view structs' wire form.
 [dev-dependencies]
+serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [features]
