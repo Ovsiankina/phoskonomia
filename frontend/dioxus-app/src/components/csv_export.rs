@@ -24,7 +24,8 @@ use crate::components::states::awaiting_message;
 use crate::data::csv_export::{export_csv, CsvExportKind};
 
 /// Inline style of the status text next to the button.
-const STATUS_STYLE: &str = "font-size:var(--t-xs);letter-spacing:.08em;text-transform:uppercase";
+const STATUS_STYLE: &str =
+    "font-size:var(--t-xs);letter-spacing:var(--tracking-tag);text-transform:uppercase";
 /// Numerals (the row count) are Pilowlava.
 const NUM_STYLE: &str = "font-family:var(--font-display);color:var(--text-blue)";
 
