@@ -10,7 +10,7 @@ document and the AI-written `architectural-design-and-philosophy.md` disagree, T
 
 1. **Transport: NO REST.** The frontend is Dioxus `#[server]` fns calling backend service crates
    in-process. We build & test the **service layer** (`phosk_*` crates). The old axum `phosk_api`
-   REST bin (all-`501` stubs) has been deleted; do not recreate it.
+   REST bin (mostly `501` stubs) has been deleted; do not recreate it.
 2. **Money: CENTIMES EVERYWHERE.** `phosk_core::money::Money` is `i64` centimes. Every DTO money
    field serializes via `phosk_model::money_centimes` / `opt_money_centimes` (exact `i64`).
    `Vec<Money>` via the local `money_vec_centimes` / `opt_money_vec_centimes` (see

@@ -116,10 +116,14 @@ ADR format: **Decision · Status · Context · Consequence.** Status ∈
 - Only network doors: public REST API (frontend) + Pi queue. The public
   API **binds to loopback + requires a local auth secret/session**,
   protecting *all* financial data, AI path or not.
-  *(Superseded in part: the REST API was dropped when ADR-001's REST
-  transport was reversed (see `build-contract.md`), and the `phosk_api` bin
-  was deleted. The frontend door is now the Dioxus `#[server]` fns,
-  in-process on desktop.)*
+  *(Transport note: the REST API named here was replaced by Dioxus
+  `#[server]` fns when ADR-001's REST transport was reversed (see
+  `build-contract.md` decision 1), and the `phosk_api` bin was deleted. On
+  desktop/mobile those calls are in-process; on web (the default platform)
+  the Dioxus fullstack server exposes them over HTTP, so that server is now
+  the frontend network door. The loopback + local-auth requirement above is
+  NOT relaxed by this; how it is enforced for that server is an open
+  decision for the maintainer.)*
 - **Effect-typed gating:** `read` tools execute after schema-validation;
   `mutate` tools **enqueue an approval action** — never a direct write. A
   prompt-injected model (hostile receipt) can at worst *propose* a change

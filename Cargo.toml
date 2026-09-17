@@ -7,7 +7,7 @@
 # async fn with shared types and the LSP checks it end-to-end. On desktop/mobile that
 # call is in-process (no wire); on web Dioxus auto-generates the transport (you never
 # hand-write JSON or routes). `Money` crosses as the real i64-centime newtype.
-# The old axum REST bin (phosk_api, all-501 stubs) is deleted — do not bring it back.
+# The old axum REST bin (phosk_api, mostly 501 stubs) is deleted — do not bring it back.
 #
 # Backend crates grow in per ADR-005 (grow-into-crates). The frontend lives in
 # frontend/dioxus-app. The React prototype in frontend/app/ is the migration source
