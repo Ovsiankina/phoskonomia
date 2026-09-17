@@ -299,7 +299,7 @@ pub async fn debt_stats(
         }
         #[allow(clippy::cast_precision_loss)]
         {
-            weighted_num += d.balance.centimes() as f64 * d.apr;
+            weighted_num = (d.balance.centimes() as f64).mul_add(d.apr, weighted_num);
         }
         let months = months_to_payoff(d.balance, d.monthly, d.apr / 12.0)?;
         horizon = horizon.max(u32::try_from(months.max(0)).unwrap_or(0));
@@ -594,7 +594,7 @@ pub async fn debt_payments(
     let debt = db.debt_by_slug(slug).await?;
     let mut payments = db.debt_payments(debt.id).await?;
     // Newest first.
-    payments.sort_by(|a, b| b.date.cmp(&a.date));
+    payments.sort_by_key(|p| std::cmp::Reverse(p.date));
     Ok(payments
         .into_iter()
         .map(|p| DebtPaymentDto {

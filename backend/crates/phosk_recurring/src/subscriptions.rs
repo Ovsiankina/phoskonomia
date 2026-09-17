@@ -355,7 +355,7 @@ pub async fn list_subscriptions(
     }
     match filter.sort.as_str() {
         "due" => out.sort_by_key(|s| s.days_until),
-        "amount" => out.sort_by(|a, b| b.monthly_equiv.centimes().cmp(&a.monthly_equiv.centimes())),
+        "amount" => out.sort_by_key(|s| std::cmp::Reverse(s.monthly_equiv.centimes())),
         "name" => out.sort_by(|a, b| a.name.cmp(&b.name)),
         _ => {}
     }
@@ -525,7 +525,7 @@ pub async fn subscription_detail(
     let dto = build_dto(&sub, &charges, as_of)?;
 
     let mut recent: Vec<&Charge> = charges.iter().collect();
-    recent.sort_by(|a, b| b.date.cmp(&a.date));
+    recent.sort_by_key(|c| std::cmp::Reverse(c.date));
     let recent: Vec<SubChargeDto> = recent
         .iter()
         .map(|c| SubChargeDto {
