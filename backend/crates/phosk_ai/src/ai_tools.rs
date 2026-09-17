@@ -42,6 +42,10 @@ use crate::ai_spine::AiChatMsgDto;
 /// never silently dropped.
 pub const CONFIDENCE_THRESHOLD: f64 = 0.7;
 
+/// Longest model chat reply (in characters) that [`chat_reply`] saves and
+/// returns; a longer completion is cut and the cut marked with `…`.
+pub const CHAT_REPLY_MAX_CHARS: usize = 4_000;
+
 /// The effect of an AI tool, made explicit in the type system. A `Read` tool may
 /// execute against the DB; a `Write` tool may only ENQUEUE a proposal for
 /// approval — it must never mutate domain state.
@@ -98,13 +102,18 @@ fn enqueue(mut suggestion: AiSuggestion, model: &str) -> ProposedWrite {
 // READ tools — call the model, return prose / a DTO, never mutate
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Chat turn (READ tool): persist the user line, ask the model for a reply via
-/// the PORT, persist the reply, and return it.
+/// Chat turn (READ tool): ask the model for a reply via the PORT, then persist
+/// the user line and the reply, and return the reply.
 ///
 /// Unlike the canned [`crate::ai_spine::send_message`] (which the build-contract
 /// freezes for the seeded read-model), this routes the reply through
-/// `llm.complete`. The model's prose is trimmed; an empty completion falls back
-/// to a deterministic acknowledgement so the transcript never gains a blank line.
+/// `llm.complete`. The model's prose is trimmed and cut to
+/// [`CHAT_REPLY_MAX_CHARS`]; an empty completion falls back to a deterministic
+/// acknowledgement so the transcript never gains a blank line.
+///
+/// Nothing is persisted until the model has answered, so a failed turn (model
+/// down, not loaded, timed out) leaves the transcript untouched and can be
+/// retried without saving the user line twice.
 ///
 /// # Errors
 /// [`PhoskError::Invalid`] for empty `text`; [`PhoskError::NotFound`] if there is
@@ -124,7 +133,12 @@ pub async fn chat_reply(
         return Err(PhoskError::NotFound("no chat to append to".to_owned()));
     };
 
-    // Persist the user turn verbatim.
+    // Ask the model first (the only place the chat reply comes from now): a
+    // failure here must not leave a saved question without an answer.
+    let raw = llm.complete(&chat_prompt(trimmed)).await?;
+    let reply_text = normalize_reply(&raw);
+
+    // Persist the user turn verbatim, then the reply.
     db.append_message(Message {
         id: MessageId::new(),
         chat_id: chat.id,
@@ -133,10 +147,6 @@ pub async fn chat_reply(
         at: chat.started,
     })
     .await?;
-
-    // Ask the model (the only place the chat reply comes from now).
-    let raw = llm.complete(&chat_prompt(trimmed)).await?;
-    let reply_text = normalize_reply(&raw);
 
     db.append_message(Message {
         id: MessageId::new(),
@@ -343,15 +353,20 @@ fn suggestion_schema() -> serde_json::Value {
     })
 }
 
-/// Normalize a model chat completion: trim, and fall back to a deterministic
-/// acknowledgement when the model returns nothing usable (never a blank line).
+/// Normalize a model chat completion: trim, cut to [`CHAT_REPLY_MAX_CHARS`]
+/// (the cut marked with `…`), and fall back to a deterministic acknowledgement
+/// when the model returns nothing usable (never a blank line).
 fn normalize_reply(raw: &str) -> String {
     let t = raw.trim();
     if t.is_empty() {
-        "I tracked that. Ask me about a category, signal, or your cycle pace.".to_owned()
-    } else {
-        t.to_owned()
+        return "I tracked that. Ask me about a category, signal, or your cycle pace.".to_owned();
     }
+    let mut chars = t.chars();
+    let mut out: String = chars.by_ref().take(CHAT_REPLY_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// Normalize a model insight completion (trim + non-empty fallback).
