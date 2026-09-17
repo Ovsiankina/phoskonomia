@@ -9,8 +9,8 @@
 # hand-write JSON or routes). `Money` crosses as the real i64-centime newtype.
 #
 # Backend crates grow in per ADR-005 (grow-into-crates). The frontend lives in
-# frontend/dioxus-app. The React prototype in frontend/app/ is the migration source
-# (and the fidelity reference) until the port reaches parity, then it is deleted.
+# frontend/dioxus-app. The old React/JS prototype it was ported from is deleted —
+# do not bring it back; the visual reference is frontend/.claude-design-export/.
 [workspace]
 resolver = "3"
 members = [
