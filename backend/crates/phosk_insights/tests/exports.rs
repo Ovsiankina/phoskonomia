@@ -512,6 +512,18 @@ async fn text_cells_that_look_like_formulas_are_neutralised() {
     db.upsert_subscription(sub)
         .await
         .expect("upsert hostile subscription");
+    // Excel in the de-CH / fr-CH / de-DE locales splits a .csv on `;`, and a
+    // line break starts a new row, so a trigger after either is a cell start
+    // too. The category is the last column, where such a payload hurts most.
+    let mut semi = db
+        .subscription_by_slug("spotify")
+        .await
+        .expect("seeded spotify subscription");
+    semi.name = "x;=cmd|' /C calc'!A0;".to_owned();
+    semi.category = "x\n=1+1;".to_owned();
+    db.upsert_subscription(semi)
+        .await
+        .expect("upsert semicolon subscription");
 
     let dto = export_subscriptions_csv(&db, today())
         .await
@@ -533,6 +545,25 @@ async fn text_cells_that_look_like_formulas_are_neutralised() {
     assert_eq!(fields[4], "'-2+3", "leading - neutralised");
     assert_eq!(fields[5], "'@SUM(A1)", "leading @ neutralised");
     assert_eq!(fields[6], "'\tcmd", "leading tab neutralised");
+
+    // The `;` / line-break payloads are prefixed where each new cell starts.
+    assert!(
+        dto.csv
+            .contains("\nx;'=cmd|' /C calc'!A0;,15.95,monthly,28,,ok,\"x\n'=1+1;\""),
+        "semicolon and newline payloads neutralised: {:?}",
+        dto.csv
+    );
+    // Whichever of `,` `;` tab CR LF a spreadsheet splits on, and whatever
+    // quotes or spaces it drops in front of a value, no cell of this export
+    // (all amounts here are positive) starts with a formula trigger.
+    for piece in dto.csv.split([',', ';', '\t', '\r', '\n']) {
+        let cell = piece.trim_start_matches(|c: char| c == '"' || c.is_whitespace());
+        assert!(
+            !cell.starts_with(['=', '+', '-', '@']),
+            "live formula cell {cell:?} in {:?}",
+            dto.csv
+        );
+    }
 
     // Interior `+` is not a formula trigger: the seeded name passes through.
     let icloud = rows
