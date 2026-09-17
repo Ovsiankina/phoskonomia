@@ -37,9 +37,9 @@
 //! ## "Today" & the seed
 //!
 //! The deterministic Swiss seed pins the demo clock to **2026-06-18** (day 18 of
-//! the June cycle). Server fns resolve `as_of` via [`today`] and, where real logic
-//! exists (dashboard), drive it against `MemoryDb::seeded()`. All other reads are
-//! seeded mock values shaped exactly like the design.
+//! the June cycle). Server fns resolve `as_of` via [`today`] and drive the real
+//! feature services through the `Session` ports (the seeded `MemoryDb` by
+//! default). Tests live in `tests/` (see its module doc).
 //!
 //! F1 provides only the [`chf`] presentation formatter below (the one thing
 //! carried from React `data/phosk.js`); everything else is F3's.
@@ -181,11 +181,27 @@ mod composition {
         Arc::new(phosk_adapter_ocr::FakeOcr::new())
     }
 
+    /// The stack unit tests run against: the seeded memory DB plus the
+    /// in-process fakes. It reads no `PHOSK_*` env, opens no socket and writes
+    /// no file, so `#[server]` fn tests are deterministic on any machine.
+    fn hermetic_stack() -> Result<Stack, phosk_core::error::PhoskError> {
+        Ok(Stack {
+            db: Arc::new(phosk_db_memory::MemoryDb::seeded()?),
+            llm: Arc::new(phosk_adapter_llm::FakeLlm::new()),
+            storage: Arc::new(phosk_adapter_storage::InMemoryStorage::new()),
+            ocr: Arc::new(phosk_adapter_ocr::FakeOcr::new()),
+        })
+    }
+
     /// Assemble (or return the cached) process-wide [`Stack`]. The first call
     /// opens the store / probes OCR; every later call is a cheap cache hit.
+    /// Test builds get [`hermetic_stack`] instead.
     pub(crate) async fn stack() -> Result<&'static Stack, phosk_core::error::PhoskError> {
         STACK
             .get_or_try_init(|| async {
+                if cfg!(test) {
+                    return hermetic_stack();
+                }
                 Ok(Stack {
                     db: build_db().await?,
                     llm: build_llm()?,
