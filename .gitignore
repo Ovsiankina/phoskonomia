@@ -21,9 +21,13 @@ id_rsa*
 id_ed25519*
 .netrc
 
+# local-only assistant context — may describe this machine; the repo is public
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
 # local agent automation (scripts, state, logs, worktrees) — machine-specific
 agentic-loop/
-.claude/settings.local.json
 
 # editor / OS
 .idea/
