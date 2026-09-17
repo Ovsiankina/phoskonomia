@@ -2,7 +2,7 @@
 
 **Status:** AUTHORITATIVE. Every downstream swarm agent reads THIS file. It is derived from the
 real wire spec (`frontend/dioxus-app/src/data/*.rs` — the ~30 `#[server]` view DTOs), the mock
-data shapes (`frontend/app/src/data/phosk.js`), the feature checklist
+data shapes of the since-deleted React prototype, the feature checklist
 (`backend/documentation/backend-features-todo.md`), and the existing built crates. Where this
 document and the AI-written `architectural-design-and-philosophy.md` disagree, THIS wins.
 

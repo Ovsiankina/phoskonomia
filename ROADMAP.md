@@ -23,7 +23,7 @@ Every task implies: TDD, all gates green, `CONTRIBUTION.md` respected, docs touc
   - Add a "superseded by ROADMAP.md" banner to `backend/documentation/backend-features-todo.md`.
 - [x] **T03** — Remove the dead REST surface (needs: T01)
   - Delete `backend/bin/phosk_api` (all-`501` stubs) and its `API.md`; drop now-unused workspace deps; update docs that mention it. Leave `frontend/app/` alone — T05 deletes it.
-- [ ] **T05** — Delete the obsolete React frontend `frontend/app/` (needs: T02)
+- [x] **T05** — Delete the obsolete React frontend `frontend/app/` (needs: T02)
   - `git rm -r frontend/app`; remove every remaining reference (root `Cargo.toml` comments, docs). Do NOT touch `.gitignore` — it is a protected path; list its now-dead entries under *Noticed, not fixed*. It stays recoverable from git history — say how in the PR body.
   - This PR is almost pure deletion and will exceed the usual size guidance; that is expected. No Rust code may change.
 - [ ] **T04** — Shared `DatabaseAdapter` conformance suite (needs: T01)
