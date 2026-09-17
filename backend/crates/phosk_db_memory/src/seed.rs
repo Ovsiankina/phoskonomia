@@ -531,22 +531,54 @@ pub fn seed_alerts() -> Result<Vec<Alert>, PhoskError> {
 
 // ── Recurring: subscriptions + charges ────────────────────────────────────────
 
+/// Row layout: `(slug, name, amount_cents, cadence, status, source, category, glyph, day, month, since)`.
+type SubscriptionRow = (
+    &'static str,
+    &'static str,
+    i64,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    u32,
+    &'static str,
+    (i32, u32, u32),
+);
+
+fn subscription_from_row(row: SubscriptionRow) -> Result<Subscription, PhoskError> {
+    let (slug, name, amount, cadence, status, source, cat, glyph, day, month, (sy, sm, sd)) = row;
+    let (source, prov) = match source {
+        "llm" => (
+            Source::LlmInferred,
+            Provenance {
+                source: Source::LlmInferred,
+                confidence: 0.72,
+            },
+        ),
+        _ => (Source::UserEntered, Provenance::user_entered()),
+    };
+    Ok(Subscription {
+        id: SubscriptionId::new(),
+        slug: slug.to_owned(),
+        name: name.to_owned(),
+        amount: Money::from_centimes(amount),
+        cadence: cadence.to_owned(),
+        day,
+        month: month.to_owned(),
+        status: status.to_owned(),
+        category: cat.to_owned(),
+        glyph: glyph.to_owned(),
+        since: date(sy, sm, sd)?,
+        note: String::new(),
+        source,
+        provenance: prov,
+    })
+}
+
 /// The 6 subs from `subscriptions.rs::seed_subscriptions`. Slugs = ids.
 pub fn seed_subscriptions() -> Result<Vec<Subscription>, PhoskError> {
-    // (slug, name, amount_cents, cadence, status, source, category, glyph, day, month, since)
-    let rows: [(
-        &str,
-        &str,
-        i64,
-        &str,
-        &str,
-        &str,
-        &str,
-        &str,
-        u32,
-        &str,
-        (i32, u32, u32),
-    ); 6] = [
+    let rows: [SubscriptionRow; 6] = [
         (
             "netflix",
             "Netflix",
@@ -626,37 +658,7 @@ pub fn seed_subscriptions() -> Result<Vec<Subscription>, PhoskError> {
             (2021, 11, 1),
         ),
     ];
-    let mut out = Vec::new();
-    for (slug, name, amount, cadence, status, source, cat, glyph, day, month, (sy, sm, sd)) in rows
-    {
-        let (source, prov) = match source {
-            "llm" => (
-                Source::LlmInferred,
-                Provenance {
-                    source: Source::LlmInferred,
-                    confidence: 0.72,
-                },
-            ),
-            _ => (Source::UserEntered, Provenance::user_entered()),
-        };
-        out.push(Subscription {
-            id: SubscriptionId::new(),
-            slug: slug.to_owned(),
-            name: name.to_owned(),
-            amount: Money::from_centimes(amount),
-            cadence: cadence.to_owned(),
-            day,
-            month: month.to_owned(),
-            status: status.to_owned(),
-            category: cat.to_owned(),
-            glyph: glyph.to_owned(),
-            since: date(sy, sm, sd)?,
-            note: String::new(),
-            source,
-            provenance: prov,
-        });
-    }
-    Ok(out)
+    rows.into_iter().map(subscription_from_row).collect()
 }
 
 /// Three prior charges per subscription (for `priceRose` / `recent`), most
@@ -695,26 +697,78 @@ pub fn seed_charges(subs: &[Subscription]) -> Result<Vec<Charge>, PhoskError> {
 
 // ── Debts: debts + payments + IOUs ────────────────────────────────────────────
 
+/// Row layout: `(slug, name, lender, kind, balance, orig, monthly, apr, day, term, status, glyph,
+/// source, since, note)`.
+type DebtRow = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    i64,
+    i64,
+    i64,
+    f64,
+    u32,
+    u32,
+    &'static str,
+    &'static str,
+    &'static str,
+    (i32, u32, u32),
+    &'static str,
+);
+
+fn debt_from_row(row: DebtRow) -> Result<Debt, PhoskError> {
+    let (
+        slug,
+        name,
+        lender,
+        kind,
+        balance,
+        orig,
+        monthly,
+        apr,
+        day,
+        term,
+        status,
+        glyph,
+        source,
+        (sy, sm, sd),
+        note,
+    ) = row;
+    let (source, prov) = match source {
+        "llm" => (
+            Source::LlmInferred,
+            Provenance {
+                source: Source::LlmInferred,
+                confidence: 0.7,
+            },
+        ),
+        _ => (Source::UserEntered, Provenance::user_entered()),
+    };
+    Ok(Debt {
+        id: DebtId::new(),
+        slug: slug.to_owned(),
+        name: name.to_owned(),
+        lender: lender.to_owned(),
+        kind: kind.to_owned(),
+        balance: Money::from_centimes(balance),
+        orig: Money::from_centimes(orig),
+        monthly: Money::from_centimes(monthly),
+        apr,
+        day,
+        term,
+        status: status.to_owned(),
+        glyph: glyph.to_owned(),
+        since: date(sy, sm, sd)?,
+        note: note.to_owned(),
+        source,
+        provenance: prov,
+    })
+}
+
 /// The 4 debts (`vw/card/loan/tax`) from `debts.rs::seed_debts`.
 pub fn seed_debts() -> Result<Vec<Debt>, PhoskError> {
-    // (slug, name, lender, kind, balance, orig, monthly, apr, day, term, status, glyph, source, since, note)
-    let rows: [(
-        &str,
-        &str,
-        &str,
-        &str,
-        i64,
-        i64,
-        i64,
-        f64,
-        u32,
-        u32,
-        &str,
-        &str,
-        &str,
-        (i32, u32, u32),
-        &str,
-    ); 4] = [
+    let rows: [DebtRow; 4] = [
         (
             "vw",
             "VW lease",
@@ -784,56 +838,7 @@ pub fn seed_debts() -> Result<Vec<Debt>, PhoskError> {
             "No interest. Clear it before the deadline.",
         ),
     ];
-    let mut out = Vec::new();
-    for (
-        slug,
-        name,
-        lender,
-        kind,
-        balance,
-        orig,
-        monthly,
-        apr,
-        day,
-        term,
-        status,
-        glyph,
-        source,
-        (sy, sm, sd),
-        note,
-    ) in rows
-    {
-        let (source, prov) = match source {
-            "llm" => (
-                Source::LlmInferred,
-                Provenance {
-                    source: Source::LlmInferred,
-                    confidence: 0.7,
-                },
-            ),
-            _ => (Source::UserEntered, Provenance::user_entered()),
-        };
-        out.push(Debt {
-            id: DebtId::new(),
-            slug: slug.to_owned(),
-            name: name.to_owned(),
-            lender: lender.to_owned(),
-            kind: kind.to_owned(),
-            balance: Money::from_centimes(balance),
-            orig: Money::from_centimes(orig),
-            monthly: Money::from_centimes(monthly),
-            apr,
-            day,
-            term,
-            status: status.to_owned(),
-            glyph: glyph.to_owned(),
-            since: date(sy, sm, sd)?,
-            note: note.to_owned(),
-            source,
-            provenance: prov,
-        });
-    }
-    Ok(out)
+    rows.into_iter().map(debt_from_row).collect()
 }
 
 /// One recent payment per debt (for the detail decay series).

@@ -222,7 +222,7 @@ pub async fn signal_detail(
     let all_time_txns = occ_txns.max(headline.txns);
 
     // Newest occurrence first for the inspector's "recent" rail.
-    occurrences.sort_by(|a, b| b.date.cmp(&a.date));
+    occurrences.sort_by_key(|o| std::cmp::Reverse(o.date));
     let recent: Vec<SignalOccurrenceDto> = occurrences.iter().map(occurrence_dto).collect();
 
     let guidance = if headline.delta_pct >= 0 {

@@ -12,7 +12,7 @@ Every task implies: TDD, all gates green, `CONTRIBUTION.md` respected, docs touc
 
 ### Phase 0 — hygiene (unblocks the gates)
 
-- [ ] **T01** — Make the gates green with zero behaviour change
+- [x] **T01** — Make the gates green with zero behaviour change
   - Formatting was done before the first commit; if `cargo fmt --all --check` is still dirty, format only the files you touch and say so.
   - Fix the 7 existing clippy warnings (`phosk_debts`, `phosk_ledger`, `phosk_recurring`, `phosk_llm_ollama`, `phosk_db_surreal` tests). No `#[allow]`.
   - Done when fmt/clippy(`-D warnings`)/test are all clean.

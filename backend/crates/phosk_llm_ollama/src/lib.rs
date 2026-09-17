@@ -101,7 +101,7 @@ impl OllamaLlm {
     const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 
     /// Generation timeout. Generous: the ~23 GB model loads slowly on first hit.
-    const GENERATE_TIMEOUT: Duration = Duration::from_secs(300);
+    const GENERATE_TIMEOUT: Duration = Duration::from_mins(5);
 
     /// Build an adapter against `base_url`, targeting `model`.
     ///
