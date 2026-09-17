@@ -17,12 +17,16 @@
 //!   * the inspected pill ← `get_signal(id)`.
 //!
 //! Notable mapping notes (vs the JSX, which spoke to a now-dead REST layer):
-//!   * The per-line CONFIRM / CORRECT controls and the AI RE-READ nudge button
-//!     POSTed/PATCHed the dead REST layer. There is no F3 server fn for those
-//!     mutations yet, so the buttons are preserved verbatim (same DOM/classes/
-//!     affordance) but their handlers only `stop_propagation` — the mutation
-//!     wiring lands when the corresponding server fns do. (Faithful: structure +
-//!     style preserved; only the dead transport is dropped, per the brief.)
+//!   * Line review is live: picking a line's name (or CORRECT on a flagged
+//!     line) opens an inline editor that saves through
+//!     `correct_transaction_line`; CONFIRM accepts the reading as-is. After a
+//!     save the list and every open line list refetch (`LinesRev`), so the ⚠
+//!     marks clear and no other view keeps editing an outdated line.
+//!   * Low-confidence lines (< 0.7) wear the design system's CAUTION treatment
+//!     (`--warn`): a flagged row rule, an amber dot and name. Coral stays the
+//!     page's single signal moment.
+//!   * The AI RE-READ nudge button still has no server fn (it POSTed the dead
+//!     REST layer), so its handler only `stop_propagation`s.
 //!   * F3's `TxnLineDto` always carries a concrete `line_total`/`confidence`
 //!     (backend-derived), so React's `chf(undefined) → "—"` / `conf == null`
 //!     branches collapse to the present-value path; the confidence formatting
@@ -38,8 +42,9 @@ use crate::components::shell::{AiPanel, Sig, SigOcc, SignalPanel, TopBar};
 use crate::components::states::Awaiting;
 use crate::data::signals::{get_signal, SignalDetailDto};
 use crate::data::transactions::{
-    get_transaction, get_transaction_lines, list_transactions, TransactionDto, TxnFilter,
-    TxnLineDto, TxnLinesDto,
+    correct_transaction_line, correction_error_text, correction_needs_reload, get_transaction,
+    get_transaction_lines, list_transactions, TransactionDto, TxnFilter, TxnLineCorrection,
+    TxnLineDraft, TxnLineDto, TxnLinesDto,
 };
 use crate::data::{chf2, cycle::get_cycle};
 
@@ -69,14 +74,24 @@ fn hz_period(h: &str) -> &'static str {
     }
 }
 
-/// Confidence tone (React `ConfDot`): `>=0.85` ok, `>=0.7` blue, else alert.
+/// Whether a reading is below the review threshold — the same `< 0.7` rule as
+/// `phosk_model::Provenance::is_low_confidence` on the backend.
+fn is_low_conf(c: f64) -> bool {
+    c < 0.7
+}
+
+/// Confidence tone (React `ConfDot`): `>=0.85` ok, `>=0.7` blue, else `warn`.
+///
+/// A low reading is a caution, so it takes the canonical `--warn` flag rather
+/// than coral (`alert`): several flagged lines must not multiply the page's one
+/// coral moment.
 fn conf_tone(c: f64) -> &'static str {
     if c >= 0.85 {
         "ok"
-    } else if c >= 0.7 {
+    } else if !is_low_conf(c) {
         "blue"
     } else {
-        "alert"
+        "warn"
     }
 }
 
@@ -194,31 +209,76 @@ fn CatTag(cat: String) -> Element {
     }
 }
 
+/// Page-wide revision of the receipt lines, bumped after every saved line
+/// correction and every refusal that says the page is out of date.
+///
+/// Every open line list (accordion rows and the receipt screen) reads it in its
+/// fetch, so all of them refetch together and no view keeps showing, or
+/// editing, an outdated line.
+#[derive(Clone, Copy)]
+struct LinesRev(Signal<u64>);
+
+/// Subscribe the calling fetch to [`LinesRev`] (a no-op outside the page).
+fn track_lines_rev(rev: Option<LinesRev>) {
+    if let Some(LinesRev(rev)) = rev {
+        let _: u64 = rev();
+    }
+}
+
+/// A line's name. Clicking it, or Enter / Space while it has focus, picks the
+/// line for correction; a flagged line carries the ⚠ mark.
+#[component]
+fn PickName(name: String, low: bool, index: usize, on_pick: EventHandler<usize>) -> Element {
+    let cls = if low { "nm pick low" } else { "nm pick" };
+    let text = if low { format!("{name} ⚠") } else { name };
+    rsx! {
+        span {
+            class: "{cls}",
+            role: "button",
+            tabindex: "0",
+            title: "Review / correct this line",
+            onclick: move |e: Event<MouseData>| {
+                e.stop_propagation();
+                on_pick.call(index);
+            },
+            onkeydown: move |e: Event<KeyboardData>| {
+                let key = e.key();
+                if key == Key::Enter || key == Key::Character(" ".to_owned()) {
+                    e.prevent_default();
+                    e.stop_propagation();
+                    on_pick.call(index);
+                }
+            },
+            "{text}"
+        }
+    }
+}
+
 /// A single fetched receipt line in the accordion body (React `LineItem`).
 ///
-/// The CONFIRM / CORRECT controls (shown only for low-confidence lines) PATCHed
-/// the dead REST layer in React; here they are preserved structurally but their
-/// click handlers only `stop_propagation` until an F3 mutation server fn lands.
+/// Picking the name opens the line for correction; a flagged (low-confidence)
+/// line also shows CONFIRM / CORRECT. See [`LineReview`].
 #[component]
 fn LineItem(
     l: TxnLineDto,
     #[props(default = false)] active: bool,
     on_select_sig: EventHandler<String>,
+    receipt_id: String,
+    index: usize,
+    editing: bool,
+    on_pick: EventHandler<usize>,
+    on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
 ) -> Element {
     let conf = l.confidence;
-    let low = conf < 0.7;
-    let nm_cls = if low { "nm low" } else { "nm" };
-    let nm_text = if low {
-        format!("{} ⚠", l.name)
-    } else {
-        l.name.clone()
-    };
+    let low = is_low_conf(conf);
+    let row_cls = if low { "line flag" } else { "line" };
     let qty_str = format!("{}×{}", l.qty, chf2(l.unit_price));
     rsx! {
-        div { class: "line",
+        div { class: "{row_cls}",
             div { class: "nmwrap",
                 span { class: "cdot", ConfDot { conf } }
-                span { class: "{nm_cls}", "{nm_text}" }
+                PickName { name: l.name.clone(), low, index, on_pick }
             }
             if l.signal_id.is_empty() {
                 CatTag { cat: l.category.clone() }
@@ -234,18 +294,265 @@ fn LineItem(
                 div { class: "lp", "{chf2(l.line_total)}" }
                 div { class: "qty", "{qty_str}" }
             }
-            if low {
-                div { style: "grid-column:1 / -1;display:flex;gap:7px;margin-top:6px",
-                    button {
-                        class: "gbtn p",
-                        onclick: move |e: Event<MouseData>| e.stop_propagation(),
-                        "CONFIRM"
+            LineReview {
+                receipt_id,
+                index,
+                l: l.clone(),
+                editing,
+                on_pick,
+                on_saved,
+                on_refresh,
+            }
+        }
+    }
+}
+
+/// Review controls under one receipt line (T31).
+///
+/// * a flagged (low-confidence) line shows CONFIRM (accept the reading as-is)
+///   and CORRECT (open the editor);
+/// * while the line is picked, the inline [`LineEditor`] replaces them.
+///
+/// CONFIRM's pending / refused states use the shared `Awaiting` block and show
+/// only while the line is still flagged: a later save clears them. Every grid
+/// child here spans the full row (`txn.css`, T31 block).
+///
+/// `on_saved` closes the editor and refreshes; `on_refresh` only refreshes (a
+/// CONFIRM, or a refusal that says the page is out of date).
+#[component]
+fn LineReview(
+    receipt_id: String,
+    index: usize,
+    l: TxnLineDto,
+    editing: bool,
+    on_pick: EventHandler<usize>,
+    on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
+) -> Element {
+    let mut pending = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+    let low = is_low_conf(l.confidence);
+
+    let confirm_fix = TxnLineCorrection::confirm(&receipt_id, index, &l);
+    let confirm = move |e: Event<MouseData>| {
+        e.stop_propagation();
+        if pending() {
+            return;
+        }
+        let fix = confirm_fix.clone();
+        pending.set(true);
+        error.set(None);
+        spawn(async move {
+            let res = correct_transaction_line(fix).await;
+            pending.set(false);
+            match res {
+                // Refresh only: another line's open editor must stay open.
+                Ok(()) => on_refresh.call(()),
+                Err(err) => {
+                    error.set(Some(correction_error_text(&err)));
+                    if correction_needs_reload(&err) {
+                        on_refresh.call(());
                     }
-                    button {
-                        class: "gbtn",
-                        onclick: move |e: Event<MouseData>| e.stop_propagation(),
-                        "CORRECT"
+                }
+            }
+        });
+    };
+    let busy = pending();
+
+    rsx! {
+        if editing {
+            LineEditor {
+                receipt_id,
+                index,
+                l,
+                on_close: move |()| on_pick.call(index),
+                on_saved: move |()| {
+                    error.set(None);
+                    on_saved.call(());
+                },
+                on_refresh,
+            }
+        } else if low {
+            div { class: "line-acts",
+                button { class: "gbtn p", disabled: busy, onclick: confirm, "CONFIRM" }
+                button {
+                    class: "gbtn",
+                    disabled: busy,
+                    onclick: move |e: Event<MouseData>| {
+                        e.stop_propagation();
+                        error.set(None);
+                        on_pick.call(index);
+                    },
+                    "CORRECT"
+                }
+            }
+            if busy {
+                div { class: "line-state",
+                    Awaiting {
+                        label: "MOD·TX · CONFIRM".to_string(),
+                        legend: Some("SAVING".to_string()),
+                        message: Some("Confirming this reading…".to_string()),
                     }
+                }
+            } else if let Some(msg) = error() {
+                div { class: "line-state",
+                    Awaiting {
+                        label: "MOD·TX · CONFIRM".to_string(),
+                        legend: Some("NOT SAVED".to_string()),
+                        message: Some(msg),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Inline correction form for one picked line (T31): item, category, quantity
+/// and unit price, then SAVE or CANCEL.
+///
+/// The fields hold raw text and only the ones the user changed are sent (see
+/// `TxnLineCorrection::from_draft`). The server checks the line still shows
+/// what this form opened on, validates the changes and parses the price to
+/// exact centimes. Saving without an edit confirms the reading.
+///
+/// If the stored line changes while the form is open (a save elsewhere, or the
+/// refetch after a refusal), SAVE gives way to RELOAD, which loads the saved
+/// values and drops the edits here. Quantity and price inputs are set in
+/// Pilowlava (numbers are display type); labels in VG5000.
+#[component]
+fn LineEditor(
+    receipt_id: String,
+    index: usize,
+    l: TxnLineDto,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
+) -> Element {
+    // The line as this form opened it: the request's stale-read guard and the
+    // baseline that tells edited fields from untouched ones.
+    let mut seen = use_signal(|| l.clone());
+    let mut draft = use_signal(|| TxnLineDraft::of(&l));
+    let mut pending = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+
+    let moved = TxnLineDraft::of(&l) != TxnLineDraft::of(&seen.read());
+    let save = move |e: Event<MouseData>| {
+        e.stop_propagation();
+        if pending() || moved {
+            return;
+        }
+        let fix = TxnLineCorrection::from_draft(&receipt_id, index, &seen.read(), &draft.read());
+        pending.set(true);
+        error.set(None);
+        spawn(async move {
+            let res = correct_transaction_line(fix).await;
+            pending.set(false);
+            match res {
+                Ok(()) => on_saved.call(()),
+                Err(err) => {
+                    error.set(Some(correction_error_text(&err)));
+                    if correction_needs_reload(&err) {
+                        on_refresh.call(());
+                    }
+                }
+            }
+        });
+    };
+    let reload = move |e: Event<MouseData>| {
+        e.stop_propagation();
+        draft.set(TxnLineDraft::of(&l));
+        seen.set(l.clone());
+        error.set(None);
+    };
+    let busy = pending();
+    let legend = format!("MOD·TX · LINE {}", index + 1);
+    let d = draft.read().clone();
+
+    rsx! {
+        div {
+            class: "lfix osc-bkt blue",
+            onclick: move |e: Event<MouseData>| e.stop_propagation(),
+            span { class: "osc-leg", "{legend}" }
+            div { class: "lfix-grid",
+                label { class: "lfix-f",
+                    span { class: "k", "Item" }
+                    input {
+                        value: "{d.name}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().name = e.value(),
+                    }
+                }
+                label { class: "lfix-f",
+                    span { class: "k", "Category" }
+                    input {
+                        value: "{d.category}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().category = e.value(),
+                    }
+                }
+                label { class: "lfix-f",
+                    span { class: "k", "Qty" }
+                    input {
+                        class: "num",
+                        inputmode: "decimal",
+                        value: "{d.qty}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().qty = e.value(),
+                    }
+                }
+                label { class: "lfix-f",
+                    span { class: "k", "Unit · CHF" }
+                    input {
+                        class: "num",
+                        inputmode: "decimal",
+                        value: "{d.unit_price}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().unit_price = e.value(),
+                    }
+                }
+            }
+            if busy {
+                div { class: "line-state",
+                    Awaiting {
+                        label: "MOD·TX · CORRECTION".to_string(),
+                        legend: Some("SAVING".to_string()),
+                        message: Some("Saving the correction…".to_string()),
+                    }
+                }
+            } else if moved {
+                div { class: "line-state",
+                    Awaiting {
+                        label: "MOD·TX · CORRECTION".to_string(),
+                        legend: Some("LINE CHANGED".to_string()),
+                        message: Some(
+                            "This line was changed since the form opened. RELOAD shows the saved values and drops the edits here."
+                                .to_string(),
+                        ),
+                    }
+                }
+            } else if let Some(msg) = error() {
+                div { class: "line-state",
+                    Awaiting {
+                        label: "MOD·TX · CORRECTION".to_string(),
+                        legend: Some("NOT SAVED".to_string()),
+                        message: Some(msg),
+                    }
+                }
+            }
+            div { class: "lfix-acts",
+                if moved {
+                    button { class: "gbtn p", onclick: reload, "RELOAD" }
+                } else {
+                    button { class: "gbtn p", disabled: busy, onclick: save, "SAVE" }
+                }
+                button {
+                    class: "gbtn",
+                    disabled: busy,
+                    onclick: move |e: Event<MouseData>| {
+                        e.stop_propagation();
+                        on_close.call(());
+                    },
+                    "CANCEL"
                 }
             }
         }
@@ -255,15 +562,25 @@ fn LineItem(
 /// Accordion body — fetches this receipt's lines (React `TxnRowBody`). Mounted
 /// only while the row is open (the parent only renders it when `open`), so the
 /// `get_transaction_lines` read only fires for opened receipts.
+///
+/// One line at a time can be picked for correction (`editing`). A saved
+/// correction tells the page (`on_changed`), which refetches the list and bumps
+/// [`LinesRev`], so these lines refetch too.
 #[component]
 fn TxnRowBody(
     t: TransactionDto,
     #[props(default)] sel: Option<String>,
     on_select_sig: EventHandler<String>,
     on_details: EventHandler<TransactionDto>,
+    on_changed: EventHandler<()>,
 ) -> Element {
     let id = t.id.clone();
-    let lines_res = use_resource(move || get_transaction_lines(id.clone()));
+    let rev = try_use_context::<LinesRev>();
+    let lines_res = use_resource(move || {
+        track_lines_rev(rev);
+        get_transaction_lines(id.clone())
+    });
+    let mut editing = use_signal(|| Option::<usize>::None);
 
     let body: Option<TxnLinesDto> = lines_res
         .read()
@@ -279,6 +596,7 @@ fn TxnRowBody(
     let sel_str = sel.clone();
     let t_for_review = t.clone();
     let t_for_open = t.clone();
+    let receipt_id = t.id.clone();
 
     rsx! {
         div { class: "trow-body",
@@ -296,6 +614,18 @@ fn TxnRowBody(
                         l: l.clone(),
                         active: sel_str.as_deref() == Some(l.signal_id.as_str()) && !l.signal_id.is_empty(),
                         on_select_sig,
+                        receipt_id: receipt_id.clone(),
+                        index: i,
+                        editing: editing() == Some(i),
+                        on_pick: move |pick: usize| {
+                            let next = if editing() == Some(pick) { None } else { Some(pick) };
+                            editing.set(next);
+                        },
+                        on_saved: move |()| {
+                            editing.set(None);
+                            on_changed.call(());
+                        },
+                        on_refresh: move |()| on_changed.call(()),
                     }
                 }
                 div { class: "trow-foot",
@@ -349,6 +679,7 @@ fn TxnRow(
     on_details: EventHandler<TransactionDto>,
     #[props(default)] sel: Option<String>,
     on_select_sig: EventHandler<String>,
+    on_changed: EventHandler<()>,
 ) -> Element {
     let date_str = t.date.clone();
     let mut parts = date_str.splitn(2, ' ');
@@ -399,7 +730,7 @@ fn TxnRow(
                 div { class: "chev", "▸" }
             }
             if open {
-                TxnRowBody { t: t_body, sel, on_select_sig, on_details }
+                TxnRowBody { t: t_body, sel, on_select_sig, on_details, on_changed }
             }
         }
     }
@@ -485,7 +816,7 @@ fn FilterBar(
 #[component]
 fn OcrLine(l: TxnLineDto) -> Element {
     let conf = l.confidence;
-    let low = conf < 0.7;
+    let low = is_low_conf(conf);
     let mut cls = String::from("ocrline");
     if low {
         cls.push_str(" low");
@@ -511,26 +842,29 @@ fn OcrLine(l: TxnLineDto) -> Element {
 }
 
 /// One structured line in the receipt screen's items pane (React's inner `il` map).
+///
+/// Same review affordances as the accordion [`LineItem`] (see [`LineReview`]).
 #[component]
 fn ReceiptItem(
     l: TxnLineDto,
     #[props(default = false)] active: bool,
     on_select_sig: EventHandler<String>,
+    receipt_id: String,
+    index: usize,
+    editing: bool,
+    on_pick: EventHandler<usize>,
+    on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
 ) -> Element {
     let conf = l.confidence;
-    let low = conf < 0.7;
-    let nm_cls = if low { "nm low" } else { "nm" };
-    let nm_text = if low {
-        format!("{} ⚠", l.name)
-    } else {
-        l.name.clone()
-    };
+    let low = is_low_conf(conf);
+    let row_cls = if low { "il flag" } else { "il" };
     let qty_str = format!("{}×{}", l.qty, chf2(l.unit_price));
     rsx! {
-        div { class: "il",
+        div { class: "{row_cls}",
             div { class: "nmwrap",
                 span { class: "cdot", ConfDot { conf } }
-                span { class: "{nm_cls}", style: "font-size:12.5px", "{nm_text}" }
+                PickName { name: l.name.clone(), low, index, on_pick }
             }
             if l.signal_id.is_empty() {
                 CatTag { cat: l.category.clone() }
@@ -546,19 +880,14 @@ fn ReceiptItem(
                 div { class: "lp", "{chf2(l.line_total)}" }
                 div { class: "qty", "{qty_str}" }
             }
-            if low {
-                div { style: "grid-column:1 / -1;display:flex;gap:7px;margin-top:6px",
-                    button {
-                        class: "gbtn p",
-                        onclick: move |e: Event<MouseData>| e.stop_propagation(),
-                        "CONFIRM"
-                    }
-                    button {
-                        class: "gbtn",
-                        onclick: move |e: Event<MouseData>| e.stop_propagation(),
-                        "CORRECT"
-                    }
-                }
+            LineReview {
+                receipt_id,
+                index,
+                l: l.clone(),
+                editing,
+                on_pick,
+                on_saved,
+                on_refresh,
             }
         }
     }
@@ -569,17 +898,31 @@ fn ReceiptItem(
 /// Fetches `get_transaction_lines(id)` (the line table) + `get_transaction(id)`
 /// (detail: avg_confidence, source, ocr_regions count). Mounted only when a
 /// receipt is open, so neither read fires while closed.
+///
+/// Lines are reviewable here too. A saved correction tells the page
+/// (`on_changed`), which bumps [`LinesRev`]: the lines and the detail (average
+/// confidence) refetch here, and so do the accordion rows open underneath.
 #[component]
 fn ReceiptScreen(
     t: TransactionDto,
     #[props(default)] sel: Option<String>,
     on_close: EventHandler<()>,
     on_select_sig: EventHandler<String>,
+    on_changed: EventHandler<()>,
 ) -> Element {
     let id = t.id.clone();
     let id2 = t.id.clone();
-    let lines_res = use_resource(move || get_transaction_lines(id.clone()));
-    let detail_res = use_resource(move || get_transaction(id2.clone()));
+    let receipt_id = t.id.clone();
+    let mut editing = use_signal(|| Option::<usize>::None);
+    let rev = try_use_context::<LinesRev>();
+    let lines_res = use_resource(move || {
+        track_lines_rev(rev);
+        get_transaction_lines(id.clone())
+    });
+    let detail_res = use_resource(move || {
+        track_lines_rev(rev);
+        get_transaction(id2.clone())
+    });
 
     let lbody: Option<TxnLinesDto> = lines_res
         .read()
@@ -680,7 +1023,7 @@ fn ReceiptScreen(
                         }
                         div { style: "margin-top:12px;font-size:9.5px;color:var(--ink-3);line-height:1.6;letter-spacing:.04em",
                             "Boxes = detected regions. "
-                            span { style: "color:var(--neon)", "Coral" }
+                            span { style: "color:var(--warn)", "Amber" }
                             " = low confidence, queued for AI re-read. "
                             span { style: "color:var(--neon-hot)", "⌁" }
                             " = rolled into a tracked item-signal."
@@ -744,6 +1087,18 @@ fn ReceiptScreen(
                                     l: l.clone(),
                                     active: sel.as_deref() == Some(l.signal_id.as_str()) && !l.signal_id.is_empty(),
                                     on_select_sig,
+                                    receipt_id: receipt_id.clone(),
+                                    index: i,
+                                    editing: editing() == Some(i),
+                                    on_pick: move |pick: usize| {
+                                        let next = if editing() == Some(pick) { None } else { Some(pick) };
+                                        editing.set(next);
+                                    },
+                                    on_saved: move |()| {
+                                        editing.set(None);
+                                        on_changed.call(());
+                                    },
+                                    on_refresh: move |()| on_changed.call(()),
                                 }
                             }
                         }
@@ -825,7 +1180,11 @@ pub fn TransactionsPage() -> Element {
     // calls there is no network round-trip to coalesce, so the query feeds the
     // filter directly and the list filters live — behaviourally identical to what
     // the debounced version converged to.
-    let txns = use_resource(move || {
+    // Bumped with every list refetch after a line correction; see `LinesRev`.
+    let mut lines_rev = use_signal(|| 0_u64);
+    use_context_provider(|| LinesRev(lines_rev));
+
+    let mut txns = use_resource(move || {
         let filter = TxnFilter {
             period: hz_period(&horizon()).to_string(),
             shop: shop(),
@@ -989,6 +1348,10 @@ pub fn TransactionsPage() -> Element {
                                                                     sel.set(Some(id));
                                                                     drawer_sig.set(true);
                                                                 },
+                                                                on_changed: move |()| {
+                                                                    txns.restart();
+                                                                    lines_rev += 1;
+                                                                },
                                                             }
                                                         }
                                                     }
@@ -1030,6 +1393,10 @@ pub fn TransactionsPage() -> Element {
                     on_select_sig: move |id: String| {
                         sel.set(Some(id));
                         drawer_sig.set(true);
+                    },
+                    on_changed: move |()| {
+                        txns.restart();
+                        lines_rev += 1;
                     },
                 }
             }

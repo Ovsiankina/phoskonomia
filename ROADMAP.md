@@ -55,7 +55,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 `cargo check` targets.
 
 - [x] **T30** — Budgets: edit a category cap (`set_cap`) inline (needs: T01)
-- [ ] **T31** — Transactions: review/correct a line item (`correct_line`), low-confidence lines highlighted (needs: T01)
+- [x] **T31** — Transactions: review/correct a line item (`correct_line`), low-confidence lines highlighted (needs: T01)
 - [x] **T32** — Subscriptions: confirm / dismiss AI-detected recurring candidates (needs: T01)
 - [ ] **T33** — AI chat: send, persisted history, `/clear` command; panel wide + sticky per the old ROADMAP (needs: T01)
 - [ ] **T34** — Config page on real `phosk_settings`: get / set / reset preferences (needs: T01)

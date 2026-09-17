@@ -39,12 +39,16 @@ pub fn awaiting_message(loading: bool, message: Option<&str>) -> String {
 /// -p phosk_api`): the page passes it when its resource resolves to `Err` (the
 /// `#[server]` equivalent of REST status 0 — backend offline). `None` → no hint
 /// line, faithful to the JSX rendering it only when `status === 0`.
+///
+/// `legend` overrides the bracket legend (default LOADING / AWAITING BACKEND),
+/// e.g. `NOT SAVED` when a write was refused rather than the backend missing.
 #[component]
 pub fn Awaiting(
     #[props(default = String::from("DATA"))] label: String,
     #[props(default = false)] loading: bool,
     #[props(default)] message: Option<String>,
     #[props(default)] hint: Option<String>,
+    #[props(default)] legend: Option<String>,
     #[props(default = String::from("blue"))] tone: String,
     #[props(default)] style: Option<String>,
 ) -> Element {
@@ -55,9 +59,17 @@ pub fn Awaiting(
         None => base.to_string(),
     };
     let body = awaiting_message(loading, message.as_deref());
+    let leg = legend.unwrap_or_else(|| {
+        if loading {
+            "LOADING"
+        } else {
+            "AWAITING BACKEND"
+        }
+        .to_string()
+    });
     rsx! {
         div { class: "{cls}", "data-awaiting": "1", style: "{style_attr}",
-            span { class: "osc-leg", if loading { "LOADING" } else { "AWAITING BACKEND" } }
+            span { class: "osc-leg", "{leg}" }
             div { class: "hud sm", style: "justify-content:center;color:var(--indigo-neon)", "⌁ {label}" }
             div { class: "dim", style: "margin-top:7px;font-size:11px;line-height:1.5", "{body}" }
             if let Some(h) = hint {
