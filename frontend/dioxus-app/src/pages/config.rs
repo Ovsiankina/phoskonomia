@@ -6,15 +6,18 @@
 //! rendered one), the `.cfg-wrap` head + status ribbon + 2-col panel grid
 //! (General/Transactions/Budgets/Subscriptions/Debts/Analytics) + footer.
 //!
-//! Data model (per the F3 DATA CATALOG note): Config is a localStorage/tweaks
-//! surface — there is NO `data/config.rs` server fn, and no `Money` shape to
-//! serve. So the config store lives entirely in client `use_signal` state,
-//! mirroring React's `CFG_DEFAULTS`. The only server read is the shared
-//! [`get_cycle`] feeding the TopBar's date tokens. The React `useGet("/settings/*")`
-//! reads (preferences/summary/account/ai-status) were pure preference plumbing
-//! that mostly 501'd; their effect on the UI was: counts fall back to local
-//! counts, and engine/model render `"—"` when no backend serves them. We
-//! reproduce exactly that fallback (local counts; `engine`/`model` = `None`).
+//! Data model: two stores, no `Money` shape.
+//!   * The per-surface layout tweaks (mirroring React's `CFG_DEFAULTS`) have no
+//!     backend preference behind them. They live in client `use_signal` state,
+//!     persisted to `localStorage` (below).
+//!   * The CORE panel is the backend's `phosk_settings` key set, loaded, saved
+//!     and reset through [`crate::data::settings`]. The server validates every
+//!     write and answers with the refreshed view; the page renders only the
+//!     values it is handed and never decides what is valid. The same view feeds
+//!     the ASSISTANT engine/model labels and adds its rows to the header
+//!     counts. "Reset all" resets both stores.
+//!
+//! The shared [`get_cycle`] read feeds the TopBar's date tokens.
 //!
 //! Persistence + cross-page live-sync (`__phoskReadCfg`/`__phoskWriteCfg` +
 //! the `"phoskcfg"` CustomEvent) is the one piece that MUST touch `window` /
@@ -38,7 +41,12 @@ use dioxus::prelude::*;
 
 use crate::components::comps::TopBar;
 use crate::components::prims::ScannerBg;
+use crate::components::states::Awaiting;
 use crate::data::cycle::get_cycle;
+use crate::data::settings::{
+    get_preferences, reset_all_preferences, reset_preference, set_preference, PreferenceRowDto,
+    SettingsDto,
+};
 
 // ── the config store value: a tweak is either an enum string or a boolean ─────
 
@@ -117,15 +125,19 @@ fn cfg_total() -> usize {
     cfg_defaults().len()
 }
 
-/// A `(value, label)` option pair for a segmented/select control.
+/// A `(value, label)` option pair for a segmented/select control. Owned, so the
+/// CORE rows can build options from the values the server hands them.
 #[derive(Clone, PartialEq)]
 struct Opt {
-    value: &'static str,
-    label: &'static str,
+    value: String,
+    label: String,
 }
 
-fn opt(value: &'static str, label: &'static str) -> Opt {
-    Opt { value, label }
+fn opt(value: &str, label: &str) -> Opt {
+    Opt {
+        value: value.to_string(),
+        label: label.to_string(),
+    }
 }
 
 // ── persistence bridge (the only `window`/localStorage touch — via eval) ──────
@@ -211,19 +223,28 @@ fn CfgRow(label: String, hint: Option<String>, children: Element) -> Element {
 }
 
 /// A sharp segmented selector (2–3 short options). (React `CfgSeg`.)
+/// `numeric` sets the option labels in Pilowlava; `disabled` locks the buttons.
 #[component]
-fn CfgSeg(value: String, options: Vec<Opt>, on_change: EventHandler<String>) -> Element {
+fn CfgSeg(
+    value: String,
+    options: Vec<Opt>,
+    on_change: EventHandler<String>,
+    #[props(default = false)] numeric: bool,
+    #[props(default = false)] disabled: bool,
+) -> Element {
+    let cls = if numeric { "cfg-seg num" } else { "cfg-seg" };
     rsx! {
-        div { class: "cfg-seg", role: "radiogroup",
+        div { class: "{cls}", role: "radiogroup",
             for o in options.iter() {
                 {
                     let on = o.value == value;
-                    let v = o.value.to_string();
+                    let v = o.value.clone();
                     rsx! {
                         button {
                             key: "{o.value}",
                             r#type: "button",
                             role: "radio",
+                            disabled,
                             "aria-checked": "{on}",
                             class: if on { "on" } else { "" },
                             onclick: move |_| on_change.call(v.clone()),
@@ -237,12 +258,25 @@ fn CfgSeg(value: String, options: Vec<Opt>, on_change: EventHandler<String>) -> 
 }
 
 /// A native `<select>` for longer option lists. (React `CfgSelect`.)
+/// `numeric` sets the options in Pilowlava; `disabled` locks the control.
 #[component]
-fn CfgSelect(value: String, options: Vec<Opt>, on_change: EventHandler<String>) -> Element {
+fn CfgSelect(
+    value: String,
+    options: Vec<Opt>,
+    on_change: EventHandler<String>,
+    #[props(default = false)] numeric: bool,
+    #[props(default = false)] disabled: bool,
+) -> Element {
+    let cls = if numeric {
+        "cfg-select num"
+    } else {
+        "cfg-select"
+    };
     rsx! {
-        div { class: "cfg-select",
+        div { class: "{cls}",
             select {
                 value: "{value}",
+                disabled,
                 onchange: move |e| on_change.call(e.value()),
                 for o in options.iter() {
                     option { key: "{o.value}", value: "{o.value}", "{o.label}" }
@@ -321,6 +355,196 @@ fn CfgPanel(
     }
 }
 
+// ══════════════════ CORE panel: server-backed `phosk_settings` ═══════════════
+
+/// One write against the settings service.
+#[derive(Clone, PartialEq, Debug)]
+enum PrefWrite {
+    /// Set `key` to one of its server-provided allowed values.
+    Set(String, String),
+    /// Reset `key` to its factory value.
+    Reset(String),
+    /// Reset every known key ("Reset all").
+    ResetAll,
+}
+
+impl PrefWrite {
+    /// The row this write targets (`"*"` = every row).
+    fn target(&self) -> String {
+        match self {
+            PrefWrite::Set(k, _) | PrefWrite::Reset(k) => k.clone(),
+            PrefWrite::ResetAll => "*".to_string(),
+        }
+    }
+}
+
+/// Row label + hint for a known key. Presentation only: which keys exist and
+/// which values they accept is the server's call.
+fn pref_copy(key: &str) -> (String, String) {
+    let (label, hint) = match key {
+        "momentum_baseline_cycles" => (
+            "Momentum baseline",
+            "Trailing cycles averaged for every momentum delta",
+        ),
+        "currency" => ("Currency", "Amounts are exact CHF centimes"),
+        "cycle_period" => ("Budget cycle", "Budgets run on calendar-month cycles"),
+        "low_confidence_threshold" => (
+            "Low-confidence threshold",
+            "AI proposals scoring below it are flagged for review",
+        ),
+        "telemetry" => ("Telemetry", "Nothing leaves this device"),
+        other => (other, ""),
+    };
+    (label.to_string(), hint.to_string())
+}
+
+/// A value made only of digits and dots renders in Pilowlava.
+fn is_numeric(v: &str) -> bool {
+    !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// The CORE panel body: pending / error / empty states, then one row per key,
+/// then the refused-write state.
+#[component]
+fn CorePrefs(
+    view: Option<SettingsDto>,
+    loading: bool,
+    load_error: bool,
+    busy: Option<String>,
+    write_error: bool,
+    on_write: EventHandler<PrefWrite>,
+) -> Element {
+    let Some(view) = view else {
+        let (message, hint) = if load_error {
+            (
+                Some("Preferences unavailable".to_string()),
+                Some("The settings service did not answer · reload to retry".to_string()),
+            )
+        } else {
+            (None, None)
+        };
+        return rsx! {
+            Awaiting { label: "CORE · PREFERENCES".to_string(), loading, message, hint }
+        };
+    };
+    if view.rows.is_empty() {
+        return rsx! {
+            Awaiting {
+                label: "CORE · PREFERENCES".to_string(),
+                message: Some("No preferences stored".to_string()),
+            }
+        };
+    }
+    let busy_any = busy.is_some();
+    let saving_all = busy.as_deref() == Some("*");
+    rsx! {
+        for r in view.rows.iter() {
+            PrefRow {
+                key: "{r.key}",
+                row: r.clone(),
+                disabled: busy_any,
+                saving: saving_all || busy.as_deref() == Some(r.key.as_str()),
+                on_write,
+            }
+        }
+        if write_error {
+            Awaiting {
+                label: "CORE · WRITE".to_string(),
+                message: Some("Not saved · the settings service refused the change".to_string()),
+                hint: Some("Nothing was written; the rows above show the stored values".to_string()),
+            }
+        }
+    }
+}
+
+/// One server-backed preference: the control built from the server's allowed
+/// values (locked when there is only one), plus a reset for a user override.
+#[component]
+fn PrefRow(
+    row: PreferenceRowDto,
+    disabled: bool,
+    saving: bool,
+    on_write: EventHandler<PrefWrite>,
+) -> Element {
+    let (label, hint) = pref_copy(&row.key);
+    let locked = row.allowed.len() <= 1;
+    let numeric = row.allowed.iter().all(|v| is_numeric(v));
+    let options: Vec<Opt> = row.allowed.iter().map(|v| opt(v, v)).collect();
+    let many = options.len() > 4;
+    let status = if saving {
+        "SAVING…"
+    } else if row.user_modified {
+        "CHANGED"
+    } else if locked {
+        "FIXED"
+    } else {
+        "DEFAULT"
+    };
+    let default_cls = if is_numeric(&row.default_value) {
+        "num"
+    } else {
+        ""
+    };
+    let default_value = row.default_value.clone();
+    let key_set = row.key.clone();
+    let key_reset = row.key.clone();
+    rsx! {
+        div { class: "cfg-row", "aria-busy": "{saving}",
+            div { class: "rl",
+                div { class: "lab", "{label}" }
+                div { class: "hint",
+                    if !hint.is_empty() {
+                        "{hint} · "
+                    }
+                    "{status}"
+                    if !locked {
+                        " · default "
+                        span { class: "{default_cls}", "{default_value}" }
+                    }
+                }
+            }
+            div { class: "rc",
+                div { class: "cfg-pref",
+                    if locked {
+                        CfgSeg {
+                            value: row.value.clone(),
+                            options,
+                            numeric,
+                            disabled: true,
+                            on_change: move |_: String| {},
+                        }
+                    } else if many {
+                        CfgSelect {
+                            value: row.value.clone(),
+                            options,
+                            numeric,
+                            disabled,
+                            on_change: move |v: String| on_write.call(PrefWrite::Set(key_set.clone(), v)),
+                        }
+                    } else {
+                        CfgSeg {
+                            value: row.value.clone(),
+                            options,
+                            numeric,
+                            disabled,
+                            on_change: move |v: String| on_write.call(PrefWrite::Set(key_set.clone(), v)),
+                        }
+                    }
+                    if row.user_modified {
+                        button {
+                            class: "cfg-reset",
+                            r#type: "button",
+                            disabled,
+                            onclick: move |_| on_write.call(PrefWrite::Reset(key_reset.clone())),
+                            "↺ Default"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ════════════════════════════════════ page ═══════════════════════════════════
 
 /// The Phoskonomia Config (preferences) page.
@@ -335,6 +559,14 @@ pub fn ConfigPage() -> Element {
     // `init = { ...CFG_DEFAULTS, ...pickKnown(read()) }`.
     let cfg = use_signal(cfg_defaults);
     let mut just_reset = use_signal(|| false);
+
+    // ---- CORE preferences (server-backed, `phosk_settings`) ----
+    // The first read comes from the resource; every successful write answers
+    // with the refreshed view, which then wins over the initial read.
+    let prefs = use_resource(get_preferences);
+    let prefs_live = use_signal(|| None::<SettingsDto>);
+    let pref_busy = use_signal(|| None::<String>);
+    let pref_err = use_signal(|| false);
 
     // On-mount: read the stored JSON back and merge known keys over defaults.
     use_effect(move || {
@@ -396,9 +628,32 @@ pub fn ConfigPage() -> Element {
         persist_reset(&format!("{{{}}}", kvs.join(",")));
     });
 
-    // onReset: reset + flash the "✓ Reset" confirmation for ~1.4s.
+    // One write at a time against the settings service; the controls are
+    // disabled while it runs. A refusal leaves the rows at the stored values.
+    let write_pref = use_callback(move |op: PrefWrite| {
+        let mut live = prefs_live;
+        let mut busy = pref_busy;
+        let mut err = pref_err;
+        busy.set(Some(op.target()));
+        err.set(false);
+        spawn(async move {
+            let res = match op {
+                PrefWrite::Set(key, value) => set_preference(key, value).await,
+                PrefWrite::Reset(key) => reset_preference(key).await,
+                PrefWrite::ResetAll => reset_all_preferences().await,
+            };
+            match res {
+                Ok(view) => live.set(Some(view)),
+                Err(_) => err.set(true),
+            }
+            busy.set(None);
+        });
+    });
+
+    // onReset: reset both stores + flash the "✓ Reset" confirmation for ~1.4s.
     let on_reset = move |_| {
         reset.call(());
+        write_pref.call(PrefWrite::ResetAll);
         just_reset.set(true);
         spawn(async move {
             gloo_or_sleep().await;
@@ -407,9 +662,19 @@ pub fn ConfigPage() -> Element {
     };
 
     // ---- derivations (was: useMemo + the summary/account/ai-status reads) ----
-    // No backend serves /settings/* here, so counts are the local computation
-    // and engine/model are None (the ASSISTANT tile renders its "—" state) —
-    // exactly React's fallback when those reads 501'd.
+    // Counts = the local tweaks + the CORE rows once the settings view is in.
+    let prefs_view: Option<SettingsDto> = prefs_live
+        .read()
+        .clone()
+        .or_else(|| prefs.read().as_ref().and_then(|r| r.as_ref().ok()).cloned());
+    let prefs_loading = prefs.read().is_none() && prefs_view.is_none();
+    let prefs_load_err = matches!(&*prefs.read(), Some(Err(_))) && prefs_view.is_none();
+    let (core_total, core_changed) = prefs_view.as_ref().map_or((0, 0), |v| {
+        (
+            v.rows.len(),
+            usize::try_from(v.changed_count).unwrap_or(usize::MAX),
+        )
+    });
     let store = cfg.read().clone();
     let defaults = cfg_defaults();
     let local_total = cfg_total();
@@ -417,8 +682,8 @@ pub fn ConfigPage() -> Element {
         .iter()
         .filter(|(k, v)| defaults.get(**k).is_some_and(|d| d != *v))
         .count();
-    let total = local_total;
-    let changed = local_changed;
+    let total = local_total + core_total;
+    let changed = local_changed.saturating_add(core_changed);
 
     // Global inspector placement unifies the three per-surface inspector keys.
     let insp_keys = ["subInsp", "debtInsp", "sigInsp"];
@@ -487,10 +752,12 @@ pub fn ConfigPage() -> Element {
         "all at defaults"
     };
     let assistant_v = if ai_open { "ON" } else { "OFF" };
-    // LLM engine/model labels are surfaced by the server `#[server]` config fn;
-    // until that view feeds them in, show the em-dash placeholder.
-    let engine_lbl = "—".to_string();
-    let model_lbl = "—".to_string();
+    // LLM engine/model labels come with the settings view; the em-dash stands
+    // in while it loads or if the read failed.
+    let (engine_lbl, model_lbl) = prefs_view.as_ref().map_or_else(
+        || ("—".to_string(), "—".to_string()),
+        |v| (v.engine.clone(), v.model.clone()),
+    );
     let insp_hint = if insp_all == "mixed" {
         "Mixed across surfaces — pick one to unify"
     } else {
@@ -621,6 +888,22 @@ pub fn ConfigPage() -> Element {
                                             placeholder: "{label} · DAY {day}/{days}".to_string(),
                                             on_change: move |v: String| set.call(vec![("topDateFmt", CfgVal::Str(v))]),
                                         }
+                                    }
+                                }
+
+                                // CORE — the backend-owned preferences (indigo, no coral)
+                                CfgPanel {
+                                    glyph: "⊡".to_string(),
+                                    title: "Core".to_string(),
+                                    span2: true,
+                                    sub: "Owned by the settings service and checked on the server before anything is stored. Locked rows are fixed by design.".to_string(),
+                                    CorePrefs {
+                                        view: prefs_view.clone(),
+                                        loading: prefs_loading,
+                                        load_error: prefs_load_err,
+                                        busy: pref_busy(),
+                                        write_error: pref_err(),
+                                        on_write: move |op: PrefWrite| write_pref.call(op),
                                     }
                                 }
 
@@ -949,5 +1232,31 @@ async fn gloo_or_sleep() {
         // but this avoids depending on the JS runtime off-web.
         let mut eval = document::eval(r#"setTimeout(function(){ dioxus.send(1); }, 1400);"#);
         let _ = eval.recv::<i32>().await;
+    }
+}
+
+#[cfg(test)]
+mod core_prefs_tests {
+    use super::*;
+
+    #[test]
+    fn is_numeric_accepts_only_digit_and_dot_values() {
+        for v in ["3", "12", "0.7"] {
+            assert!(is_numeric(v), "{v} is a number");
+        }
+        for v in ["", "CHF", "month", "off"] {
+            assert!(!is_numeric(v), "{v:?} is text");
+        }
+    }
+
+    #[test]
+    fn a_write_targets_its_row_or_every_row() {
+        let set = PrefWrite::Set("currency".to_string(), "CHF".to_string());
+        assert_eq!(set.target(), "currency");
+        assert_eq!(
+            PrefWrite::Reset("telemetry".to_string()).target(),
+            "telemetry"
+        );
+        assert_eq!(PrefWrite::ResetAll.target(), "*");
     }
 }

@@ -112,6 +112,15 @@
 .cfg-foot .rule { flex: 1; height: 1px; background: var(--hairline); }
 .cfg-foot .mk { color: var(--indigo-neon); }
 
+/* ---- CORE panel: server-backed preferences (tokens only) ---- */
+.cfg-pref { display: flex; align-items: center; gap: var(--s-2); }
+/* numeric option labels / defaults are numbers → Pilowlava */
+.cfg-seg.num button, .cfg-select.num select { font-family: var(--font-display); font-size: var(--t-xs); letter-spacing: .04em; }
+.cfg-row .rl .hint .num { font-family: var(--font-display); color: var(--ink-2); }
+/* locked (fixed-by-design) or mid-write controls keep their look, drop the hover */
+.cfg-seg button:disabled, .cfg-select select:disabled, .cfg-reset:disabled { cursor: default; pointer-events: none; }
+.cfg-row[aria-busy="true"] .rc { opacity: .6; }
+
 @media (max-width: 760px) {
   .cfg-grid { grid-template-columns: 1fr; }
   .cfg-ribbon { grid-template-columns: repeat(2, 1fr); }

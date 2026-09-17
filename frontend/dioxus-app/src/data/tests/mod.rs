@@ -28,6 +28,8 @@ mod dashboard;
 #[cfg(feature = "server")]
 mod debts;
 #[cfg(feature = "server")]
+mod settings;
+#[cfg(feature = "server")]
 mod signals;
 #[cfg(feature = "server")]
 mod subscriptions;

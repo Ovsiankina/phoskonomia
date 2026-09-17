@@ -1689,6 +1689,7 @@ dependencies = [
  "phosk_ocr_vision",
  "phosk_planning",
  "phosk_recurring",
+ "phosk_settings",
  "phosk_storage_fs",
  "rfd",
  "serde",

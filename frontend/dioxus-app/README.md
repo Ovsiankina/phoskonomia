@@ -60,7 +60,8 @@ cargo check --target wasm32-unknown-unknown            # WASM client side
 
 ## Test
 
-The data-layer tests (`src/data/tests/`) run natively with the server feature:
+The data-layer tests (`src/data/tests/`) and the page tests run natively with
+the server feature:
 
 ```bash
 cargo test --no-default-features --features server
