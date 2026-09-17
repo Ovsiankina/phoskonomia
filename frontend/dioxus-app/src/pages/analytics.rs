@@ -32,7 +32,7 @@ use dioxus::prelude::*;
 use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg, Spark};
-use crate::components::shell::{AiPanel, ChatMsg, Sig, SigOcc, SigSpark, SignalPanel, TopBar};
+use crate::components::shell::{AiPanel, Sig, SigOcc, SigSpark, SignalPanel, TopBar};
 use crate::components::states::Awaiting;
 use crate::data::analytics::{
     get_analytics_insight, get_category_momentum, get_rhythm, get_spend_history, get_spend_stats,
@@ -1333,46 +1333,22 @@ pub fn AnalyticsPage() -> Element {
 
 /// Thin analytics wrapper around the shared [`AiPanel`] (left assistant).
 ///
-/// React's `AiPanel` self-fetched `/ai/feed`, `/ai/chat`, `/ai/status` and, on
-/// send, appended the user line then a canned reply (the live backend currently
-/// answers `POST /ai/chat` with `501`, so the rendered reply is the
-/// "NOT IMPLEMENTED YET" stub). The Dioxus `AiPanel` is prop-driven and owns no
-/// transcript, so this wrapper owns the chat `msgs` signal and wires `on_send`
-/// to append the user's draft plus that same stub reply — preserving the
-/// chat-input affordance even before an AI server fn lands. No AI server fns
-/// exist yet, so feed/status keep their (empty / offline / GEMMA4·OLLAMA·LOCAL)
-/// defaults, faithful to React rendering the empty-feed placeholder against a
-/// dead backend. `on_toggle` flips the rail; `on_track` selects the candidate in
-/// the page's `sel` (opening the dock/drawer) when a feed item's track fires.
+/// The panel owns its chat (persisted history, send, `/clear`), so this wrapper
+/// only carries the page wiring: `on_toggle` flips the rail; `on_track` selects
+/// the candidate in the page's `sel` (opening the dock/drawer) when a feed
+/// item's track fires. Feed/status keep their (empty / offline /
+/// GEMMA4·OLLAMA·LOCAL) defaults.
 #[component]
 fn AiPanelAnalytics(
     collapsed: bool,
     on_toggle: EventHandler<()>,
     on_track: EventHandler<String>,
 ) -> Element {
-    // The chat transcript the page owns (React's `msgs`). Seeded empty so the
-    // panel shows the "Ask the assistant anything…" placeholder until a send.
-    let mut msgs = use_signal(Vec::<ChatMsg>::new);
-
     rsx! {
         AiPanel {
             collapsed,
-            msgs: msgs(),
             on_toggle: move |()| on_toggle.call(()),
             on_track: move |id: String| on_track.call(id),
-            on_send: move |q: String| {
-                // React `send`: append the user line, then the backend's reply
-                // (currently the 501 stub). With no AI server fn here, append the
-                // same stub so the input affordance round-trips.
-                msgs.with_mut(|m| {
-                    m.push(ChatMsg { who: "usr".to_string(), text: q });
-                    m.push(ChatMsg {
-                        who: "sys".to_string(),
-                        text: "NOT IMPLEMENTED YET. The backend received this (POST /ai/chat → 501)."
-                            .to_string(),
-                    });
-                });
-            },
         }
     }
 }

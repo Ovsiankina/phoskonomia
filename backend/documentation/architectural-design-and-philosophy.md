@@ -216,7 +216,10 @@ charter · ADR-011 provenance + feedback loop.
 Deferred to implementation time (not architecture):
 - `phosk_ai` loop / manifest format / approval-queue schema — details that
   firm up as we build.
-- Chat persistence + `/clear` (frontend ROADMAP gap).
+- ~~Chat persistence + `/clear` (frontend ROADMAP gap).~~ Done: the Dioxus
+  `AiPanel` reads the persisted transcript, sends through
+  `phosk_ai::ai_tools::chat_reply` and runs `/clear` via
+  `phosk_ai::ai_spine::clear_chat`.
 - SurrealDB `Thing` (de)serialization seam — DB-adapter impl (ADR-010
   covers the principle).
 

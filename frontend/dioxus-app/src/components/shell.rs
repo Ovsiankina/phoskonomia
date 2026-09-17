@@ -9,8 +9,10 @@
 //! The React originals were wired to the dead REST layer (`api`/`useGet`): the
 //! feed, chat history and AI status loaded over HTTP and every action POSTed.
 //! Here that data arrives as **props** (the `#[server]` data layer F3 owns) and
-//! mutations are surfaced as callbacks (`on_send`, `on_feed_action`,
-//! `on_track`, …) the page wires to its server fns.
+//! mutations are surfaced as callbacks (`on_feed_action`, `on_track`, …) the
+//! page wires to its server fns. The one exception is the assistant **chat**:
+//! [`AiPanel`] loads the persisted transcript, sends messages and runs `/clear`
+//! itself through `crate::data::ai`, so every page gets the same live chat.
 //!
 //! Note: the mandatory chrome — [`TopBar`] and the page table ([`phosk_pages`])
 //! — lives in [`crate::components::comps`] (faithful to the React source, where
@@ -21,6 +23,10 @@ use dioxus::prelude::*;
 use phosk_core::money::Money;
 
 use crate::components::prims::Dot;
+use crate::components::states::Awaiting;
+use crate::data::ai::{
+    bound_chat_text, chat_error_message, get_chat_history, send_chat_message, CHAT_INPUT_MAX_CHARS,
+};
 use crate::data::chf2;
 
 // Re-export the mandatory chrome so pages can `use crate::components::shell::*`.
@@ -160,11 +166,20 @@ pub struct ChatMsg {
 /// Left AI assistant panel — rail, feed, chat, input.
 ///
 /// Faithful port of `shell.jsx` `AiPanel`. `collapsed` shows the vertical rail;
-/// `feed`/`msgs` are the (F3-provided) activity feed and chat transcript;
-/// `online`/`model`/`engine`/`location` are the AI status. `on_toggle` flips the
-/// collapse, `on_send` carries the draft on submit, `on_feed_action` carries
-/// `(item id, action label, is_candidate_primary)` for the feed buttons, and
-/// `on_track` carries a candidate id when its primary "track" action fires.
+/// `feed` is the (F3-provided) activity feed; `online`/`model`/`engine`/
+/// `location` are the AI status. `on_toggle` flips the collapse,
+/// `on_feed_action` carries `(item id, action label, is_candidate_primary)` for
+/// the feed buttons, and `on_track` carries a candidate id when its primary
+/// "track" action fires.
+///
+/// The chat is live and owned here: the transcript is the persisted history
+/// ([`get_chat_history`]); Enter / → submits through [`send_chat_message`]
+/// (`/clear` wipes the history). While a message is in flight the input is
+/// read-only; on failure the error state shows and the text stays in the
+/// input. `msgs` is only a placeholder transcript shown until the persisted
+/// history has loaded; `on_send` is notified with each submitted line. Model
+/// text is rendered as plain text, bounded by [`bound_chat_text`]. The head's
+/// ⇔ toggle widens the panel, and the thread follows its newest line.
 #[component]
 pub fn AiPanel(
     #[props(default = false)] collapsed: bool,
@@ -180,12 +195,18 @@ pub fn AiPanel(
     #[props(default)] on_track: Option<EventHandler<String>>,
 ) -> Element {
     let mut draft = use_signal(String::new);
+    // Chat state: the persisted transcript, the in-flight flag, the last
+    // send failure, and the wide layout toggle.
+    let mut history = use_resource(get_chat_history);
+    let mut sending = use_signal(|| false);
+    let mut chat_error = use_signal(|| Option::<String>::None);
+    let mut wide = use_signal(|| false);
 
-    let panel_cls = if collapsed {
-        "ai-panel collapsed"
-    } else {
-        "ai-panel"
-    };
+    let panel_cls = format!(
+        "ai-panel{}{}",
+        if collapsed { " collapsed" } else { "" },
+        if wide() { " wide" } else { "" }
+    );
     let pulse_style = if online {
         "width:6px;height:6px;border-radius:999px;background:var(--ok);box-shadow:0 0 8px var(--ok)"
     } else {
@@ -193,16 +214,49 @@ pub fn AiPanel(
     };
 
     // A `Callback` (Copy) so both the send button and Enter key can fire it.
+    // The server validates and answers; the draft is cleared only on success,
+    // so a failed message stays recoverable in the input.
     let send = use_callback(move |()| {
         let q = draft().trim().to_string();
-        if q.is_empty() {
+        if q.is_empty() || *sending.peek() {
             return;
         }
         if let Some(h) = &on_send {
-            h.call(q);
+            h.call(q.clone());
         }
-        draft.set(String::new());
+        sending.set(true);
+        chat_error.set(None);
+        spawn(async move {
+            match send_chat_message(q).await {
+                Ok(_) => draft.set(String::new()),
+                Err(e) => chat_error.set(Some(chat_error_message(&e))),
+            }
+            sending.set(false);
+            history.restart();
+        });
     });
+
+    // The transcript to render: the persisted history once loaded, the
+    // page-provided placeholder until then. Speakers collapse to usr/sys.
+    let (lines, history_err): (Vec<ChatMsg>, Option<String>) = match &*history.read() {
+        Some(Ok(h)) => (
+            h.iter()
+                .map(|m| ChatMsg {
+                    who: m.who.clone(),
+                    text: m.text.clone(),
+                })
+                .collect(),
+            None,
+        ),
+        Some(Err(_)) => (
+            Vec::new(),
+            Some("The chat history could not be loaded.".to_string()),
+        ),
+        None => (msgs.clone(), None),
+    };
+    let history_loading = history.read().is_none() && lines.is_empty();
+    // Re-keyed on every change so the end marker remounts and scrolls into view.
+    let chat_end_key = format!("{}-{}-{}", lines.len(), sending(), chat_error().is_some());
 
     let icon = |k: &str| match k {
         "categorize" => "✓",
@@ -230,6 +284,12 @@ pub fn AiPanel(
                     div {
                         div { class: "who", "Assistant" }
                         div { class: "mdl", "{engine} · {model} · {location}" }
+                    }
+                    span {
+                        class: if wide() { "wid on" } else { "wid" },
+                        title: if wide() { "Narrow the assistant" } else { "Widen the assistant" },
+                        onclick: move |_| wide.toggle(),
+                        "⇔"
                     }
                     span {
                         class: "col",
@@ -299,17 +359,45 @@ pub fn AiPanel(
                 }
 
                 div { class: "ai-chat",
-                    if msgs.is_empty() {
+                    if let Some(err) = history_err {
+                        Awaiting { label: "CHAT HISTORY", message: err }
+                    } else if history_loading {
+                        Awaiting { label: "CHAT HISTORY", loading: true }
+                    } else if lines.is_empty() {
                         div {
                             class: "dim",
                             style: "font-size:11px;padding:8px 2px;letter-spacing:.04em",
                             "Ask the assistant anything — it replies from the local model."
                         }
                     }
-                    for (i , m) in msgs.iter().enumerate() {
-                        div { key: "{i}", class: "msg {m.who}",
-                            span { class: "nm", if m.who == "sys" { "{model}" } else { "YOU" } }
-                            div { "{m.text}" }
+                    for (i , m) in lines.iter().enumerate() {
+                        div {
+                            key: "{i}",
+                            class: if m.who == "usr" { "msg usr" } else { "msg sys" },
+                            span { class: "nm", if m.who == "usr" { "YOU" } else { "{model}" } }
+                            div { {bound_chat_text(&m.text)} }
+                        }
+                    }
+                    if sending() {
+                        Awaiting { label: "{model} · THINKING", loading: true }
+                    }
+                    if let Some(err) = chat_error() {
+                        Awaiting { label: "CHAT · ERROR", message: err }
+                    }
+                    for k in std::iter::once(chat_end_key) {
+                        div {
+                            key: "{k}",
+                            class: "ai-chat-end",
+                            onmounted: move |e: MountedEvent| async move {
+                                let _ = e
+                                    .data()
+                                    .scroll_to_with_options(ScrollToOptions {
+                                        behavior: ScrollBehavior::Smooth,
+                                        vertical: ScrollLogicalPosition::End,
+                                        horizontal: ScrollLogicalPosition::Nearest,
+                                    })
+                                    .await;
+                            },
                         }
                     }
                 }
@@ -317,11 +405,20 @@ pub fn AiPanel(
                 div { class: "ai-input",
                     input {
                         value: "{draft}",
-                        placeholder: "Ask, or “track toothpaste”…",
+                        placeholder: "Ask the assistant · /clear wipes the chat",
+                        title: "Enter sends · /clear wipes the chat history",
+                        maxlength: "{CHAT_INPUT_MAX_CHARS}",
+                        readonly: sending(),
                         oninput: move |e| draft.set(e.value()),
                         onkeydown: move |e| if e.key() == Key::Enter { send.call(()) },
                     }
-                    button { class: "send", title: "Send", onclick: move |_| send.call(()), "→" }
+                    button {
+                        class: "send",
+                        title: "Send",
+                        disabled: sending(),
+                        onclick: move |_| send.call(()),
+                        "→"
+                    }
                 }
             }
         }

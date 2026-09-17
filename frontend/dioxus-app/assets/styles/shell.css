@@ -119,6 +119,23 @@
   font-family: var(--font-body); font-size: 14px; padding: 7px 11px; border-radius: 2px; cursor: pointer; }
 .ai-input .send:hover { background: rgba(143,125,255,.22); }
 
+/* ---------- Assistant chat: sticky, widenable, live thread ----------
+   Sticky: the panel stays pinned to the viewport however the page scrolls,
+   head + input stay put and only the thread scrolls (it follows its newest
+   line). Wide: the head's ⇔ toggle widens the panel to twelve grid cells. */
+.ai-panel { position: sticky; top: 0; align-self: flex-start; height: 100vh; }
+.ai-panel.wide:not(.collapsed) {
+  flex-basis: calc(var(--grid-unit) * 12); width: calc(var(--grid-unit) * 12); max-width: 50vw;
+}
+.ai-head .wid { margin-left: auto; cursor: pointer; color: var(--ink-3); font-size: var(--t-sm); padding: var(--s-1); }
+.ai-head .wid:hover { color: var(--ink); }
+.ai-head .wid.on { color: var(--indigo-neon); text-shadow: var(--glow-indigo); }
+.ai-head .wid + .col { margin-left: 0; }
+.ai-chat .msg { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-chat .ai-chat-end { flex: 0 0 auto; height: 0; }
+.ai-input input[readonly] { cursor: progress; color: var(--ink-2); }
+.ai-input .send:disabled { cursor: progress; opacity: .5; }
+
 /* ---------- Right Signal panel — the item-signal inspector ---------- */
 .sig-panel { flex: 0 0 var(--sig-w, 344px); width: var(--sig-w, 344px); display: flex; flex-direction: column; min-height: 0;
   border-left: 1px solid var(--hairline); background: rgba(8,5,18,.34); backdrop-filter: blur(9px); overflow-y: auto; }
