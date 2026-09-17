@@ -66,6 +66,52 @@ impl Money {
             .ok_or_else(|| PhoskError::Overflow(format!("CHF {whole}.{cents:02} exceeds range")))
     }
 
+    /// Parse a user-typed CHF amount into exact centimes.
+    ///
+    /// Accepted, with optional surrounding whitespace:
+    /// * an optional `CHF` prefix in any case (`CHF 1'234.50`);
+    /// * an optional sign: `-`, `+`, or the typographic minus `−` (U+2212);
+    /// * whole francs, optionally grouped in thousands with `'` or `’` (U+2019),
+    ///   so both [`Display`](fmt::Display) output and the UI formatter parse back;
+    /// * an optional `.` followed by one or two centime digits.
+    ///
+    /// Integer arithmetic only: no float is involved and nothing is rounded, so a
+    /// third decimal is rejected rather than truncated. A comma is rejected rather
+    /// than guessed at, because `1,000` could mean one franc or a thousand. The
+    /// sign applies to the whole amount (`-0.05` is five negative centimes),
+    /// unlike [`Money::from_chf`]. Whether a negative amount is acceptable is the
+    /// caller's rule.
+    ///
+    /// # Errors
+    /// [`PhoskError::Invalid`] for empty or malformed input, more than two
+    /// decimals, or an amount beyond the i64 centime range. That is caller input,
+    /// so it is never [`PhoskError::Overflow`]. The message is a fixed hint that
+    /// never repeats the input.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub fn parse_chf(input: &str) -> Result<Self, PhoskError> {
+        let s = input.trim();
+        if s.is_empty() {
+            return Err(parse_error(PARSE_EMPTY));
+        }
+        let (negative, s) = split_sign(strip_chf_prefix(s));
+        if s.contains(',') {
+            return Err(parse_error(PARSE_COMMA));
+        }
+        let (whole, frac) = s.split_once('.').map_or((s, None), |(w, f)| (w, Some(f)));
+        let francs = parse_francs(whole)?;
+        let cents = frac.map_or(Ok(0), parse_centimes)?;
+        let magnitude = francs
+            .checked_mul(100)
+            .and_then(|c| c.checked_add(cents))
+            .ok_or_else(|| parse_error(PARSE_RANGE))?;
+        // `magnitude` is in 0..=i64::MAX, so negating it cannot overflow.
+        Ok(Self::from_centimes(if negative {
+            -magnitude
+        } else {
+            magnitude
+        }))
+    }
+
     /// The raw centime (rappen) count. The exact, lossless representation.
     pub const fn centimes(self) -> i64 {
         self.centimes
@@ -139,6 +185,91 @@ impl fmt::Display for Money {
     }
 }
 
+impl std::str::FromStr for Money {
+    type Err = PhoskError;
+
+    /// Same grammar and errors as [`Money::parse_chf`].
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_chf(s)
+    }
+}
+
+// ── parse_chf helpers ──────────────────────────────────────────────────────────
+//
+// The hints are fixed strings with no digits in them: they never echo what the
+// user typed (an amount is financial data), and they read the same in any font.
+
+const PARSE_EMPTY: &str = "enter an amount in CHF";
+const PARSE_FORMAT: &str = "amount must be a number in CHF, with a dot before the centimes";
+const PARSE_COMMA: &str = "use a dot, not a comma, before the centimes";
+const PARSE_DECIMALS: &str = "amount can have at most two decimal places";
+const PARSE_RANGE: &str = "amount is too large";
+
+/// Thousands separators accepted in the franc part: ASCII `'` and U+2019 `’`.
+const GROUP_SEPARATORS: [char; 2] = ['\'', '\u{2019}'];
+
+fn parse_error(hint: &str) -> PhoskError {
+    PhoskError::Invalid(hint.to_owned())
+}
+
+/// Drop a leading `CHF` (any case) and the whitespace after it.
+fn strip_chf_prefix(s: &str) -> &str {
+    match (s.get(..3), s.get(3..)) {
+        (Some(prefix), Some(rest)) if prefix.eq_ignore_ascii_case("CHF") => rest.trim_start(),
+        _ => s,
+    }
+}
+
+/// Split off one leading sign: `(is_negative, rest)`.
+fn split_sign(s: &str) -> (bool, &str) {
+    s.strip_prefix('-')
+        .or_else(|| s.strip_prefix('\u{2212}'))
+        .map_or_else(
+            || (false, s.strip_prefix('+').unwrap_or(s)),
+            |rest| (true, rest),
+        )
+}
+
+/// The franc part: plain digits, or digits grouped in threes (`1'234'567`).
+fn parse_francs(whole: &str) -> Result<i64, PhoskError> {
+    let grouped = whole.contains(GROUP_SEPARATORS);
+    let mut digits = String::with_capacity(whole.len());
+    for (i, group) in whole.split(GROUP_SEPARATORS).enumerate() {
+        let size_ok = match (grouped, i) {
+            (false, _) => !group.is_empty(),
+            (true, 0) => (1..=3).contains(&group.len()),
+            (true, _) => group.len() == 3,
+        };
+        if !size_ok || !group.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(parse_error(PARSE_FORMAT));
+        }
+        digits.push_str(group);
+    }
+    digits_value(&digits)
+}
+
+/// The centime part after the dot: one digit (tenths) or two.
+fn parse_centimes(frac: &str) -> Result<i64, PhoskError> {
+    if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(parse_error(PARSE_FORMAT));
+    }
+    if frac.len() > 2 {
+        return Err(parse_error(PARSE_DECIMALS));
+    }
+    let value = digits_value(frac)?;
+    Ok(if frac.len() == 1 { value * 10 } else { value })
+}
+
+/// Accumulate ASCII digits into an i64 with checked arithmetic.
+fn digits_value(digits: &str) -> Result<i64, PhoskError> {
+    digits.chars().try_fold(0_i64, |acc, c| {
+        let digit = c.to_digit(10).ok_or_else(|| parse_error(PARSE_FORMAT))?;
+        acc.checked_mul(10)
+            .and_then(|a| a.checked_add(i64::from(digit)))
+            .ok_or_else(|| parse_error(PARSE_RANGE))
+    })
+}
+
 /// Group an unsigned integer into `'`-separated thousands: `1234567` → `1'234'567`.
 fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
@@ -196,6 +327,166 @@ mod tests {
     fn from_chf_rejects_overflowing_whole() {
         let err = Money::from_chf(i64::MAX, 0).expect_err("must overflow");
         assert_eq!(err.code(), "overflow");
+    }
+
+    // ── parse_chf (user-typed CHF text) ──────────────────────────────────────
+    fn parsed(s: &str) -> i64 {
+        let result = Money::parse_chf(s);
+        assert!(result.is_ok(), "{s:?} should parse, got {result:?}");
+        result.expect("checked above").centimes()
+    }
+
+    fn rejected(s: &str) -> PhoskError {
+        let result = Money::parse_chf(s);
+        assert!(result.is_err(), "{s:?} should be rejected, got {result:?}");
+        result.expect_err("checked above")
+    }
+
+    #[test]
+    fn parse_chf_whole_francs() {
+        assert_eq!(parsed("350"), 35_000);
+        assert_eq!(parsed("0"), 0);
+        assert_eq!(parsed("007"), 700);
+    }
+
+    #[test]
+    fn parse_chf_one_or_two_centime_digits() {
+        assert_eq!(parsed("350.50"), 35_050);
+        assert_eq!(parsed("350.5"), 35_050);
+        assert_eq!(parsed("0.05"), 5);
+        assert_eq!(parsed("12.30"), 1_230);
+        assert_eq!(parsed("0.00"), 0);
+    }
+
+    #[test]
+    fn parse_chf_trims_and_accepts_a_chf_prefix() {
+        assert_eq!(parsed("  42  "), 4_200);
+        assert_eq!(parsed("CHF 42"), 4_200);
+        assert_eq!(parsed("chf42.10"), 4_210);
+    }
+
+    #[test]
+    fn parse_chf_accepts_swiss_thousands_grouping() {
+        assert_eq!(parsed("1'234"), 123_400);
+        assert_eq!(parsed("1'234'567.89"), 123_456_789);
+        // U+2019, the separator the UI formatter renders.
+        assert_eq!(parsed("1\u{2019}234\u{2019}567.89"), 123_456_789);
+    }
+
+    #[test]
+    fn parse_chf_sign_applies_to_the_whole_amount() {
+        assert_eq!(parsed("-12.50"), -1_250);
+        assert_eq!(parsed("\u{2212}12.50"), -1_250);
+        assert_eq!(parsed("-0.05"), -5);
+        assert_eq!(parsed("+7"), 700);
+        assert_eq!(parsed("-0"), 0);
+    }
+
+    #[test]
+    fn parse_chf_round_trips_display() {
+        for c in [0, 5, 50, 100, 123_450, 123_456_789, -530, -123_450] {
+            let m = Money::from_centimes(c);
+            assert_eq!(parsed(&m.to_string()), c, "round-trip of {m}");
+        }
+    }
+
+    #[test]
+    fn parse_chf_is_exact_at_the_i64_edge() {
+        assert_eq!(parsed("92233720368547758.07"), i64::MAX);
+        assert_eq!(parsed("-92233720368547758.07"), -i64::MAX);
+    }
+
+    #[test]
+    fn parse_chf_rejects_empty_input() {
+        for s in ["", "   ", "CHF", "-", "CHF -"] {
+            assert_eq!(rejected(s).code(), "invalid_input", "{s:?}");
+        }
+    }
+
+    #[test]
+    fn parse_chf_rejects_garbage() {
+        for s in [
+            "abc",
+            "12abc",
+            "1 000",
+            "--5",
+            "- 5",
+            ".50",
+            "12.",
+            "12.5.0",
+            "1.-5",
+            "1e3",
+            "0x10",
+            "NaN",
+            "inf",
+            "\u{0661}\u{0662}",
+            "12 CHF",
+            "CHF CHF 1",
+        ] {
+            let err = rejected(s);
+            assert_eq!(err.code(), "invalid_input", "{s:?}");
+            assert_eq!(err.http_status(), 400, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn parse_chf_rejects_misplaced_grouping() {
+        for s in [
+            "'123",
+            "1''234",
+            "1'234'",
+            "12'34",
+            "1'2345",
+            "1234'567",
+            "1'234.5'0",
+        ] {
+            assert_eq!(rejected(s).code(), "invalid_input", "{s:?}");
+        }
+    }
+
+    #[test]
+    fn parse_chf_rejects_more_than_two_decimals_instead_of_rounding() {
+        let err = rejected("12.345");
+        assert_eq!(err.code(), "invalid_input");
+        assert!(err.to_string().contains("decimal"), "{err}");
+        assert_eq!(rejected("12.000").code(), "invalid_input");
+    }
+
+    #[test]
+    fn parse_chf_rejects_a_decimal_comma_instead_of_guessing() {
+        for s in ["12,50", "1,000"] {
+            let err = rejected(s);
+            assert_eq!(err.code(), "invalid_input");
+            assert!(err.to_string().contains("comma"), "{s:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_chf_out_of_range_is_caller_input_not_an_internal_overflow() {
+        for s in [
+            "92233720368547758.08",
+            "99999999999999999999",
+            "-92233720368547758.08",
+        ] {
+            let err = rejected(s);
+            assert_eq!(err.code(), "invalid_input", "{s:?}");
+            assert!(err.to_string().contains("too large"), "{s:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_chf_errors_never_echo_the_input() {
+        for s in ["12,50", "12.345", "99999999999999999999", "4711abc", ""] {
+            let msg = rejected(s).to_string();
+            assert!(!msg.chars().any(|c| c.is_ascii_digit()), "{s:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn money_from_str_uses_parse_chf() {
+        let m: Money = "CHF 1'234.50".parse().expect("valid amount");
+        assert_eq!(m.centimes(), 123_450);
+        assert!("12,50".parse::<Money>().is_err());
     }
 
     // ── as_chf_f64 (edge only) ─────────────────────────────────────────────
