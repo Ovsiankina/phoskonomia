@@ -149,6 +149,41 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 
 ---
 
+## Operating the agentic loop (for Claude, when the user asks)
+
+`agentic-loop/` is local-only (gitignored): a systemd **user** timer (`phosk-loop.timer`) runs
+`agentic-loop/tick.sh` every 20 min; it works the TODO above and opens PRs. Details: `agentic-loop/README.md`.
+The user will not remember these commands — when they say "stop / pause / resume the loop" or
+"what is the loop doing", do it for them:
+
+| User says | Do |
+|---|---|
+| pause / stop the loop | `touch agentic-loop/STOP` (takes effect at the next tick; a run already in progress finishes). To also kill a running agent: `systemctl --user stop phosk-loop.service` |
+| resume | `rm agentic-loop/STOP` |
+| status / what is it doing | `agentic-loop/tick.sh status`, then `tail -n 30 agentic-loop/logs/tick-$(date +%F).log`, and `gh pr list --label agent` |
+| it burns too many tokens / go faster | edit `agentic-loop/config.env` (`MAX_RUNS_PER_WINDOW`, `DAILY_MAX_RUNS`, `ACTIVE_HOURS`) |
+| a task is stuck | read `agentic-loop/state/blocked-Txx`; after fixing the cause: `rm agentic-loop/state/{blocked,attempts}-Txx` |
+| turn it off for good but keep the files | `agentic-loop/install.sh --remove` |
+
+### Removing the whole pipeline (when the project is finished — only on explicit request)
+
+Confirm with the user first; step 5 is irreversible. Do it in this order:
+
+1. `touch agentic-loop/STOP`, then `systemctl --user stop phosk-loop.service` (wait for any running agent to end).
+2. `agentic-loop/install.sh --remove` — disables the timer and deletes the two unit files in `~/.config/systemd/user/`.
+3. Check nothing is left in flight: `gh pr list --label agent --state open`. Ask the user what to do with open PRs (merge / close).
+4. Git cleanup: for every dir in `agentic-loop/worktrees/`: `git worktree remove --force <dir>`; then `git worktree prune`;
+   delete local branches `git branch --list 'agent/*'`; delete merged remote branches `agent/*` on origin (list them to the user first).
+5. `rm -rf agentic-loop/` (includes a multi-GB build cache in `agentic-loop/cache/target`).
+6. Optional GitHub tidy-up: delete labels `agent`, `agent-approved`, `agent-changes-requested`, `agent-partial`, `needs-human`.
+7. In a normal PR: remove this section and the "TODO" machine-format notes from `CLAUDE.md`, the `agentic-loop/` line from
+   `.gitignore`, and reword `CONTRIBUTION.md` (it describes the loop in §1.3 and §4). Keep its security rules.
+8. Update Claude's project memory: delete the `agentic-loop` memory and its line in `MEMORY.md`.
+
+Branch protection on `main` is independent of the loop — leave it on.
+
+---
+
 ## Oscillocore design system (the frontend's law)
 
 The design language is **Oscillocore** — a CRT-oscilloscope / molten-lava aesthetic. It lives in
