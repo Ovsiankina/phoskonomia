@@ -191,9 +191,6 @@ body.no-sparks .spill svg { display: none; }
   background: color-mix(in srgb, var(--warn) 6%, transparent);
   padding-left: var(--s-2);
 }
-.nm.pick { cursor: pointer; }
-.nm.pick:hover { color: var(--indigo-neon); }
-.nm.pick.low:hover { color: var(--warn); text-shadow: 0 0 var(--s-2) color-mix(in srgb, var(--warn) 45%, transparent); }
 
 /* the receipt screen's item rows mirror the accordion lines */
 .items-pane .il .nmwrap { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
@@ -201,6 +198,15 @@ body.no-sparks .spill svg { display: none; }
 .items-pane .il .nm.low { color: var(--warn); }
 .items-pane .il .lp { font-family: var(--font-display); font-size: var(--t-sm); color: var(--ink-2); white-space: nowrap; }
 .items-pane .il .qty { font-family: var(--font-display); font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+
+/* pickable line names (mouse and keyboard). These come after the item-row
+   rules above, which have the same specificity, so the cue wins in both lists. */
+.nm.pick { cursor: pointer; }
+.nm.pick:hover,
+.nm.pick:focus-visible { color: var(--indigo-neon); }
+.nm.pick:focus-visible { outline: var(--bw-hair) solid var(--indigo-neon); outline-offset: var(--bw); }
+.nm.pick.low:hover,
+.nm.pick.low:focus-visible { color: var(--warn); text-shadow: 0 0 var(--s-2) color-mix(in srgb, var(--warn) 45%, transparent); }
 
 /* review actions, state blocks and the editor span the whole line grid */
 .line-acts,
