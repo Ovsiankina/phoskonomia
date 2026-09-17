@@ -1691,6 +1691,7 @@ dependencies = [
  "phosk_recurring",
  "phosk_settings",
  "phosk_storage_fs",
+ "rfd",
  "serde",
  "serde_json",
  "tokio",
