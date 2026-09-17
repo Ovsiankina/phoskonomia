@@ -17,9 +17,11 @@
 //!
 //! The factory must yield a store holding the shared deterministic Swiss seed
 //! (the one `MemoryDb::seeded` and `SurrealDb::seeded` load). The port has no
-//! write path for transactions, categories, the budget config, signals, caps,
-//! history, alerts, feed items or chats, so those checks read seeded values.
-//! Write checks create their own records with fresh ids and `conf-*` slugs.
+//! write path for transactions, the budget config, signals, caps, history,
+//! alerts, feed items or chats, so those checks read seeded values. Write
+//! checks create their own records with fresh ids and `conf-*` slugs (the
+//! category checks are the exception: renaming and delete-if-empty are about
+//! the *seeded* references, so they act on a seeded category).
 //!
 //! ## Deliberately not asserted
 //!
@@ -35,6 +37,7 @@
 //!   port does not say which is right.
 
 pub mod ai;
+pub mod categories;
 pub mod dashboard;
 pub mod debts;
 pub mod ids;
@@ -75,6 +78,9 @@ macro_rules! database_adapter_conformance {
             signals::delete_signal_removes_it_everywhere,
             planning::category_caps_lookup_by_name_agrees,
             planning::set_category_cap_sets_clears_and_stamps_provenance,
+            categories::insert_category_appends_and_rejects_duplicates,
+            categories::rename_category_repoints_every_reference,
+            categories::delete_category_only_when_unreferenced,
             planning::budget_history_is_oldest_to_newest,
             planning::spend_history_returns_the_recorded_cycles,
             planning::alerts_lookup_and_status_update,

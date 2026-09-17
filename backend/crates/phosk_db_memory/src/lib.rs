@@ -41,7 +41,8 @@ use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
-    AlertId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId, SuggestionId,
+    AlertId, CategoryId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId,
+    SuggestionId,
 };
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
@@ -402,6 +403,18 @@ impl DatabaseAdapter for MemoryDb {
             confidence: 1.0,
         };
         Ok(())
+    }
+
+    async fn insert_category(&self, _c: CategoryCap) -> Result<CategoryId, PhoskError> {
+        Err(PhoskError::Invalid("not implemented yet".to_owned()))
+    }
+
+    async fn rename_category(&self, _from: &str, _to: &str) -> Result<(), PhoskError> {
+        Err(PhoskError::Invalid("not implemented yet".to_owned()))
+    }
+
+    async fn delete_category(&self, _name: &str) -> Result<(), PhoskError> {
+        Err(PhoskError::Invalid("not implemented yet".to_owned()))
     }
 
     async fn budget_history(&self, category: &str) -> Result<Vec<BudgetHistory>, PhoskError> {
