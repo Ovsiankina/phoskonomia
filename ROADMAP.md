@@ -54,7 +54,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 `components/states.rs`. Oscillocore rules apply (tokens only, numbers in Pilowlava). Must pass both
 `cargo check` targets.
 
-- [ ] **T30** — Budgets: edit a category cap (`set_cap`) inline (needs: T01)
+- [x] **T30** — Budgets: edit a category cap (`set_cap`) inline (needs: T01)
 - [ ] **T31** — Transactions: review/correct a line item (`correct_line`), low-confidence lines highlighted (needs: T01)
 - [ ] **T32** — Subscriptions: confirm / dismiss AI-detected recurring candidates (needs: T01)
 - [ ] **T33** — AI chat: send, persisted history, `/clear` command; panel wide + sticky per the old ROADMAP (needs: T01)
