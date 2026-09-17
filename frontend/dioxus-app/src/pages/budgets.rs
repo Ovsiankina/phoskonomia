@@ -19,10 +19,13 @@
 //! widths, bar percentages, SVG positions) is computed in presentation `f64` CHF
 //! via `Money::as_chf_f64()`, faithful to the JSX which worked in raw numbers.
 //!
-//! The cap stepper PATCHed `/categories/{name}` in React and reloaded. There is
-//! no F3 mutation server fn yet, so the stepper applies a LOCAL cap delta (a
-//! `use_signal<HashMap<String,i64>>` of centimes overrides) on top of the fetched
-//! cap — keeping the mechanical, live feel of the JSX without inventing a wire.
+//! Cap edits: clicking the cap value (on a card, a row or in the inspector) opens
+//! an inline CHF field. SAVE (or Enter) sends the raw text to the
+//! `set_category_cap` server fn, which parses and validates it; the page shows
+//! its message on failure and, on success, refetches the envelopes, totals,
+//! allocation and inspector detail. The −/+ stepper is still a LOCAL preview (a
+//! `use_signal<HashMap<String,i64>>` of centimes deltas on top of the fetched
+//! cap) and is not persisted; a successful save clears that category's delta.
 //!
 //! JSX idioms → RSX (per the playbook):
 //!   * `useState` → `use_signal`; `useEffect`(resize) → `use_effect` + `document::eval`.
@@ -40,11 +43,11 @@ use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg};
 use crate::components::shell::{AiPanel, TopBar};
-use crate::components::states::Awaiting;
+use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::budgets::{
-    get_allocation, get_budget_totals, get_categories, get_category_detail,
-    get_category_transactions, AllocationDto, BudgetTotalsDto, CategoryDetailDto, CategoryDto,
-    CategoryTxnDto,
+    cap_error_text, cap_input_text, get_allocation, get_budget_totals, get_categories,
+    get_category_detail, get_category_transactions, set_category_cap, AllocationDto,
+    BudgetTotalsDto, CategoryDetailDto, CategoryDto, CategoryTxnDto,
 };
 use crate::data::cycle::{get_cycle, CycleDto};
 use crate::data::{chf, chf2};
@@ -139,9 +142,9 @@ fn offline_message(errored: bool) -> (Option<String>, Option<String>) {
 pub fn BudgetsPage() -> Element {
     // ---- backend data loads (was: useGet) ----
     let cycle = use_resource(get_cycle);
-    let cats = use_resource(get_categories);
-    let totals = use_resource(get_budget_totals);
-    let alloc = use_resource(get_allocation);
+    let mut cats = use_resource(get_categories);
+    let mut totals = use_resource(get_budget_totals);
+    let mut alloc = use_resource(get_allocation);
 
     // ---- UI state (was: useState / useTweaks) ----
     // The React tweaks panel (authoring tooling) is not ported; its defaults are
@@ -153,8 +156,8 @@ pub fn BudgetsPage() -> Element {
     let mut env_layout = use_signal(|| "cards".to_string());
     let mut sort = use_signal(|| "order".to_string());
     let show_proj = use_signal(|| true);
-    // Local cap-step overrides (centimes), keyed by category name. Faithful to the
-    // mechanical stepper; the REST PATCH has no F3 mutation fn yet.
+    // Local cap-step overrides (centimes), keyed by category name: the −/+
+    // stepper's unsaved preview. Saved edits go through `set_category_cap`.
     let mut cap_overrides = use_signal(HashMap::<String, i64>::new);
 
     // Responsive dock vs drawer: narrow (<1280px) drawers the inspector.
@@ -178,11 +181,22 @@ pub fn BudgetsPage() -> Element {
 
     // Selected channel detail + recent txns — fetched on demand when something is
     // selected (React guarded the path; here we skip the read when None).
-    let sel_detail = use_resource(move || async move {
+    let mut sel_detail = use_resource(move || async move {
         match sel() {
             Some(name) => Some(get_category_detail(name).await),
             None => None,
         }
+    });
+
+    // A cap was saved: drop that category's unsaved stepper delta (the saved
+    // value is absolute) and refetch every read the cap feeds. `restart` keeps
+    // the previous value until the new one lands, so nothing unmounts meanwhile.
+    let on_cap_saved = use_callback(move |name: String| {
+        cap_overrides.write().remove(&name);
+        cats.restart();
+        totals.restart();
+        alloc.restart();
+        sel_detail.restart();
     });
     let sel_txns = use_resource(move || async move {
         match sel() {
@@ -532,6 +546,7 @@ pub fn BudgetsPage() -> Element {
                                                         if !dockable { drawer.set(true); }
                                                     },
                                                     on_step: move |(name, d): (String, i64)| step(&mut cap_overrides, &name, d),
+                                                    on_saved: on_cap_saved,
                                                 }
                                             }
                                         }
@@ -555,6 +570,7 @@ pub fn BudgetsPage() -> Element {
                                                         if !dockable { drawer.set(true); }
                                                     },
                                                     on_step: move |(name, d): (String, i64)| step(&mut cap_overrides, &name, d),
+                                                    on_saved: on_cap_saved,
                                                 }
                                             }
                                         }
@@ -577,6 +593,7 @@ pub fn BudgetsPage() -> Element {
                         variant: None,
                         on_close: move |()| sel.set(None),
                         on_step: move |(name, d): (String, i64)| step(&mut cap_overrides, &name, d),
+                        on_saved: on_cap_saved,
                     }
                 }
             }
@@ -595,6 +612,7 @@ pub fn BudgetsPage() -> Element {
                             variant: Some("drawer".to_string()),
                             on_close: move |()| drawer.set(false),
                             on_step: move |(name, d): (String, i64)| step(&mut cap_overrides, &name, d),
+                            on_saved: on_cap_saved,
                         }
                     }
                 }
@@ -714,19 +732,155 @@ fn EnvMeter(
 // ── CapStepper — tune the threshold ───────────────────────────────────────────
 
 /// Faithful port of React `CapStepper`. `disabled` → the FIXED CHARGE label.
+///
+/// The −/+ buttons step the local preview (`on_step`). The cap value itself is a
+/// button that swaps the control for an inline CHF field: SAVE or Enter sends
+/// the raw text to `set_category_cap` (the server parses and validates it),
+/// CANCEL or Escape drops the draft. While the save runs the field is locked
+/// and an [`InlineStatus`] says so; a rejection keeps the field open with the
+/// server's message. On success the field closes and `on_saved` gets the name
+/// so the page can refetch. `inspector` switches to the larger dock styling
+/// (no `CAP` label).
 #[component]
-fn CapStepper(value: Money, disabled: bool, on_step: EventHandler<i64>) -> Element {
+fn CapStepper(
+    name: String,
+    value: Money,
+    disabled: bool,
+    on_step: EventHandler<i64>,
+    on_saved: EventHandler<String>,
+    #[props(default = false)] inspector: bool,
+) -> Element {
+    // Hooks first, unconditionally (rules of hooks), before any early return.
+    let mut editing = use_signal(|| false);
+    let mut draft = use_signal(String::new);
+    let mut pending = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+
+    let save_name = name.clone();
+    let save = use_callback(move |()| {
+        if pending() {
+            return;
+        }
+        let name = save_name.clone();
+        let amount = draft();
+        pending.set(true);
+        error.set(None);
+        spawn(async move {
+            let result = set_category_cap(name.clone(), amount).await;
+            pending.set(false);
+            match result {
+                Ok(()) => {
+                    editing.set(false);
+                    on_saved.call(name);
+                }
+                Err(e) => error.set(Some(cap_error_text(&e))),
+            }
+        });
+    });
+    let mut cancel = move || {
+        if !pending() {
+            editing.set(false);
+            error.set(None);
+        }
+    };
+
     if disabled {
         return rsx! { span { class: "cap-fixed", "FIXED CHARGE" } };
     }
+    let wrap_cls = if inspector { "insp-step" } else { "cap-step" };
+
+    if editing() {
+        let busy = pending();
+        let field_label = format!("New cap for {name}, in CHF");
+        return rsx! {
+            div {
+                class: "cap-edit",
+                onclick: move |e: Event<MouseData>| e.stop_propagation(),
+                div { class: "{wrap_cls}",
+                    if !inspector {
+                        span { class: "cl", "CAP" }
+                    }
+                    label { class: "cap-in",
+                        span { class: "cur", "CHF" }
+                        input {
+                            r#type: "text",
+                            inputmode: "decimal",
+                            autocomplete: "off",
+                            spellcheck: "false",
+                            aria_label: "{field_label}",
+                            value: "{draft}",
+                            disabled: busy,
+                            onmounted: move |e: Event<MountedData>| async move {
+                                let _ = e.set_focus(true).await;
+                            },
+                            oninput: move |e: Event<FormData>| {
+                                draft.set(e.value());
+                                // A stale rejection should not sit next to new text.
+                                if error.peek().is_some() {
+                                    error.set(None);
+                                }
+                            },
+                            onkeydown: move |e: Event<KeyboardData>| {
+                                // Keep keys away from the card's Enter/Space select.
+                                e.stop_propagation();
+                                match e.key() {
+                                    Key::Enter => {
+                                        e.prevent_default();
+                                        save.call(());
+                                    }
+                                    Key::Escape => {
+                                        e.prevent_default();
+                                        cancel();
+                                    }
+                                    _ => {}
+                                }
+                            },
+                        }
+                    }
+                    button {
+                        class: "cap-act ok",
+                        r#type: "button",
+                        disabled: busy,
+                        onclick: move |_| save.call(()),
+                        "SAVE"
+                    }
+                    button {
+                        class: "cap-act",
+                        r#type: "button",
+                        disabled: busy,
+                        onclick: move |_| cancel(),
+                        "CANCEL"
+                    }
+                }
+                InlineStatus {
+                    pending: busy,
+                    error: error(),
+                    pending_label: "Saving cap…".to_string(),
+                }
+            }
+        };
+    }
+
     let v = chf(value, 0);
     rsx! {
         div {
-            class: "cap-step",
+            class: "{wrap_cls}",
             onclick: move |e: Event<MouseData>| e.stop_propagation(),
-            span { class: "cl", "CAP" }
+            if !inspector {
+                span { class: "cl", "CAP" }
+            }
             button { class: "cs", title: "Lower cap CHF 10", onclick: move |_| on_step.call(-10), "−" }
-            span { class: "cv", "CHF {v}" }
+            button {
+                class: "cv cap-val",
+                r#type: "button",
+                title: "Edit cap",
+                onclick: move |_| {
+                    draft.set(cap_input_text(value));
+                    error.set(None);
+                    editing.set(true);
+                },
+                "CHF {v}"
+            }
             button { class: "cs", title: "Raise cap CHF 10", onclick: move |_| on_step.call(10), "+" }
         }
     }
@@ -744,6 +898,7 @@ fn EnvCard(
     show_proj: bool,
     on_select: EventHandler<String>,
     on_step: EventHandler<(String, i64)>,
+    on_saved: EventHandler<String>,
 ) -> Element {
     let (key, label, tone) = budget_status(c.spent, c.proj, cap, c.fixed);
     let spent = c.spent;
@@ -793,6 +948,7 @@ fn EnvCard(
     let name = c.name.clone();
     let name2 = c.name.clone();
     let nm = c.name.clone();
+    let cap_name = c.name.clone();
 
     rsx! {
         div {
@@ -845,9 +1001,11 @@ fn EnvCard(
             div { class: "env-foot",
                 span { class: "env-items", "{items} {items_word}" }
                 CapStepper {
+                    name: cap_name,
                     value: cap,
                     disabled: c.fixed,
                     on_step: move |d: i64| on_step.call((c.name.clone(), d)),
+                    on_saved,
                 }
             }
         }
@@ -865,6 +1023,7 @@ fn EnvRow(
     show_proj: bool,
     on_select: EventHandler<String>,
     on_step: EventHandler<(String, i64)>,
+    on_saved: EventHandler<String>,
 ) -> Element {
     let (key, label, tone) = budget_status(c.spent, c.proj, cap, c.fixed);
     let spent = c.spent;
@@ -891,6 +1050,7 @@ fn EnvRow(
     };
     let name = c.name.clone();
     let nm = c.name.clone();
+    let cap_name = c.name.clone();
 
     rsx! {
         div { class: "{row_cls}", onclick: move |_| on_select.call(name.clone()),
@@ -907,9 +1067,11 @@ fn EnvRow(
             }
             span { class: "{pct_cls_str}", "{pct_txt}" }
             CapStepper {
+                name: cap_name,
                 value: cap,
                 disabled: c.fixed,
                 on_step: move |d: i64| on_step.call((c.name.clone(), d)),
+                on_saved,
             }
         }
     }
@@ -1208,6 +1370,7 @@ fn BudgetInspector(
     variant: Option<String>,
     on_close: EventHandler<()>,
     on_step: EventHandler<(String, i64)>,
+    on_saved: EventHandler<String>,
 ) -> Element {
     let panel_cls = match &variant {
         Some(v) => format!("sig-panel bud-insp {v}"),
@@ -1322,6 +1485,7 @@ fn BudgetInspector(
         _ => 2,
     };
     let name_for_step = cat.name.clone();
+    let step_name = cat.name.clone();
 
     rsx! {
         aside { class: "{panel_cls}",
@@ -1395,16 +1559,15 @@ fn BudgetInspector(
             if !cat.fixed {
                 div { class: "insp-cap",
                     div { class: "h", "Tune cap" }
-                    div { class: "insp-step", onclick: move |e: Event<MouseData>| e.stop_propagation(),
-                        {
-                            let n1 = name_for_step.clone();
-                            let n2 = name_for_step.clone();
-                            rsx! {
-                                button { class: "cs", onclick: move |_| on_step.call((n1.clone(), -10)), "−" }
-                                span { class: "cv", "CHF {cap_txt}" }
-                                button { class: "cs", onclick: move |_| on_step.call((n2.clone(), 10)), "+" }
-                            }
-                        }
+                    // Keyed by name: a new selection starts with a closed editor.
+                    CapStepper {
+                        key: "{name_for_step}",
+                        name: name_for_step.clone(),
+                        value: cap,
+                        disabled: false,
+                        inspector: true,
+                        on_step: move |d: i64| on_step.call((step_name.clone(), d)),
+                        on_saved,
                     }
                 }
             }
