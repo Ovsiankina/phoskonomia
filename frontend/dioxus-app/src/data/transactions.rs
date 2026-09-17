@@ -1074,41 +1074,19 @@ mod correct_transaction_line_tests {
         let db = seeded();
         let before = stored_line(&db, "t1", 2).await;
         let shown = request(&db, "t1", 2).await;
-        let cases = [
-            (
-                "name",
-                TxnLineCorrection {
-                    expected_name: "Bread".to_owned(),
-                    ..shown.clone()
-                },
-            ),
-            (
-                "category",
-                TxnLineCorrection {
-                    expected_category: "Bakery".to_owned(),
-                    ..shown.clone()
-                },
-            ),
-            (
-                "qty",
-                TxnLineCorrection {
-                    expected_qty: 2.0,
-                    ..shown.clone()
-                },
-            ),
-            (
-                "unit price",
-                TxnLineCorrection {
-                    expected_unit_price: Money::from_centimes(450),
-                    ..shown
-                },
-            ),
+        // Each case makes one displayed value differ from the stored line.
+        type MakeStale = fn(&mut TxnLineCorrection);
+        let stale: [(&str, MakeStale); 4] = [
+            ("name", |f| f.expected_name = "Bread".to_owned()),
+            ("category", |f| f.expected_category = "Bakery".to_owned()),
+            ("qty", |f| f.expected_qty = 2.0),
+            ("unit price", |f| {
+                f.expected_unit_price = Money::from_centimes(450);
+            }),
         ];
-        for (case, fix) in cases {
-            let fix = TxnLineCorrection {
-                category: Some("Bakery".to_owned()),
-                ..fix
-            };
+        for (case, make_stale) in stale {
+            let mut fix = with_edit(shown.clone(), "category", "Bakery");
+            make_stale(&mut fix);
             let err = correct_transaction_line_with(&db, fix)
                 .await
                 .expect_err(case);
