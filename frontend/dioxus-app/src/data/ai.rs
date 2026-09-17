@@ -132,8 +132,8 @@ pub async fn get_ai_panel() -> Result<AiPanelDto, ServerFnError> {
 // `AiPanel`. The model is only ever asked for prose; nothing here can reach the
 // ledger or the approval queue (chat has no write path besides its own
 // transcript). Model output is hostile input: every line leaving the server is
-// bounded and stripped of control characters, and the panel renders it as a
-// plain text node.
+// bounded and stripped of control and bidi-override characters, and the panel
+// renders it as a plain text node.
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Longest message (in characters) the chat accepts from the user.
@@ -141,6 +141,11 @@ pub const CHAT_INPUT_MAX_CHARS: usize = 1_000;
 
 /// Longest transcript line (in characters) the server hands to the panel.
 pub const CHAT_TEXT_MAX_CHARS: usize = 4_000;
+
+/// Marks a [`ServerFnError`] (in its `details`) as one of the chat server's own
+/// user-facing failures. `details` survives the trip to the client, so the
+/// panel can show those messages verbatim and nothing else.
+const CHAT_ERROR_MARK: &str = "phosk-chat";
 
 /// What one chat submission did.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,13 +161,15 @@ pub enum ChatSendOutcome {
 }
 
 /// Bound one transcript line for display: control characters are dropped
-/// (newlines and tabs survive) and the text is cut to
-/// [`CHAT_TEXT_MAX_CHARS`] characters, the cut marked with `…`.
+/// (newlines and tabs survive), and so are the bidi embedding, override and
+/// isolate characters that can make text display in a misleading order. The
+/// text is cut to [`CHAT_TEXT_MAX_CHARS`] characters, the cut marked with `…`.
 #[must_use]
 pub fn bound_chat_text(text: &str) -> String {
-    let mut kept = text
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'));
+    let mut kept = text.chars().filter(|c| {
+        (!c.is_control() || matches!(c, '\n' | '\t'))
+            && !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    });
     let mut out: String = kept.by_ref().take(CHAT_TEXT_MAX_CHARS).collect();
     if kept.next().is_some() {
         out.push('…');
@@ -172,24 +179,28 @@ pub fn bound_chat_text(text: &str) -> String {
 
 /// The user-facing message of a failed chat call.
 ///
-/// Server-side failures already carry a sanitised message (see
-/// [`send_chat_message`]); anything else (transport, decoding) is reported
-/// generically so no internal detail reaches the screen.
+/// Only the chat server's own failures (marked by `chat_failure`) carry a
+/// message meant for the screen. Anything else (transport, decoding, an
+/// error body built by a proxy or by the framework) is reported generically,
+/// so no internal detail reaches the screen.
 #[must_use]
 pub fn chat_error_message(err: &ServerFnError) -> String {
     match err {
-        ServerFnError::ServerError { message, .. } => message.clone(),
+        ServerFnError::ServerError {
+            message, details, ..
+        } if details.as_ref().and_then(|d| d.as_str()) == Some(CHAT_ERROR_MARK) => message.clone(),
         _ => "The app server could not be reached. Your message is still in the input.".to_owned(),
     }
 }
 
-/// A sanitised, user-facing chat failure with an HTTP-style status code.
+/// A sanitised, user-facing chat failure with an HTTP-style status code,
+/// marked so [`chat_error_message`] shows it.
 #[cfg(feature = "server-deps")]
 fn chat_failure(code: u16, message: &str) -> ServerFnError {
     ServerFnError::ServerError {
         message: message.to_owned(),
         code,
-        details: None,
+        details: Some(CHAT_ERROR_MARK.into()),
     }
 }
 
@@ -277,11 +288,10 @@ pub(crate) async fn send_chat_message_with(
         return Err(chat_failure(400, "Type a message first."));
     }
     if line.chars().count() > CHAT_INPUT_MAX_CHARS {
+        // No numerals here: this text renders in the body font.
         return Err(chat_failure(
             400,
-            &format!(
-                "That message is too long: keep it to {CHAT_INPUT_MAX_CHARS} characters at most. It is still in the input."
-            ),
+            "That message is too long for the assistant; shorten it. It is still in the input.",
         ));
     }
 
@@ -298,16 +308,8 @@ pub(crate) async fn send_chat_message_with(
         return Ok(ChatSendOutcome::Cleared);
     }
 
-    // Pre-flight: an unreachable model must not consume the message
-    // (`chat_reply` persists the user line before it asks the model).
-    // `Ok(false)` (reachable, model tag not listed) still tries the call.
-    if llm.health().await.is_err() {
-        return Err(chat_failure(
-            503,
-            "The assistant is offline: the local model cannot be reached. Your message was not sent and is still in the input.",
-        ));
-    }
-
+    // `chat_reply` saves nothing until the model has answered, so a failed
+    // turn leaves the transcript as it was and a retry adds no duplicate.
     match phosk_ai::ai_tools::chat_reply(db, llm, line).await {
         Ok(reply) => Ok(ChatSendOutcome::Replied {
             reply: chat_line(&reply.who, &reply.text),
@@ -316,10 +318,24 @@ pub(crate) async fn send_chat_message_with(
             404,
             "There is no chat session to write to yet. Your message is still in the input.",
         )),
-        Err(_) => Err(chat_failure(
-            502,
-            "The assistant could not answer. Your message is still in the input; try again.",
-        )),
+        // Tell the failures apart by the model's health only after one
+        // happened, so a working chat pays for no extra round trip.
+        // `Ok(false)` is not checked up front: a model that is not listed
+        // under its exact tag may still answer.
+        Err(_) => Err(match llm.health().await {
+            Err(_) => chat_failure(
+                503,
+                "The assistant is offline: the local model cannot be reached. Nothing was saved; your message is still in the input.",
+            ),
+            Ok(false) => chat_failure(
+                503,
+                "The assistant's local model is not installed or not loaded. Nothing was saved; your message is still in the input.",
+            ),
+            Ok(true) => chat_failure(
+                502,
+                "The assistant could not answer. Your message is still in the input; try again.",
+            ),
+        }),
     }
 }
 
@@ -343,6 +359,13 @@ mod chat_tests {
         AiChatMsgDto {
             who: who.to_owned(),
             text: text.to_owned(),
+        }
+    }
+
+    fn status(err: &ServerFnError) -> Option<u16> {
+        match err {
+            ServerFnError::ServerError { code, .. } => Some(*code),
+            _ => None,
         }
     }
 
@@ -464,6 +487,7 @@ mod chat_tests {
         let err = send_chat_message_with(&db, &offline, "am I on budget?")
             .await
             .expect_err("the model is down");
+        assert_eq!(status(&err), Some(503));
         let shown = chat_error_message(&err);
         assert!(shown.contains("offline"), "names the state: {shown:?}");
         assert!(
@@ -472,6 +496,65 @@ mod chat_tests {
         );
         assert!(!shown.contains("fake llm"), "no internals leak: {shown:?}");
         assert_eq!(history(&db).await, before, "the message was not consumed");
+    }
+
+    #[tokio::test]
+    async fn model_failure_after_a_healthy_check_saves_nothing_and_a_retry_adds_no_duplicate() {
+        let db = fresh_db();
+        let failing = FakeLlm::new().fail_completions(true);
+        let before = history(&db).await;
+
+        for attempt in 0..2 {
+            let err = send_chat_message_with(&db, &failing, "am I on budget?")
+                .await
+                .expect_err("the model fails to answer");
+            assert_eq!(status(&err), Some(502), "attempt {attempt}");
+            let shown = chat_error_message(&err);
+            assert!(shown.contains("could not answer"), "{shown:?}");
+            assert!(shown.contains("still in the input"), "{shown:?}");
+            assert!(!shown.contains("fake llm"), "no internals leak: {shown:?}");
+            assert_eq!(
+                history(&db).await,
+                before,
+                "attempt {attempt}: a failed turn saves nothing"
+            );
+        }
+
+        // The retry that works saves the question exactly once.
+        send_chat_message_with(&db, &FakeLlm::new(), "am I on budget?")
+            .await
+            .expect("sent");
+        let after = history(&db).await;
+        assert_eq!(after.len(), before.len() + 2);
+        let asked = after
+            .iter()
+            .filter(|m| **m == msg("usr", "am I on budget?"))
+            .count();
+        assert_eq!(asked, 1, "no duplicate question in {after:?}");
+    }
+
+    #[tokio::test]
+    async fn missing_model_is_its_own_error_and_saves_nothing() {
+        let db = fresh_db();
+        // Reachable, but the configured model is not listed and cannot answer.
+        let missing = FakeLlm::new().healthy(false).fail_completions(true);
+        let before = history(&db).await;
+
+        let err = send_chat_message_with(&db, &missing, "am I on budget?")
+            .await
+            .expect_err("no model to answer");
+        assert_eq!(status(&err), Some(503));
+        let shown = chat_error_message(&err);
+        assert!(shown.contains("not installed"), "{shown:?}");
+        assert!(shown.contains("still in the input"), "{shown:?}");
+        assert_eq!(history(&db).await, before, "nothing saved");
+
+        // A model that is not listed but still answers is used as is.
+        let unlisted = FakeLlm::new().healthy(false);
+        let out = send_chat_message_with(&db, &unlisted, "hi")
+            .await
+            .expect("an answering model replies");
+        assert!(matches!(out, ChatSendOutcome::Replied { .. }));
     }
 
     #[tokio::test]
@@ -525,7 +608,7 @@ mod chat_tests {
             last.text
                 .starts_with("<img src=x onerror=alert(1)>[2Jline\n"),
             "markup stays inert text, control chars are dropped: {:?}",
-            &last.text[..40]
+            last.text.chars().take(40).collect::<String>()
         );
         assert_eq!(last.text.chars().count(), CHAT_TEXT_MAX_CHARS + 1);
         assert!(last.text.ends_with('…'));
@@ -545,7 +628,43 @@ mod chat_tests {
         assert!(!shown.contains("secret"), "{shown:?}");
         assert!(shown.contains("still in the input"), "{shown:?}");
 
-        let server = ServerFnError::new("The assistant is offline.");
-        assert_eq!(chat_error_message(&server), "The assistant is offline.");
+        // Only the chat server's own failures are shown as they are.
+        let own = chat_failure(503, "The assistant is offline.");
+        assert_eq!(chat_error_message(&own), "The assistant is offline.");
+
+        // Errors built elsewhere (a proxy's non-JSON error body, another
+        // server fn's raw error text) are not.
+        for foreign in [
+            ServerFnError::ServerError {
+                message: "HTTP 502: <html>upstream 10.0.0.7 refused</html>".to_owned(),
+                code: 502,
+                details: None,
+            },
+            ServerFnError::new("surreal list: internal detail"),
+        ] {
+            let shown = chat_error_message(&foreign);
+            assert!(!shown.contains("10.0.0.7"), "{shown:?}");
+            assert!(!shown.contains("surreal"), "{shown:?}");
+            assert!(shown.contains("still in the input"), "{shown:?}");
+        }
+    }
+
+    #[test]
+    fn bound_chat_text_drops_bidi_controls() {
+        let spoof = "pay \u{202E}FHC 01\u{202C} now \u{2066}x\u{2069}";
+        assert_eq!(bound_chat_text(spoof), "pay FHC 01 now x");
+    }
+
+    #[tokio::test]
+    async fn over_long_message_error_has_no_numerals() {
+        // Numerals must render in the display font; this message is body text.
+        let long = "a".repeat(CHAT_INPUT_MAX_CHARS + 1);
+        let db = fresh_db();
+        let err = send_chat_message_with(&db, &FakeLlm::new(), &long)
+            .await
+            .expect_err("too long");
+        let shown = chat_error_message(&err);
+        assert!(shown.contains("too long"), "{shown:?}");
+        assert!(!shown.chars().any(|c| c.is_ascii_digit()), "{shown:?}");
     }
 }

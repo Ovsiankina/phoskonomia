@@ -218,8 +218,10 @@ Deferred to implementation time (not architecture):
   firm up as we build.
 - ~~Chat persistence + `/clear` (frontend ROADMAP gap).~~ Done: the Dioxus
   `AiPanel` reads the persisted transcript, sends through
-  `phosk_ai::ai_tools::chat_reply` and runs `/clear` via
-  `phosk_ai::ai_spine::clear_chat`.
+  `phosk_ai::ai_tools::chat_reply` (which saves a turn only once the model
+  has answered) and runs `/clear` via `phosk_ai::ai_spine::clear_chat`. Both
+  DB adapters return the transcript in append order (the shared contract
+  checks it).
 - SurrealDB `Thing` (de)serialization seam — DB-adapter impl (ADR-010
   covers the principle).
 

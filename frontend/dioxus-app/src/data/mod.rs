@@ -216,8 +216,7 @@ impl Session {
         self.stack.db.as_ref()
     }
 
-    /// The LLM port (Ollama) the AI write-tools and narrative insights use.
-    #[allow(dead_code)] // wired into AI/pipeline server fns as they land.
+    /// The LLM port (Ollama) the AI chat, write-tools and narrative insights use.
     pub(crate) fn llm(&self) -> &dyn phosk_adapter_llm::LlmAdapter {
         self.stack.llm.as_ref()
     }

@@ -1003,9 +1003,10 @@ pub fn DashboardPage() -> Element {
 /// rail and `on_track` selects the signal in the dashboard's `sel` signal (the
 /// React `selectSig`, opening the dock or drawer) when a feed item's "track"
 /// action fires — but `AiPanel` lives outside the dashboard's state closure, so
-/// this tiny component owns that wiring and re-exposes both. Feed/chat are left
-/// to their (empty) defaults until an AI feed server fn lands; the panel renders
-/// its "awaiting backend (/ai/feed)" body, faithful to React.
+/// this tiny component owns that wiring and re-exposes both. The feed is left
+/// to its (empty) default until an AI feed server fn lands, so the panel renders
+/// its "awaiting backend (/ai/feed)" body, faithful to React. The chat needs no
+/// wiring here: the panel loads and sends it itself.
 #[component]
 fn AiPanelDash(
     collapsed: bool,
