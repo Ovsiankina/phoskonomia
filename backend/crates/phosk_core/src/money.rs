@@ -84,9 +84,11 @@ impl Money {
     ///
     /// # Errors
     /// [`PhoskError::Invalid`] for empty or malformed input, more than two
-    /// decimals, or an amount beyond the i64 centime range. That is caller input,
-    /// so it is never [`PhoskError::Overflow`]. The message is a fixed hint that
-    /// never repeats the input.
+    /// decimals, or a magnitude above `i64::MAX` centimes. The accepted range is
+    /// symmetric, `-i64::MAX..=i64::MAX`, so `i64::MIN` (displayed as
+    /// `CHF -92'233'720'368'547'758.08`) does not parse back. That is caller
+    /// input, so it is never [`PhoskError::Overflow`]. The message is a fixed hint
+    /// that never repeats the input.
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn parse_chf(input: &str) -> Result<Self, PhoskError> {
         let s = input.trim();
