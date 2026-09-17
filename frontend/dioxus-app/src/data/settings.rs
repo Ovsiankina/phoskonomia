@@ -175,8 +175,7 @@ pub(crate) async fn reset_preference_with(
     db: &dyn DatabaseAdapter,
     key: &str,
 ) -> Result<SettingsDto, PhoskError> {
-    let rule = phosk_settings::preference_rule(key)
-        .ok_or_else(|| PhoskError::Invalid("unknown preference key".to_owned()))?;
+    let rule = phosk_settings::known_preference(key)?;
     phosk_settings::reset_preference(db, rule.key).await?;
     get_preferences_with(db).await
 }
@@ -236,6 +235,11 @@ mod preferences_tests {
         assert_eq!(momentum.allowed.len(), 12, "1 to 12 cycles");
         assert!(!momentum.user_modified);
         assert_eq!(row(&view, "currency").allowed, ["CHF"], "fixed");
+        assert_eq!(
+            row(&view, "low_confidence_threshold").allowed,
+            ["0.7"],
+            "fixed until the AI pipeline reads it"
+        );
         assert!(row(&view, "low_confidence_threshold").user_modified);
         assert!(row(&view, "telemetry").user_modified);
 
@@ -315,6 +319,7 @@ mod preferences_tests {
             ("currency", "EUR"),
             ("cycle_period", "week"),
             ("low_confidence_threshold", "0.5"),
+            ("low_confidence_threshold", "0.9"),
             ("telemetry", "on"),
         ] {
             let err = set_preference_with(&db, key, value)
@@ -343,22 +348,26 @@ mod preferences_tests {
     #[tokio::test]
     async fn reset_restores_the_default_and_clears_the_override() {
         let db = fresh();
-        set_preference_with(&db, "low_confidence_threshold", "0.9")
+        set_preference_with(&db, "momentum_baseline_cycles", "6")
             .await
             .expect("valid write");
-        let view = reset_preference_with(&db, "low_confidence_threshold")
+        let view = reset_preference_with(&db, "momentum_baseline_cycles")
             .await
             .expect("reset");
 
-        let r = row(&view, "low_confidence_threshold");
-        assert_eq!(r.value, "0.7");
+        let r = row(&view, "momentum_baseline_cycles");
+        assert_eq!(r.value, "3");
         assert!(!r.user_modified);
-        assert_eq!(view.changed_count, 1, "only telemetry is still an override");
+        assert_eq!(
+            view.changed_count, 2,
+            "only the two seeded overrides remain"
+        );
 
         let stored = db
-            .preference("low_confidence_threshold")
+            .preference("momentum_baseline_cycles")
             .await
             .expect("stored");
+        assert_eq!(stored.value, "3");
         assert_eq!(stored.provenance.source, Source::RuleGenerated);
     }
 

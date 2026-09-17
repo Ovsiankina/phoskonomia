@@ -672,8 +672,8 @@ Derived:
 
 ## 5.6 `phosk_settings` (NEW crate)
 
-Spec: `backend-features-todo.md §6` (no dioxus DTO file yet — derive shapes from the todo + the
-`/config` page). Minimal DTOs:
+Spec: `backend-features-todo.md §6`; the `/config` page's `#[server]` fns live in the dioxus
+`data/settings.rs`, which builds its view on these. Minimal DTOs:
 
 ```rust
 pub struct PreferenceDto { pub key: String, pub value: String, pub surface: String, pub storedOnDevice: bool, pub userModified: bool }
@@ -685,6 +685,8 @@ pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>,
 pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummaryDto, PhoskError>;
 pub async fn set_preference(db: &dyn DatabaseAdapter, key: &str, value: &str) -> Result<(), PhoskError>;
 pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(), PhoskError>;
+/// The rule for a known key, else Invalid("unknown preference key"):
+pub fn known_preference(key: &str) -> Result<&'static PreferenceRule, PhoskError>;
 /// Check user input against PREFERENCE_RULES (unknown key / disallowed value → Invalid):
 pub fn validate_preference(key: &str, value: &str) -> Result<&'static PreferenceRule, PhoskError>;
 /// THE momentum-baseline accessor every analytics/signal service reads:
@@ -695,8 +697,9 @@ pub async fn momentum_baseline_cycles(db: &dyn DatabaseAdapter) -> Result<u32, P
 `NotFound` or parse failure. `changed_count` = prefs whose `provenance.source == UserModified`.
 `set_preference` is the raw store write; every path that takes user input (the `/config`
 `#[server]` fns) calls `validate_preference` first. Allowed values: `momentum_baseline_cycles`
-1–12, `low_confidence_threshold` 0.7/0.8/0.9; `currency` (CHF), `cycle_period` (month) and
-`telemetry` (off) are fixed to their defaults.
+1–12; `currency` (CHF), `cycle_period` (month), `low_confidence_threshold` (0.7) and
+`telemetry` (off) are fixed to their defaults. The threshold stays fixed until the AI pipeline
+reads the preference instead of its hard-coded 0.7 floor.
 
 `Cargo.toml` deps: `phosk_core`, `phosk_model`, `phosk_adapter_db`, `phosk_id`, `serde`, `tracing`;
 dev: `phosk_db_memory`, `serde_json`, `tokio`.

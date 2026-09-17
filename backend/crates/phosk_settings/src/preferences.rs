@@ -1,9 +1,9 @@
 //! The `[preferences]` feature: list / summarize / set / reset user preferences,
 //! plus the canonical `momentum_baseline_cycles` accessor (build-contract §5.6, §6).
 //!
-//! DTOs mirror the `/config` page view shapes (camelCase keys); there is no
-//! dioxus `data/*.rs` spec file for settings yet, so the shapes are derived from
-//! the build contract §5.6.
+//! DTOs mirror the `/config` page view shapes (camelCase keys), as specified in
+//! the build contract §5.6. The dioxus `data/settings.rs` `#[server]` fns build
+//! the page's own view on top of them.
 
 use serde::{Deserialize, Serialize};
 
@@ -46,8 +46,10 @@ pub struct PreferenceRule {
 /// * `currency` — `CHF` only: `Money` is CHF centimes with no conversion, so any
 ///   other label would mislabel every amount.
 /// * `cycle_period` — `month` only: the budgeting cycle is `Period::Month`.
-/// * `low_confidence_threshold` — `0.7`/`0.8`/`0.9`: a user may flag AI
-///   proposals more strictly, never below the architecture's 0.7 floor.
+/// * `low_confidence_threshold` — `0.7` only: review flagging still uses the
+///   fixed 0.7 floor (`phosk_ai::CONFIDENCE_THRESHOLD`), so a stricter value
+///   would be stored but never honoured. Unlock it once the AI pipeline reads
+///   this preference.
 /// * `telemetry` — `off` only: zero telemetry is a product invariant.
 pub const PREFERENCE_RULES: &[PreferenceRule] = &[
     PreferenceRule {
@@ -70,7 +72,7 @@ pub const PREFERENCE_RULES: &[PreferenceRule] = &[
     PreferenceRule {
         key: "low_confidence_threshold",
         default: "0.7",
-        allowed: &["0.7", "0.8", "0.9"],
+        allowed: &["0.7"],
     },
     PreferenceRule {
         key: "telemetry",
@@ -85,6 +87,15 @@ pub fn preference_rule(key: &str) -> Option<&'static PreferenceRule> {
     PREFERENCE_RULES.iter().find(|r| r.key == key)
 }
 
+/// The rule for `key`, or the fixed "unknown key" rejection every user-input
+/// path returns. The error text never echoes `key`.
+///
+/// # Errors
+/// [`PhoskError::Invalid`] if `key` is not in [`PREFERENCE_RULES`].
+pub fn known_preference(key: &str) -> Result<&'static PreferenceRule, PhoskError> {
+    preference_rule(key).ok_or_else(|| PhoskError::Invalid("unknown preference key".to_owned()))
+}
+
 /// Check a user-supplied `(key, value)` pair against [`PREFERENCE_RULES`].
 ///
 /// [`set_preference`] stores whatever it is given; every write path that takes
@@ -95,8 +106,7 @@ pub fn preference_rule(key: &str) -> Option<&'static PreferenceRule> {
 /// [`PhoskError::Invalid`] if `key` is unknown or `value` is not one of the
 /// key's allowed values.
 pub fn validate_preference(key: &str, value: &str) -> Result<&'static PreferenceRule, PhoskError> {
-    let rule = preference_rule(key)
-        .ok_or_else(|| PhoskError::Invalid("unknown preference key".to_owned()))?;
+    let rule = known_preference(key)?;
     if rule.allowed.contains(&value) {
         Ok(rule)
     } else {

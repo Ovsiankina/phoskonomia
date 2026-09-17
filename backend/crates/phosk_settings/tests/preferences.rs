@@ -440,14 +440,13 @@ fn validate_preference_rejects_bad_momentum_baselines() {
 }
 
 #[test]
-fn validate_preference_never_lowers_the_confidence_floor() {
-    for ok in ["0.7", "0.8", "0.9"] {
-        assert!(
-            validate_preference("low_confidence_threshold", ok).is_ok(),
-            "{ok}"
-        );
-    }
-    for bad in ["0.6", "0.5", "0", "0.75", "1.5", "NaN", "0.70"] {
+fn validate_preference_pins_the_confidence_threshold_to_the_floor() {
+    // Review flagging still uses the fixed 0.7 floor (phosk_ai), so a stricter
+    // value would be stored but never honoured: only 0.7 is accepted.
+    assert!(validate_preference("low_confidence_threshold", "0.7").is_ok());
+    for bad in [
+        "0.8", "0.9", "0.6", "0.5", "0", "0.75", "1.5", "NaN", "0.70",
+    ] {
         assert!(
             validate_preference("low_confidence_threshold", bad).is_err(),
             "{bad:?} must be rejected"
@@ -456,7 +455,7 @@ fn validate_preference_never_lowers_the_confidence_floor() {
 }
 
 #[test]
-fn validate_preference_locks_currency_cycle_period_and_telemetry() {
+fn validate_preference_locks_the_keys_nothing_can_honour_yet() {
     assert!(
         validate_preference("currency", "EUR").is_err(),
         "money is CHF-only"
@@ -469,7 +468,12 @@ fn validate_preference_locks_currency_cycle_period_and_telemetry() {
         validate_preference("telemetry", "on").is_err(),
         "zero telemetry"
     );
-    for key in ["currency", "cycle_period", "telemetry"] {
+    for key in [
+        "currency",
+        "cycle_period",
+        "low_confidence_threshold",
+        "telemetry",
+    ] {
         let rule = preference_rule(key).expect("known key");
         assert_eq!(
             rule.allowed,
