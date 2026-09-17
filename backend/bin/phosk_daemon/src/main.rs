@@ -9,9 +9,10 @@
 //! local testing against a co-hosted `phosk_queue`). Tune pacing with
 //! `PHOSK_DAEMON_LONG_POLL_MS` and `PHOSK_DAEMON_BACKOFF_MS`.
 //!
-//! Until `phosk_pipeline_receipt` is composed in, this binary wires the
-//! deterministic [`phosk_daemon::NullIngest`] seam so the poll/drain loop runs
-//! and logs end to end.
+//! `phosk_pipeline_receipt` exists (`intake_receipt`) but is not yet composed
+//! in behind a `ReceiptIngest` impl, so this binary still wires the
+//! deterministic [`phosk_daemon::NullIngest`] seam: the poll/drain loop runs and
+//! logs end to end, but drained blobs are not imported yet.
 
 use std::error::Error;
 use std::time::Duration;
@@ -26,9 +27,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = config_from_env()?;
 
     let client = QueueClient::new(&base)?;
-    // Seam stand-in until the real sandboxed pipeline is composed (ADR-005/010):
-    // the concrete OCR/LLM adapters are wired at the desktop server context, not
-    // here. Swapping it in is a one-line change.
+    // Seam stand-in until `phosk_pipeline_receipt` is composed in behind a
+    // `ReceiptIngest` impl (ADR-005/010): the concrete OCR/LLM adapters are wired
+    // at the desktop server context, not here.
     let ingest = NullIngest::new();
     let daemon = Daemon::new(client, ingest, config);
 

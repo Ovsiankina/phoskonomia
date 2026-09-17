@@ -15,9 +15,10 @@
 //! adapters are composed *elsewhere* (the desktop server context), never here —
 //! this bin only owns the **poll/drain loop** and the outbound HTTP client.
 //!
-//! Until `phosk_pipeline_receipt` exists, [`NullIngest`] is the deterministic
-//! fake the loop and its tests run against. Swapping in the real pipeline is a
-//! one-line change at the composition root and a new `impl ReceiptIngest`.
+//! The pipeline crate `phosk_pipeline_receipt` exists (`intake_receipt`), but
+//! no `impl ReceiptIngest` adapts it yet, so [`NullIngest`] is still what the
+//! binary runs and what the loop's tests run against. Wiring the real pipeline
+//! means a new `impl ReceiptIngest` plus a change at the composition root.
 //!
 //! ## The poll protocol
 //!
@@ -53,7 +54,7 @@ pub struct DrainedBlob {
 }
 
 /// The seam to the sandboxed receipt-import pipeline (`phosk_pipeline_receipt`,
-/// not yet built). The daemon depends only on this port, never on the OCR/LLM
+/// built but not yet adapted to this port). The daemon depends only on this port, never on the OCR/LLM
 /// adapters behind it (ADR-005/010). It is `async` (the pipeline is I/O-bound)
 /// and object-safe so the daemon holds an `Arc<dyn ReceiptIngest + Send + Sync>`
 /// chosen by the composition root.
@@ -86,7 +87,8 @@ pub enum IngestOutcome {
 }
 
 /// A deterministic, side-effect-free [`ReceiptIngest`] for the loop's tests and
-/// for running the daemon before `phosk_pipeline_receipt` exists. It records the
+/// for running the daemon until `phosk_pipeline_receipt` is wired behind this
+/// port. It records the
 /// blobs it received (so a test can assert the round-trip) and always reports
 /// `Queued`. It NEVER decodes the bytes — it is a seam stand-in, not a pipeline.
 #[derive(Debug, Default)]

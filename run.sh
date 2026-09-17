@@ -1,44 +1,32 @@
 #!/usr/bin/env bash
-# Launches the real client/server pair: backend/bin/phosk_api (axum, :3819)
-# then frontend/app (Vite/React, :3717). Order matters — frontend/app/src/lib/api.js
-# fetches the backend on mount with no mock fallback, so the backend must already
-# be answering /api/v1/health before the frontend starts or the dashboard's first
-# load shows "NO BACKEND" toasts.
+# Launches the Phoskonomia app: the Dioxus fullstack crate in frontend/dioxus-app
+# via `dx serve`. The UI and its `#[server]` fns are served by the same process,
+# so there is no separate backend to start.
+#
+# Usage:
+#   ./run.sh                      # web (default platform)
+#   ./run.sh --platform desktop   # native desktop window
+#   ./run.sh --port 8080          # any extra args are passed to `dx serve`
+#
+# The adapter stack is chosen by env (see frontend/dioxus-app/README.md), e.g.
+#   PHOSK_DB=surreal ./run.sh
+# With nothing set: seeded in-memory DB + fake OCR, no external services.
 set -euo pipefail
-set -m # each background job gets its own process group, so `kill -TERM -$pid` below reaps cargo's child binary too, not just the cargo wrapper
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HEALTH_URL="http://127.0.0.1:3819/api/v1/health"
+APP_DIR="$ROOT/frontend/dioxus-app"
+DX_VERSION="0.7.6" # must match the pinned `dioxus = "=0.7.6"` in the app's Cargo.toml
 
-cleanup() {
-  echo
-  echo "stopping..."
-  [[ -n "${FRONTEND_PID:-}" ]] && kill -TERM "-${FRONTEND_PID}" 2>/dev/null || true
-  [[ -n "${BACKEND_PID:-}" ]] && kill -TERM "-${BACKEND_PID}" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
-echo "starting backend (phosk_api on :3819)..."
-(cd "$ROOT/backend" && cargo run -p phosk_api) &
-BACKEND_PID=$!
-
-echo -n "waiting for backend health check"
-for _ in $(seq 1 60); do
-  if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-    echo " — up"
-    break
-  fi
-  echo -n "."
-  sleep 1
-done
-if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-  echo
-  echo "backend never came up on $HEALTH_URL — aborting" >&2
+if ! command -v dx >/dev/null 2>&1; then
+  echo "dx (Dioxus CLI) not found. Install it with:" >&2
+  echo "  cargo install dioxus-cli --version $DX_VERSION --locked" >&2
   exit 1
 fi
 
-echo "starting frontend (Vite dev server on :3717)..."
-(cd "$ROOT/frontend/app" && npm run dev) &
-FRONTEND_PID=$!
+if ! dx --version 2>/dev/null | grep -q "$DX_VERSION"; then
+  echo "warning: dx $DX_VERSION expected, found: $(dx --version 2>/dev/null || echo unknown)" >&2
+  echo "         dx and the dioxus crate must match or the build aborts." >&2
+fi
 
-wait
+cd "$APP_DIR"
+exec dx serve "$@"

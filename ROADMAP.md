@@ -16,7 +16,7 @@ Every task implies: TDD, all gates green, `CONTRIBUTION.md` respected, docs touc
   - Formatting was done before the first commit; if `cargo fmt --all --check` is still dirty, format only the files you touch and say so.
   - Fix the 7 existing clippy warnings (`phosk_debts`, `phosk_ledger`, `phosk_recurring`, `phosk_llm_ollama`, `phosk_db_surreal` tests). No `#[allow]`.
   - Done when fmt/clippy(`-D warnings`)/test are all clean.
-- [ ] **T02** — Make the docs tell the truth (needs: T01)
+- [x] **T02** — Make the docs tell the truth (needs: T01)
   - Replace the `dx new` boilerplate in `frontend/dioxus-app/README.md` with real run/check instructions.
   - Fix `phosk_daemon` comments claiming `phosk_pipeline_receipt` "doesn't exist yet".
   - Rewrite `run.sh` to launch the Dioxus app (`dx serve`) instead of `phosk_api` + React.
