@@ -80,6 +80,43 @@ pub async fn insert_receipt_same_slug_replaces_in_place(db: &dyn DatabaseAdapter
     ensure(orphans.is_empty(), "no lines under the discarded id")
 }
 
+/// A stored receipt is projected into the dashboard `Transaction` view, so a
+/// written spend is visible to the cycle aggregates (`transactions_between`).
+pub async fn insert_receipt_projects_a_dashboard_transaction(db: &dyn DatabaseAdapter) -> Outcome {
+    let day = date(2027, 1, 10)?;
+    let id = ReceiptId::new();
+    let r = receipt(id, "conf-projected", day, 1_234);
+    db.insert_receipt(r.clone(), vec![line(id, "Apples", 1_234)])
+        .await?;
+
+    let projected = db.transactions_between(day, day).await?;
+    ensure_eq(&projected.len(), &1, "one projected transaction")?;
+    let got = projected.into_iter().next().ok_or("no projected row")?;
+    ensure_eq(&got.date, &r.date, "projected date")?;
+    ensure_eq(&got.shop, &r.shop, "projected shop")?;
+    ensure_eq(&got.category, &r.category, "projected category")?;
+    ensure_eq(&got.amount, &r.amount, "projected amount")
+}
+
+/// Re-importing a known slug replaces its projected transaction in place rather
+/// than double-counting the spend.
+pub async fn insert_receipt_same_slug_replaces_the_projection(db: &dyn DatabaseAdapter) -> Outcome {
+    let day = date(2027, 1, 10)?;
+    let first = ReceiptId::new();
+    db.insert_receipt(receipt(first, "conf-proj-dup", day, 1_000), Vec::new())
+        .await?;
+    let again = Receipt {
+        amount: Money::from_centimes(2_500),
+        ..receipt(ReceiptId::new(), "conf-proj-dup", day, 2_500)
+    };
+    db.insert_receipt(again, Vec::new()).await?;
+
+    let projected = db.transactions_between(day, day).await?;
+    ensure_eq(&projected.len(), &1, "no duplicate projected transaction")?;
+    let got = projected.into_iter().next().ok_or("no projected row")?;
+    ensure_eq(&got.amount.centimes(), &2_500, "projection follows the replacement")
+}
+
 /// `receipts_between` keeps exactly the receipts dated inside `[from, to]`,
 /// and rejects `from > to` as invalid input.
 pub async fn receipts_between_filters_inclusively(db: &dyn DatabaseAdapter) -> Outcome {

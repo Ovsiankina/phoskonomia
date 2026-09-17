@@ -17,8 +17,9 @@
 //!
 //! The factory must yield a store holding the shared deterministic Swiss seed
 //! (the one `MemoryDb::seeded` and `SurrealDb::seeded` load). The port has no
-//! write path for transactions, categories, the budget config, signals, caps,
-//! history, alerts, feed items or chats, so those checks read seeded values.
+//! write path for categories, the budget config, signals, caps, history,
+//! alerts, feed items or chats, so those checks read seeded values. Dashboard
+//! transactions are written only as the projection `insert_receipt` maintains.
 //! Write checks create their own records with fresh ids and `conf-*` slugs.
 //!
 //! ## Deliberately not asserted
@@ -63,6 +64,8 @@ macro_rules! database_adapter_conformance {
             ledger::insert_receipt_appends_and_reads_back,
             ledger::insert_receipt_binds_lines_to_the_receipt,
             ledger::insert_receipt_same_slug_replaces_in_place,
+            ledger::insert_receipt_projects_a_dashboard_transaction,
+            ledger::insert_receipt_same_slug_replaces_the_projection,
             ledger::receipts_between_filters_inclusively,
             ledger::receipt_lookups_report_not_found,
             ledger::update_line_item_replaces_the_stored_line,
