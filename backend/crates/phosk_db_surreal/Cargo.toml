@@ -35,6 +35,9 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", 
 # Re-list the PORT crate with the `contract` feature so this adapter runs the
 # SAME shared conformance suite as `phosk_db_memory` (ADR: lockstep).
 phosk_adapter_db = { path = "../phosk_adapter_db", features = ["contract"] }
+# The per-check conformance suite (`tests/conformance.rs`): one test per port
+# behaviour, shared with the other adapter.
+phosk_db_conformance = { path = "../phosk_db_conformance" }
 
 [lints]
 workspace = true

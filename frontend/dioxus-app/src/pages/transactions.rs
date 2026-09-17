@@ -933,6 +933,7 @@ pub fn TransactionsPage() -> Element {
                                         " · {period_label}"
                                     }
                                 }
+                                crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Transactions }
                             }
 
                             FilterBar {

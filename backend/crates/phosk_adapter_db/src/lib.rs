@@ -13,9 +13,11 @@
 //! That is why it uses [`mod@async_trait`]: it desugars `async fn` in the trait
 //! to a boxed future, which keeps the trait `dyn`-compatible.
 //!
-//! Methods are **read-only** here — this is the slice the dashboard needs. Each
+//! The trait covers the reads every page needs plus the write paths that exist
+//! so far (receipt insert, line edits, caps, statuses, upserts, …). Each method
 //! returns `Result<_, PhoskError>` (the one taxonomy, ADR-010); an adapter maps
-//! its own failures into a `PhoskError` and never panics. Amounts stay as exact
+//! its own failures into a `PhoskError` and never panics. Every implementation
+//! must pass the shared per-method suite in `phosk_db_conformance`. Amounts stay as exact
 //! [`Money`](phosk_core::money::Money) inside [`Transaction`]/[`Category`]/
 //! [`BudgetConfig`]; CHF-number conversion is the HTTP edge's job, not the
 //! port's.

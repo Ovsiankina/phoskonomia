@@ -21,12 +21,12 @@ Every task implies: TDD, all gates green, `CONTRIBUTION.md` respected, docs touc
   - Fix `phosk_daemon` comments claiming `phosk_pipeline_receipt` "doesn't exist yet".
   - Rewrite `run.sh` to launch the Dioxus app (`dx serve`) instead of `phosk_api` + React.
   - Add a "superseded by ROADMAP.md" banner to `backend/documentation/backend-features-todo.md`.
-- [ ] **T03** — Remove the dead REST surface (needs: T01)
+- [x] **T03** — Remove the dead REST surface (needs: T01)
   - Delete `backend/bin/phosk_api` (all-`501` stubs) and its `API.md`; drop now-unused workspace deps; update docs that mention it. Leave `frontend/app/` alone — T05 deletes it.
-- [ ] **T05** — Delete the obsolete React frontend `frontend/app/` (needs: T02)
+- [x] **T05** — Delete the obsolete React frontend `frontend/app/` (needs: T02)
   - `git rm -r frontend/app`; remove every remaining reference (root `Cargo.toml` comments, docs). Do NOT touch `.gitignore` — it is a protected path; list its now-dead entries under *Noticed, not fixed*. It stays recoverable from git history — say how in the PR body.
   - This PR is almost pure deletion and will exceed the usual size guidance; that is expected. No Rust code may change.
-- [ ] **T04** — Shared `DatabaseAdapter` conformance suite (needs: T01)
+- [x] **T04** — Shared `DatabaseAdapter` conformance suite (needs: T01)
   - One generic test suite exercising every port method, instantiated for `phosk_db_memory` **and** `phosk_db_surreal` (`kv-mem`). Surreal currently has 6 tests vs memory's 18 — close the gap. Must include a test that category/record ids round-trip as typed ids (the old `Thing` deserialisation 500).
 
 ### Phase 1 — backend write side
@@ -54,12 +54,12 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 `components/states.rs`. Oscillocore rules apply (tokens only, numbers in Pilowlava). Must pass both
 `cargo check` targets.
 
-- [ ] **T30** — Budgets: edit a category cap (`set_cap`) inline (needs: T01)
+- [x] **T30** — Budgets: edit a category cap (`set_cap`) inline (needs: T01)
 - [ ] **T31** — Transactions: review/correct a line item (`correct_line`), low-confidence lines highlighted (needs: T01)
-- [ ] **T32** — Subscriptions: confirm / dismiss AI-detected recurring candidates (needs: T01)
+- [x] **T32** — Subscriptions: confirm / dismiss AI-detected recurring candidates (needs: T01)
 - [ ] **T33** — AI chat: send, persisted history, `/clear` command; panel wide + sticky per the old ROADMAP (needs: T01)
 - [ ] **T34** — Config page on real `phosk_settings`: get / set / reset preferences (needs: T01)
-- [ ] **T35** — CSV export buttons for transactions / budget / subscriptions (file download on web + desktop) (needs: T01)
+- [x] **T35** — CSV export buttons for transactions / budget / subscriptions (file download on web + desktop) (needs: T01)
 - [ ] **T36** — "NEW transaction" form (needs: T10)
 - [ ] **T37** — Edit / delete transaction from the detail view, with confirm step (needs: T11, T36)
 - [ ] **T38** — Subscriptions create / edit / lifecycle actions (needs: T15)
@@ -67,7 +67,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 - [ ] **T40** — `/categories` route: list, create, rename, merge; token-seeded colour picker (no raw hex input) (needs: T13)
 - [ ] **T41** — `/receipt` route: photo upload → `intake_receipt` → per-line review screen (needs: T20)
 - [ ] **T42** — Approval queue UI: pending AI proposals, approve / reject / bulk-approve (needs: T20)
-- [ ] **T43** — Frontend tests: unit tests for `chf()`, data-layer view-struct mapping, and every `#[server]` fn against the memory stack (needs: T01)
+- [x] **T43** — Frontend tests: unit tests for `chf()`, data-layer view-struct mapping, and every `#[server]` fn against the memory stack (needs: T01)
 
 ### Human tasks (agents skip these)
 

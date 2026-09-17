@@ -23,8 +23,13 @@
 //!     refetches when they change). On-demand detail → `use_resource` over `sel`.
 //!   * the hand-written `BillingSweep` / `SubHistBars` / `CycleMeter` SVG/markup
 //!     are PAGE-SPECIFIC (not F2 primitives), so they are ported verbatim as RSX.
-//!   * mutations (DETECT / MARK PAID / PAUSE / CANCEL / CONFIRM / DISMISS /
-//!     SNOOZE) have no F3 server fn yet, so the buttons render faithfully but are
+//!   * CONFIRM / DISMISS of an AI-detected recurring candidate are wired to the
+//!     `confirm_recurring_candidate` / `dismiss_recurring_candidate` server fns
+//!     (the AI CANDIDATES section + the inspector). The open-candidate list
+//!     (`list_recurring_candidates`) is the authority for which records show
+//!     them; only a click confirms.
+//!   * the other mutations (DETECT / MARK PAID / PAUSE / CANCEL / RESUME /
+//!     SNOOZE) have no server fn yet, so those buttons render faithfully but are
 //!     inert (mirroring how the dashboard's `AlertItem` actions are empty).
 
 use dioxus::prelude::*;
@@ -35,8 +40,9 @@ use crate::components::shell::{AiPanel, ChatMsg, FeedItem, TopBar};
 use crate::components::states::Awaiting;
 use crate::data::ai::get_ai_panel;
 use crate::data::subscriptions::{
-    get_billing_sweep, get_subscription, get_subscription_stats, list_subscriptions,
-    BillingSweepDto, ImpulseDto, SubFilter, SubscriptionDetailDto, SubscriptionDto,
+    confirm_recurring_candidate, dismiss_recurring_candidate, get_billing_sweep, get_subscription,
+    get_subscription_stats, list_recurring_candidates, list_subscriptions, BillingSweepDto,
+    ImpulseDto, RecurringCandidateDto, SubFilter, SubscriptionDetailDto, SubscriptionDto,
 };
 use crate::data::{chf, chf2, cycle::get_cycle, cycle::CycleDto};
 
@@ -722,15 +728,22 @@ fn SubRow(
 //  INSPECTOR (right dock) — React `SubInspector`.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// Faithful port of React `SubInspector`. Lifecycle actions (MARK PAID / PAUSE /
-/// CANCEL / RESUME / CONFIRM / DISMISS / SNOOZE) have no F3 server fn yet, so the
-/// buttons render exactly but are inert (mirroring the dashboard's empty actions).
+/// Faithful port of React `SubInspector`. CONFIRM / DISMISS show only for an
+/// OPEN candidate (`candidate_open`, from the candidate list) and route to
+/// `on_candidate`. The other lifecycle actions (MARK PAID / PAUSE / CANCEL /
+/// RESUME / SNOOZE) have no server fn yet, so those buttons render exactly but
+/// are inert (mirroring the dashboard's empty actions).
 #[component]
 fn SubInspector(
     detail: Option<SubscriptionDetailDto>,
     loading: bool,
     sel: Option<String>,
     on_close: EventHandler<()>,
+    candidate_open: bool,
+    candidate_busy: bool,
+    candidate_pending: Option<CandidateAction>,
+    candidate_error: Option<String>,
+    on_candidate: EventHandler<(String, CandidateAction)>,
     #[props(default)] variant: Option<String>,
 ) -> Element {
     let panel_cls = match &variant {
@@ -791,7 +804,12 @@ fn SubInspector(
         String::new()
     };
     let axis_label = if yearly { "3 YEARS" } else { "6 CHARGES" };
-    let candidate = d.candidate;
+    // CONFIRM/DISMISS only while the record is still an OPEN proposal (a
+    // dismissed one is LLM-sourced too, but can no longer be confirmed).
+    let candidate = d.candidate && candidate_open;
+    let (confirm_lbl, dismiss_lbl) = candidate_button_labels(candidate_pending);
+    let cand_confirm_id = s.id.clone();
+    let cand_dismiss_id = s.id.clone();
 
     // Pre-computed display strings.
     let kls = format!("⊟ SUBSCRIPTION · {}", s.category);
@@ -914,8 +932,18 @@ fn SubInspector(
 
             div { class: "insp-acts",
                 if candidate {
-                    button { class: "gbtn p", "CONFIRM" }
-                    button { class: "gbtn", "DISMISS" }
+                    button {
+                        class: "gbtn p",
+                        disabled: candidate_busy,
+                        onclick: move |_| on_candidate.call((cand_confirm_id.clone(), CandidateAction::Confirm)),
+                        "{confirm_lbl}"
+                    }
+                    button {
+                        class: "gbtn",
+                        disabled: candidate_busy,
+                        onclick: move |_| on_candidate.call((cand_dismiss_id.clone(), CandidateAction::Dismiss)),
+                        "{dismiss_lbl}"
+                    }
                 } else {
                     button { class: "gbtn p", "{primary_label}" }
                     if paused {
@@ -923,6 +951,14 @@ fn SubInspector(
                     } else {
                         button { class: "gbtn coral", "CANCEL" }
                     }
+                }
+            }
+
+            if let Some(msg) = candidate_error {
+                Awaiting {
+                    label: "CANDIDATE REVIEW".to_string(),
+                    message: Some(msg),
+                    style: "margin:var(--s-3) var(--s-4)".to_string(),
                 }
             }
 
@@ -941,6 +977,183 @@ fn SubInspector(
                     }
                 }
             }
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  AI RECURRING CANDIDATES — human review (confirm / dismiss).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The human decision a candidate button carries. CONFIRM is the approval
+/// that turns an AI proposal into a tracked subscription; nothing else does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateAction {
+    Confirm,
+    Dismiss,
+}
+
+/// `(confirm, dismiss)` button labels, showing which decision is in flight.
+fn candidate_button_labels(pending: Option<CandidateAction>) -> (&'static str, &'static str) {
+    match pending {
+        Some(CandidateAction::Confirm) => ("CONFIRMING…", "DISMISS"),
+        Some(CandidateAction::Dismiss) => ("CONFIRM", "DISMISSING…"),
+        None => ("CONFIRM", "DISMISS"),
+    }
+}
+
+/// The user-facing text of a failed candidate call. The server already sends a
+/// fixed, sanitized message; a transport failure gets a generic line.
+fn candidate_error_text(e: &ServerFnError) -> String {
+    match e {
+        ServerFnError::ServerError { message, .. } => message.clone(),
+        _ => "Could not reach the server. Refresh to see the current state.".to_string(),
+    }
+}
+
+/// One open candidate: evidence, amount, confidence and the two decisions.
+#[component]
+fn CandidateRow(
+    c: RecurringCandidateDto,
+    busy: bool,
+    pending: Option<CandidateAction>,
+    on_action: EventHandler<(String, CandidateAction)>,
+    on_select: EventHandler<String>,
+) -> Element {
+    let amount = chf_smart(c.amount, 2);
+    let unit = cad_unit(&c.cadence);
+    let yearly = c.cadence == "yearly";
+    let conf_pct = format!("{:.0}", c.confidence * 100.0);
+    let (conf_cls, conf_tag) = if c.low_confidence {
+        ("cand-conf low", "LOW CONF · REVIEW")
+    } else {
+        ("cand-conf", "CONF")
+    };
+    let (confirm_lbl, dismiss_lbl) = candidate_button_labels(pending);
+    let id_select = c.id.clone();
+    let id_confirm = c.id.clone();
+    let id_dismiss = c.id.clone();
+
+    rsx! {
+        div { class: "cand-row",
+            div {
+                class: "cand-id",
+                role: "button",
+                tabindex: 0,
+                title: "{c.rationale}",
+                onclick: move |_| on_select.call(id_select.clone()),
+                span { class: "cand-nm", "{c.name}" }
+                span { class: "cand-ev",
+                    b { "{c.occurrences}" }
+                    " matching charges · "
+                    if yearly {
+                        "yearly"
+                    } else {
+                        "monthly · day "
+                        b { "{c.day}" }
+                    }
+                }
+            }
+            span { class: "cand-amt",
+                "CHF "
+                b { "{amount}" }
+                " {unit}"
+            }
+            span { class: "{conf_cls}",
+                "{conf_tag} "
+                b { "{conf_pct}%" }
+            }
+            div { class: "cand-acts",
+                button {
+                    class: "gbtn p",
+                    disabled: busy,
+                    onclick: move |_| on_action.call((id_confirm.clone(), CandidateAction::Confirm)),
+                    "{confirm_lbl}"
+                }
+                button {
+                    class: "gbtn",
+                    disabled: busy,
+                    onclick: move |_| on_action.call((id_dismiss.clone(), CandidateAction::Dismiss)),
+                    "{dismiss_lbl}"
+                }
+            }
+        }
+    }
+}
+
+/// The AI CANDIDATES section: header, action error, then the loading / error /
+/// empty state or the open candidates. `busy` disables every decision while
+/// one is in flight or the list is refreshing (double clicks are no-ops).
+#[component]
+fn CandidateSection(
+    candidates: Option<Vec<RecurringCandidateDto>>,
+    loading: bool,
+    load_error: Option<String>,
+    busy: bool,
+    pending: Option<(String, CandidateAction)>,
+    action_error: Option<String>,
+    on_action: EventHandler<(String, CandidateAction)>,
+    on_select: EventHandler<String>,
+) -> Element {
+    let count = candidates
+        .as_ref()
+        .map_or_else(|| "—".to_string(), |l| l.len().to_string());
+    let state_style = "margin-bottom:var(--s-5)".to_string();
+
+    rsx! {
+        div { class: "subs-sec",
+            span { class: "lbl", "⌁ AI CANDIDATES" }
+            span { class: "ct ind", "{count}" }
+            span { class: "rule" }
+            span { class: "meta", "PROPOSED BY THE MODEL · TRACKED ONLY ONCE YOU CONFIRM" }
+        }
+        if let Some(msg) = action_error {
+            Awaiting {
+                label: "CANDIDATE REVIEW".to_string(),
+                message: Some(msg),
+                style: "margin-bottom:var(--s-4)".to_string(),
+            }
+        }
+        match candidates {
+            None => rsx! {
+                Awaiting {
+                    label: "AI CANDIDATES".to_string(),
+                    loading,
+                    message: load_error,
+                    style: state_style,
+                }
+            },
+            Some(list) if list.is_empty() => rsx! {
+                Awaiting {
+                    label: "AI CANDIDATES".to_string(),
+                    message: Some("No open candidates. Nothing is waiting for your approval.".to_string()),
+                    style: state_style,
+                }
+            },
+            Some(list) => rsx! {
+                div { class: "cand-list osc-glass hair osc-bkt blue",
+                    span { class: "osc-leg", "MOD·SUB · CANDIDATES" }
+                    for c in list {
+                        {
+                            let row_pending = pending
+                                .as_ref()
+                                .filter(|(id, _)| *id == c.id)
+                                .map(|(_, action)| *action);
+                            let key = c.id.clone();
+                            rsx! {
+                                CandidateRow {
+                                    key: "{key}",
+                                    c,
+                                    busy,
+                                    pending: row_pending,
+                                    on_action,
+                                    on_select,
+                                }
+                            }
+                        }
+                    }
+                }
+            },
         }
     }
 }
@@ -1012,6 +1225,75 @@ pub fn SubscriptionsPage() -> Element {
         _ => None,
     };
     let detail_loading = matches!(&*detail.read(), None | Some(None));
+
+    // ---- AI recurring candidates: open list + human decisions ----
+    let candidates = use_resource(list_recurring_candidates);
+    let mut cand_pending = use_signal(|| Option::<(String, CandidateAction)>::None);
+    // `(candidate id, message)` of the last failed decision.
+    let mut cand_error = use_signal(|| Option::<(String, String)>::None);
+    let on_candidate = use_callback(move |(id, action): (String, CandidateAction)| {
+        // One decision at a time and never against a stale list: a second
+        // click while a call is in flight or the list refreshes is a no-op.
+        if cand_pending.peek().is_some() || candidates.pending() {
+            return;
+        }
+        cand_pending.set(Some((id.clone(), action)));
+        cand_error.set(None);
+        let mut candidates = candidates;
+        let mut list = list;
+        let mut stats = stats;
+        let mut sweep = sweep;
+        let mut detail = detail;
+        spawn(async move {
+            let result = match action {
+                CandidateAction::Confirm => confirm_recurring_candidate(id.clone()).await,
+                CandidateAction::Dismiss => dismiss_recurring_candidate(id.clone()).await,
+            };
+            if let Err(e) = result {
+                cand_error.set(Some((id, candidate_error_text(&e))));
+            }
+            // Whatever the outcome, re-read the candidates AND the standing
+            // charges (plus the roll-ups and inspector derived from them).
+            // `restart` flips the candidate list to pending synchronously, so
+            // the buttons stay disabled until the fresh list lands.
+            candidates.restart();
+            list.restart();
+            stats.restart();
+            sweep.restart();
+            detail.restart();
+            cand_pending.set(None);
+        });
+    });
+
+    let cand_refreshing = *candidates.state().read() == UseResourceState::Pending;
+    let cand_list: Option<Vec<RecurringCandidateDto>> = candidates
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .cloned();
+    let cand_load_error: Option<String> = candidates
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().err())
+        .map(candidate_error_text);
+    let cand_loading = candidates.read().is_none();
+    let cand_pending_v = cand_pending();
+    let cand_busy = cand_pending_v.is_some() || cand_refreshing;
+    let cand_error_v = cand_error();
+    let sel_candidate_open = sel().is_some_and(|id| {
+        cand_list
+            .as_ref()
+            .is_some_and(|l| l.iter().any(|c| c.id == id))
+    });
+    let sel_candidate_pending = cand_pending_v
+        .as_ref()
+        .filter(|(id, _)| sel().as_deref() == Some(id.as_str()))
+        .map(|(_, action)| *action);
+    let sel_candidate_error = cand_error_v
+        .as_ref()
+        .filter(|(id, _)| sel().as_deref() == Some(id.as_str()))
+        .map(|(_, msg)| msg.clone());
+    let section_error = cand_error_v.map(|(_, msg)| msg);
 
     let sel_id = sel();
     let amount_mode = sub_amounts();
@@ -1162,6 +1444,7 @@ pub fn SubscriptionsPage() -> Element {
                                     }
                                 }
                                 div { class: "subs-controls",
+                                    crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Subscriptions }
                                     div { class: "modes",
                                         span { class: "mlbl", "SORT" }
                                         button { class: "{sort_due_cls}", onclick: move |_| sub_sort.set("due".to_string()), "DUE" }
@@ -1236,6 +1519,18 @@ pub fn SubscriptionsPage() -> Element {
                                     sel.set(if cur.as_deref() == Some(id.as_str()) { None } else { Some(id) });
                                 },
                                 cycle_label: cycle_label.clone(),
+                            }
+
+                            // ===================== AI CANDIDATES =====================
+                            CandidateSection {
+                                candidates: cand_list,
+                                loading: cand_loading,
+                                load_error: cand_load_error,
+                                busy: cand_busy,
+                                pending: cand_pending_v,
+                                action_error: section_error,
+                                on_action: on_candidate,
+                                on_select: move |id: String| sel.set(Some(id)),
                             }
 
                             // ===================== STANDING CHARGES =====================
@@ -1315,6 +1610,11 @@ pub fn SubscriptionsPage() -> Element {
                     loading: detail_loading,
                     sel: sel_id.clone(),
                     on_close: move |()| sel.set(None),
+                    candidate_open: sel_candidate_open,
+                    candidate_busy: cand_busy,
+                    candidate_pending: sel_candidate_pending,
+                    candidate_error: sel_candidate_error,
+                    on_candidate,
                 }
             }
         }

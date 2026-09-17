@@ -149,3 +149,24 @@ body.hl-auto [data-src="llm"] .sub:hover { box-shadow: inset 2.5px 0 0 var(--ind
 .sub-insp .sig-empty .mk { color: var(--indigo-neon); }
 .insp-acts { display: flex; gap: 8px; padding: 13px 16px; border-top: 1px solid var(--hairline); }
 .insp-acts .gbtn { flex: 1; }
+
+/* ---- AI recurring candidates (confirm / dismiss) — tokens only ---- */
+.subs-sec .ct.ind { color: var(--text-blue); }
+.cand-list { --legend-bg: var(--bg); display: flex; flex-direction: column; margin-bottom: var(--s-5);
+  padding: var(--s-4) var(--s-4) var(--s-1); }
+.cand-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-3) var(--s-4);
+  padding: var(--s-3) 0; border-bottom: var(--bw-hair) solid var(--hairline); }
+.cand-row:last-child { border-bottom: 0; }
+.cand-id { display: flex; flex-direction: column; gap: var(--s-1); flex: 1 1 auto; min-width: 0; cursor: pointer; }
+.cand-nm { font-family: var(--font-display); font-size: var(--t-tag); letter-spacing: var(--tracking-body);
+  text-transform: uppercase; color: var(--ink); }
+.cand-ev { font-family: var(--font-body); font-size: var(--t-xs); color: var(--ink-3); }
+.cand-ev b, .cand-amt b, .cand-conf b { font-family: var(--font-display); font-weight: 400; }
+.cand-ev b { color: var(--ink-2); }
+.cand-amt { font-family: var(--font-body); font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+.cand-amt b { font-size: var(--t-h3); color: var(--ink); }
+.cand-conf { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag);
+  text-transform: uppercase; color: var(--text-blue); white-space: nowrap; }
+.cand-conf.low { color: var(--warn); }
+.cand-acts { display: flex; gap: var(--s-2); }
+.cand-acts .gbtn:disabled, .insp-acts .gbtn:disabled { opacity: .45; cursor: progress; }
