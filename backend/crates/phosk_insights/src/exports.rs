@@ -1,13 +1,14 @@
 //! CSV exports read-model (feature F3, exports slice).
 //!
-//! Backs `/exports/*.csv`: schema-versioned, timestamped CSV dumps of the
-//! transactions / budget / subscriptions lists, mirroring the same list filters
-//! the pages use. There is NO dioxus DTO file for exports yet (the
-//! build-contract derives the shape from
-//! `backend/documentation/backend-features-todo.md §5 Exports`), so the DTOs
-//! below are the wire truth for this slice: a [`CsvExportDto`] carrying the
-//! rendered CSV body plus its `filename`, `version`, `generatedAt` timestamp and
-//! `rowCount`.
+//! Backs the CSV export buttons (the dioxus-app `data::csv_export` server fn):
+//! schema-versioned, timestamped CSV dumps of the transactions / budget /
+//! subscriptions lists for the current cycle. The DTOs below are the service
+//! truth for this slice: a [`CsvExportDto`] carrying the rendered CSV body plus
+//! its `filename`, `version`, `generatedAt` timestamp and `rowCount` (the
+//! dioxus-app maps it onto its own wire struct).
+//!
+//! Text cells are neutralised against spreadsheet formula injection (see
+//! `csv_field`); money cells are exact CHF strings.
 //!
 //! Every service fn takes `&dyn DatabaseAdapter` (the PORT) + an `as_of`
 //! `NaiveDate` (to resolve the cycle the filters bound), returns
@@ -62,8 +63,9 @@ pub enum ExportKind {
 
 /// Export the transactions list for the cycle containing `as_of` as CSV.
 ///
-/// Mirrors the transactions-list filters; one data row per receipt, money columns
-/// rendered as exact CHF strings; header + version + timestamp stamped.
+/// Covers the whole month cycle (the page's shop / category / search filters are
+/// not applied); one data row per receipt, money columns rendered as exact CHF
+/// strings; header + version + timestamp stamped.
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from cycle resolution or adapter reads.
@@ -210,12 +212,62 @@ fn chf_plain(m: Money) -> String {
         .map_or_else(|| m.to_string(), str::to_owned)
 }
 
-/// Quote a CSV field if it contains a comma, quote, or newline (RFC-4180),
-/// doubling any embedded quotes. Plain fields pass through unchanged.
+/// Leading characters that make a spreadsheet (Excel, Calc, Sheets) evaluate a
+/// cell as a formula or DDE command (the OWASP "CSV injection" list).
+const FORMULA_TRIGGERS: [char; 6] = ['=', '+', '-', '@', '\t', '\r'];
+
+/// Render one TEXT cell: neutralise spreadsheet formula injection, then quote it
+/// if it contains a comma, quote, or newline (RFC-4180), doubling any embedded
+/// quotes. Plain fields pass through unchanged.
+///
+/// Text cells carry user- and OCR-supplied strings (shop names, categories,
+/// subscription names), which are hostile input for the spreadsheet that opens
+/// the export. A cell starting with one of [`FORMULA_TRIGGERS`] gets a leading
+/// `'`, so the spreadsheet shows it as text instead of running it. Money cells
+/// never go through here (a negative amount must stay a number).
 fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let neutralised = if s.starts_with(FORMULA_TRIGGERS) {
+        format!("'{s}")
     } else {
         s.to_owned()
+    };
+    if neutralised.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", neutralised.replace('"', "\"\""))
+    } else {
+        neutralised
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::csv_field;
+
+    #[test]
+    fn every_formula_trigger_is_prefixed() {
+        assert_eq!(csv_field("=1+1"), "'=1+1");
+        assert_eq!(csv_field("+41 79"), "'+41 79");
+        assert_eq!(csv_field("-5"), "'-5");
+        assert_eq!(csv_field("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(csv_field("\t=1"), "'\t=1");
+        // CR also forces RFC-4180 quoting; the prefix lands inside the quotes.
+        assert_eq!(csv_field("\r=1"), "\"'\r=1\"");
+    }
+
+    #[test]
+    fn neutralised_cells_are_still_rfc4180_quoted() {
+        assert_eq!(
+            csv_field("=HYPERLINK(\"x\",\"y\")"),
+            "\"'=HYPERLINK(\"\"x\"\",\"\"y\"\")\""
+        );
+    }
+
+    #[test]
+    fn plain_and_interior_characters_pass_through() {
+        assert_eq!(csv_field("Migros"), "Migros");
+        assert_eq!(csv_field("iCloud+ 2TB"), "iCloud+ 2TB");
+        assert_eq!(csv_field("Coop-Pronto"), "Coop-Pronto");
+        assert_eq!(csv_field("a@b"), "a@b");
+        assert_eq!(csv_field(""), "");
+        assert_eq!(csv_field("Coffee, snacks"), "\"Coffee, snacks\"");
     }
 }

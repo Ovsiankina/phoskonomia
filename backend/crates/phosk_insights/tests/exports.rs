@@ -488,6 +488,64 @@ fn split_rfc4180(row: &str) -> Vec<String> {
     fields
 }
 
+// ── spreadsheet formula injection ───────────────────────────────────────────────
+
+/// Text cells are user- or OCR-supplied (a shop name read off a photo, a
+/// subscription typed by hand), so they are hostile input for whatever
+/// spreadsheet opens the file. A text cell that starts with `=`, `+`, `-`, `@`
+/// or a tab would be evaluated as a formula (CSV/formula injection), so the
+/// export prefixes it with a `'` and the spreadsheet keeps it as plain text.
+/// The same characters later in a cell are left alone, and so are the seeded
+/// names.
+#[tokio::test]
+async fn text_cells_that_look_like_formulas_are_neutralised() {
+    let db = seeded();
+    let mut sub = db
+        .subscription_by_slug("netflix")
+        .await
+        .expect("seeded netflix subscription");
+    sub.name = "=HYPERLINK(\"https://example.invalid\",\"x\")".to_owned();
+    sub.cadence = "+1".to_owned();
+    sub.month = "-2+3".to_owned();
+    sub.status = "@SUM(A1)".to_owned();
+    sub.category = "\tcmd".to_owned();
+    db.upsert_subscription(sub)
+        .await
+        .expect("upsert hostile subscription");
+
+    let dto = export_subscriptions_csv(&db, today())
+        .await
+        .expect("subscriptions export ok");
+    let rows = data_rows(&dto.csv);
+    let hostile = rows
+        .iter()
+        .find(|r| r.contains("HYPERLINK"))
+        .expect("hostile row present");
+    let fields = split_rfc4180(hostile);
+    // name,amount,cadence,day,month,status,category
+    assert_eq!(fields.len(), 7, "still seven fields: {hostile:?}");
+    assert_eq!(
+        fields[0], "'=HYPERLINK(\"https://example.invalid\",\"x\")",
+        "leading = neutralised"
+    );
+    assert_eq!(fields[1], "19.90", "money cell untouched");
+    assert_eq!(fields[2], "'+1", "leading + neutralised");
+    assert_eq!(fields[4], "'-2+3", "leading - neutralised");
+    assert_eq!(fields[5], "'@SUM(A1)", "leading @ neutralised");
+    assert_eq!(fields[6], "'\tcmd", "leading tab neutralised");
+
+    // Interior `+` is not a formula trigger: the seeded name passes through.
+    let icloud = rows
+        .iter()
+        .find(|r| r.contains("iCloud"))
+        .expect("iCloud row present");
+    assert_eq!(
+        split_rfc4180(icloud)[0],
+        "iCloud+ 2TB",
+        "interior + untouched"
+    );
+}
+
 // ── ExportKind ──────────────────────────────────────────────────────────────────
 
 /// `ExportKind` is a 3-variant enum, one per filterable list — a compile + value
