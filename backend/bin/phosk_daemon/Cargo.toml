@@ -9,8 +9,9 @@ edition.workspace = true
 # `phosk_queue` OUTBOUND, drains opaque blobs one at a time, and hands each to
 # the receipt-import pipeline. The pipeline itself runs in a network-less
 # sandbox and is reached here only through a port seam ([`ReceiptIngest`]); the
-# real OCR/LLM adapters are composed elsewhere. Until that pipeline crate exists
-# this bin ships the seam + a deterministic fake so the poll/drain loop is real,
+# real OCR/LLM adapters are composed elsewhere. The pipeline crate
+# (`phosk_pipeline_receipt`) exists but is not yet adapted to the seam, so this
+# bin ships the seam + a deterministic fake so the poll/drain loop is real,
 # tested, and ready to wire.
 #
 # Composition root: it imports NO feature crate, only phosk_core (the one error

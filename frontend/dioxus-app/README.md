@@ -1,50 +1,73 @@
-# Development
+# dioxus-app — the Phoskonomia UI
 
-Your new bare-bones project includes minimal organization with a single `main.rs` file and a few assets.
+Dioxus 0.7.6 fullstack app: one Rust codebase for web (default), desktop and
+mobile. The UI talks to the backend feature crates through `#[server]` functions
+with shared Rust types (no REST, no JavaScript). `Money` crosses the wire as
+exact `i64` centimes.
 
 ```
-project/
-├─ assets/ # Any assets that are used by the app should be placed here
+dioxus-app/
+├─ assets/       # stylesheets, fonts, images (loaded via asset!())
 ├─ src/
-│  ├─ main.rs # main.rs is the entry point to your application and currently contains all components for the app
-├─ Cargo.toml # The Cargo.toml file defines the dependencies and feature flags for your project
+│  ├─ main.rs    # entry point, router, app shell
+│  └─ data/      # #[server] fns, wire view types, and the composition root (mod.rs)
+├─ Cargo.toml    # features: web (default) | desktop | mobile | server
+└─ Dioxus.toml   # dx config (default_platform = "web")
 ```
 
-### Automatic Tailwind (Dioxus 0.7+)
+## Prerequisites
 
-As of Dioxus 0.7, there no longer is a need to manually install tailwind. Simply `dx serve` and you're good to go!
+- A Rust toolchain with the `wasm32-unknown-unknown` target
+  (`rustup target add wasm32-unknown-unknown`).
+- The `dx` CLI at **exactly 0.7.6** — it must match the pinned `dioxus = "=0.7.6"`
+  or `dx` aborts with a version-mismatch error
+  (`cargo install dioxus-cli --version 0.7.6 --locked`).
 
-Automatic tailwind is supported by checking for a file called `tailwind.css` in your app's manifest directory (next to Cargo.toml). To customize the file, use the dioxus.toml:
+## Run
 
-```toml
-[application]
-tailwind_input = "my.css"
-tailwind_output = "assets/out.css" # also customize the location of the out file!
-```
-
-### Tailwind Manual Install
-
-To use tailwind plugins or manually customize tailwind, you can can install the Tailwind CLI and use it directly.
-
-### Tailwind
-1. Install npm: https://docs.npmjs.com/downloading-and-installing-node-js-and-npm
-2. Install the Tailwind CSS CLI: https://tailwindcss.com/docs/installation/tailwind-cli
-3. Run the following command in the root of the project to start the Tailwind CSS compiler:
+From this directory (or `./run.sh` from the repository root):
 
 ```bash
-npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
+dx serve                      # web: builds the WASM client + server, serves on localhost
+dx serve --platform desktop   # native desktop window, server fns run in-process
 ```
 
-### Serving Your App
+`dx serve` prints the URL it listens on; pass `--port <n>` to choose one.
 
-Run the following command in the root of your project to start developing with the default platform:
+## Configuration
+
+The adapter stack is chosen by environment variables read at the composition
+root (`src/data/mod.rs`). With no variables set you get a seeded in-memory
+database and a fake OCR — no external services needed.
+
+| Variable          | Values                                | Default                  |
+|-------------------|---------------------------------------|--------------------------|
+| `PHOSK_DB`        | `memory` \| `surreal` (file-backed)   | `memory` (seeded)        |
+| `PHOSK_OCR`       | `auto` \| `paddle` \| `vision`        | `auto` (fake if none reachable) |
+| `PHOSK_LLM_MODEL` | any Ollama model tag                  | see `src/data/mod.rs`    |
+| `PHOSK_DATA_DIR`  | path for file-backed adapters         | `./phosk-data`           |
+
+`PHOSK_DATA_DIR` holds encrypted photos and keys at runtime — never commit it.
+
+## Check
+
+Both sides must type-check (run from this directory):
 
 ```bash
-dx serve
+cargo check --no-default-features --features server   # server side
+cargo check --target wasm32-unknown-unknown            # WASM client side
 ```
 
-To run for a different platform, use the `--platform platform` flag. E.g.
+The backend gates (from the repository root) exclude this crate:
+
 ```bash
-dx serve --platform desktop
+cargo fmt --all --check
+cargo clippy --workspace --exclude dioxus-app --all-targets -- -D warnings
+cargo test --workspace --exclude dioxus-app
 ```
 
+## Design
+
+The visual language is Oscillocore; `frontend/.claude-design-export/` is the
+read-only visual reference. Use design tokens (`var(--…)`), never raw hex or
+`px` values.
