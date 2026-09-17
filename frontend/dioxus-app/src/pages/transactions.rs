@@ -17,10 +17,11 @@
 //!   * the inspected pill ← `get_signal(id)`.
 //!
 //! Notable mapping notes (vs the JSX, which spoke to a now-dead REST layer):
-//!   * Line review is live: clicking a line's name (or CORRECT on a flagged
+//!   * Line review is live: picking a line's name (or CORRECT on a flagged
 //!     line) opens an inline editor that saves through
 //!     `correct_transaction_line`; CONFIRM accepts the reading as-is. After a
-//!     save the lines and the list refetch, so the ⚠ marks clear.
+//!     save the list and every open line list refetch (`LinesRev`), so the ⚠
+//!     marks clear and no other view keeps editing an outdated line.
 //!   * Low-confidence lines (< 0.7) wear the design system's CAUTION treatment
 //!     (`--warn`): a flagged row rule, an amber dot and name. Coral stays the
 //!     page's single signal moment.
@@ -41,8 +42,9 @@ use crate::components::shell::{AiPanel, Sig, SigOcc, SignalPanel, TopBar};
 use crate::components::states::Awaiting;
 use crate::data::signals::{get_signal, SignalDetailDto};
 use crate::data::transactions::{
-    correct_transaction_line, correction_error_text, get_transaction, get_transaction_lines,
-    list_transactions, TransactionDto, TxnFilter, TxnLineCorrection, TxnLineDto, TxnLinesDto,
+    correct_transaction_line, correction_error_text, correction_needs_reload, get_transaction,
+    get_transaction_lines, list_transactions, TransactionDto, TxnFilter, TxnLineCorrection,
+    TxnLineDraft, TxnLineDto, TxnLinesDto,
 };
 use crate::data::{chf2, cycle::get_cycle};
 
@@ -207,9 +209,54 @@ fn CatTag(cat: String) -> Element {
     }
 }
 
+/// Page-wide revision of the receipt lines, bumped after every saved line
+/// correction and every refusal that says the page is out of date.
+///
+/// Every open line list (accordion rows and the receipt screen) reads it in its
+/// fetch, so all of them refetch together and no view keeps showing, or
+/// editing, an outdated line.
+#[derive(Clone, Copy)]
+struct LinesRev(Signal<u64>);
+
+/// Subscribe the calling fetch to [`LinesRev`] (a no-op outside the page).
+fn track_lines_rev(rev: Option<LinesRev>) {
+    if let Some(LinesRev(rev)) = rev {
+        let _: u64 = rev();
+    }
+}
+
+/// A line's name. Clicking it, or Enter / Space while it has focus, picks the
+/// line for correction; a flagged line carries the ⚠ mark.
+#[component]
+fn PickName(name: String, low: bool, index: usize, on_pick: EventHandler<usize>) -> Element {
+    let cls = if low { "nm pick low" } else { "nm pick" };
+    let text = if low { format!("{name} ⚠") } else { name };
+    rsx! {
+        span {
+            class: "{cls}",
+            role: "button",
+            tabindex: "0",
+            title: "Review / correct this line",
+            onclick: move |e: Event<MouseData>| {
+                e.stop_propagation();
+                on_pick.call(index);
+            },
+            onkeydown: move |e: Event<KeyboardData>| {
+                let key = e.key();
+                if key == Key::Enter || key == Key::Character(" ".to_owned()) {
+                    e.prevent_default();
+                    e.stop_propagation();
+                    on_pick.call(index);
+                }
+            },
+            "{text}"
+        }
+    }
+}
+
 /// A single fetched receipt line in the accordion body (React `LineItem`).
 ///
-/// Clicking the name picks the line for correction; a flagged (low-confidence)
+/// Picking the name opens the line for correction; a flagged (low-confidence)
 /// line also shows CONFIRM / CORRECT. See [`LineReview`].
 #[component]
 fn LineItem(
@@ -221,30 +268,17 @@ fn LineItem(
     editing: bool,
     on_pick: EventHandler<usize>,
     on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
 ) -> Element {
     let conf = l.confidence;
     let low = is_low_conf(conf);
     let row_cls = if low { "line flag" } else { "line" };
-    let nm_cls = if low { "nm pick low" } else { "nm pick" };
-    let nm_text = if low {
-        format!("{} ⚠", l.name)
-    } else {
-        l.name.clone()
-    };
     let qty_str = format!("{}×{}", l.qty, chf2(l.unit_price));
     rsx! {
         div { class: "{row_cls}",
             div { class: "nmwrap",
                 span { class: "cdot", ConfDot { conf } }
-                span {
-                    class: "{nm_cls}",
-                    title: "Review / correct this line",
-                    onclick: move |e: Event<MouseData>| {
-                        e.stop_propagation();
-                        on_pick.call(index);
-                    },
-                    "{nm_text}"
-                }
+                PickName { name: l.name.clone(), low, index, on_pick }
             }
             if l.signal_id.is_empty() {
                 CatTag { cat: l.category.clone() }
@@ -260,15 +294,17 @@ fn LineItem(
                 div { class: "lp", "{chf2(l.line_total)}" }
                 div { class: "qty", "{qty_str}" }
             }
-            LineReview { receipt_id, index, l: l.clone(), editing, on_pick, on_saved }
+            LineReview {
+                receipt_id,
+                index,
+                l: l.clone(),
+                editing,
+                on_pick,
+                on_saved,
+                on_refresh,
+            }
         }
     }
-}
-
-/// The request index for a line position (an impossible index if it does not
-/// fit, which the server answers with "no longer exists").
-fn wire_index(index: usize) -> u32 {
-    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 /// Review controls under one receipt line (T31).
@@ -277,8 +313,12 @@ fn wire_index(index: usize) -> u32 {
 ///   and CORRECT (open the editor);
 /// * while the line is picked, the inline [`LineEditor`] replaces them.
 ///
-/// CONFIRM's pending / refused states use the shared `Awaiting` block. Every
-/// grid child here spans the full row (`txn.css`, T31 block).
+/// CONFIRM's pending / refused states use the shared `Awaiting` block and show
+/// only while the line is still flagged: a later save clears them. Every grid
+/// child here spans the full row (`txn.css`, T31 block).
+///
+/// `on_saved` closes the editor and refreshes; `on_refresh` only refreshes (a
+/// CONFIRM, or a refusal that says the page is out of date).
 #[component]
 fn LineReview(
     receipt_id: String,
@@ -287,17 +327,13 @@ fn LineReview(
     editing: bool,
     on_pick: EventHandler<usize>,
     on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
 ) -> Element {
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
     let low = is_low_conf(l.confidence);
 
-    let confirm_fix = TxnLineCorrection {
-        receipt_id: receipt_id.clone(),
-        line_index: wire_index(index),
-        expected_name: l.name.clone(),
-        ..TxnLineCorrection::default()
-    };
+    let confirm_fix = TxnLineCorrection::confirm(&receipt_id, index, &l);
     let confirm = move |e: Event<MouseData>| {
         e.stop_propagation();
         if pending() {
@@ -310,8 +346,14 @@ fn LineReview(
             let res = correct_transaction_line(fix).await;
             pending.set(false);
             match res {
-                Ok(()) => on_saved.call(()),
-                Err(err) => error.set(Some(correction_error_text(&err))),
+                // Refresh only: another line's open editor must stay open.
+                Ok(()) => on_refresh.call(()),
+                Err(err) => {
+                    error.set(Some(correction_error_text(&err)));
+                    if correction_needs_reload(&err) {
+                        on_refresh.call(());
+                    }
+                }
             }
         });
     };
@@ -324,33 +366,35 @@ fn LineReview(
                 index,
                 l,
                 on_close: move |()| on_pick.call(index),
-                on_saved,
+                on_saved: move |()| {
+                    error.set(None);
+                    on_saved.call(());
+                },
+                on_refresh,
             }
-        } else {
-            if low {
-                div { class: "line-acts",
-                    button { class: "gbtn p", disabled: busy, onclick: confirm, "CONFIRM" }
-                    button {
-                        class: "gbtn",
-                        disabled: busy,
-                        onclick: move |e: Event<MouseData>| {
-                            e.stop_propagation();
-                            on_pick.call(index);
-                        },
-                        "CORRECT"
-                    }
+        } else if low {
+            div { class: "line-acts",
+                button { class: "gbtn p", disabled: busy, onclick: confirm, "CONFIRM" }
+                button {
+                    class: "gbtn",
+                    disabled: busy,
+                    onclick: move |e: Event<MouseData>| {
+                        e.stop_propagation();
+                        error.set(None);
+                        on_pick.call(index);
+                    },
+                    "CORRECT"
                 }
             }
             if busy {
                 div { class: "line-state",
                     Awaiting {
                         label: "MOD·TX · CONFIRM".to_string(),
-                        loading: true,
+                        legend: Some("SAVING".to_string()),
                         message: Some("Confirming this reading…".to_string()),
                     }
                 }
-            }
-            if let Some(msg) = error() {
+            } else if let Some(msg) = error() {
                 div { class: "line-state",
                     Awaiting {
                         label: "MOD·TX · CONFIRM".to_string(),
@@ -366,10 +410,15 @@ fn LineReview(
 /// Inline correction form for one picked line (T31): item, category, quantity
 /// and unit price, then SAVE or CANCEL.
 ///
-/// The fields hold raw text; the server validates everything and parses the
-/// price to exact centimes. Saving the pre-filled values unchanged confirms the
-/// reading. Quantity and price inputs set in Pilowlava (numbers are display
-/// type); labels in VG5000.
+/// The fields hold raw text and only the ones the user changed are sent (see
+/// `TxnLineCorrection::from_draft`). The server checks the line still shows
+/// what this form opened on, validates the changes and parses the price to
+/// exact centimes. Saving without an edit confirms the reading.
+///
+/// If the stored line changes while the form is open (a save elsewhere, or the
+/// refetch after a refusal), SAVE gives way to RELOAD, which loads the saved
+/// values and drops the edits here. Quantity and price inputs are set in
+/// Pilowlava (numbers are display type); labels in VG5000.
 #[component]
 fn LineEditor(
     receipt_id: String,
@@ -377,29 +426,22 @@ fn LineEditor(
     l: TxnLineDto,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
 ) -> Element {
-    let mut name = use_signal(|| l.name.clone());
-    let mut category = use_signal(|| l.category.clone());
-    let mut qty = use_signal(|| l.qty.to_string());
-    let mut price = use_signal(|| chf2(l.unit_price));
+    // The line as this form opened it: the request's stale-read guard and the
+    // baseline that tells edited fields from untouched ones.
+    let mut seen = use_signal(|| l.clone());
+    let mut draft = use_signal(|| TxnLineDraft::of(&l));
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 
-    let expected_name = l.name.clone();
+    let moved = TxnLineDraft::of(&l) != TxnLineDraft::of(&seen.read());
     let save = move |e: Event<MouseData>| {
         e.stop_propagation();
-        if pending() {
+        if pending() || moved {
             return;
         }
-        let fix = TxnLineCorrection {
-            receipt_id: receipt_id.clone(),
-            line_index: wire_index(index),
-            expected_name: expected_name.clone(),
-            name: Some(name()),
-            category: Some(category()),
-            qty: Some(qty()),
-            unit_price: Some(price()),
-        };
+        let fix = TxnLineCorrection::from_draft(&receipt_id, index, &seen.read(), &draft.read());
         pending.set(true);
         error.set(None);
         spawn(async move {
@@ -407,12 +449,24 @@ fn LineEditor(
             pending.set(false);
             match res {
                 Ok(()) => on_saved.call(()),
-                Err(err) => error.set(Some(correction_error_text(&err))),
+                Err(err) => {
+                    error.set(Some(correction_error_text(&err)));
+                    if correction_needs_reload(&err) {
+                        on_refresh.call(());
+                    }
+                }
             }
         });
     };
+    let reload = move |e: Event<MouseData>| {
+        e.stop_propagation();
+        draft.set(TxnLineDraft::of(&l));
+        seen.set(l.clone());
+        error.set(None);
+    };
     let busy = pending();
     let legend = format!("MOD·TX · LINE {}", index + 1);
+    let d = draft.read().clone();
 
     rsx! {
         div {
@@ -423,17 +477,17 @@ fn LineEditor(
                 label { class: "lfix-f",
                     span { class: "k", "Item" }
                     input {
-                        value: "{name}",
-                        disabled: busy,
-                        oninput: move |e| name.set(e.value()),
+                        value: "{d.name}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().name = e.value(),
                     }
                 }
                 label { class: "lfix-f",
                     span { class: "k", "Category" }
                     input {
-                        value: "{category}",
-                        disabled: busy,
-                        oninput: move |e| category.set(e.value()),
+                        value: "{d.category}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().category = e.value(),
                     }
                 }
                 label { class: "lfix-f",
@@ -441,9 +495,9 @@ fn LineEditor(
                     input {
                         class: "num",
                         inputmode: "decimal",
-                        value: "{qty}",
-                        disabled: busy,
-                        oninput: move |e| qty.set(e.value()),
+                        value: "{d.qty}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().qty = e.value(),
                     }
                 }
                 label { class: "lfix-f",
@@ -451,22 +505,32 @@ fn LineEditor(
                     input {
                         class: "num",
                         inputmode: "decimal",
-                        value: "{price}",
-                        disabled: busy,
-                        oninput: move |e| price.set(e.value()),
+                        value: "{d.unit_price}",
+                        disabled: busy || moved,
+                        oninput: move |e| draft.write().unit_price = e.value(),
                     }
                 }
             }
             if busy {
                 div { class: "line-state",
                     Awaiting {
-                        label: "MOD·TX · SAVING".to_string(),
-                        loading: true,
+                        label: "MOD·TX · CORRECTION".to_string(),
+                        legend: Some("SAVING".to_string()),
                         message: Some("Saving the correction…".to_string()),
                     }
                 }
-            }
-            if let Some(msg) = error() {
+            } else if moved {
+                div { class: "line-state",
+                    Awaiting {
+                        label: "MOD·TX · CORRECTION".to_string(),
+                        legend: Some("LINE CHANGED".to_string()),
+                        message: Some(
+                            "This line was changed since the form opened. RELOAD shows the saved values and drops the edits here."
+                                .to_string(),
+                        ),
+                    }
+                }
+            } else if let Some(msg) = error() {
                 div { class: "line-state",
                     Awaiting {
                         label: "MOD·TX · CORRECTION".to_string(),
@@ -476,7 +540,11 @@ fn LineEditor(
                 }
             }
             div { class: "lfix-acts",
-                button { class: "gbtn p", disabled: busy, onclick: save, "SAVE" }
+                if moved {
+                    button { class: "gbtn p", onclick: reload, "RELOAD" }
+                } else {
+                    button { class: "gbtn p", disabled: busy, onclick: save, "SAVE" }
+                }
                 button {
                     class: "gbtn",
                     disabled: busy,
@@ -495,8 +563,9 @@ fn LineEditor(
 /// only while the row is open (the parent only renders it when `open`), so the
 /// `get_transaction_lines` read only fires for opened receipts.
 ///
-/// One line at a time can be picked for correction (`editing`); a saved
-/// correction refetches the lines and tells the page (`on_changed`).
+/// One line at a time can be picked for correction (`editing`). A saved
+/// correction tells the page (`on_changed`), which refetches the list and bumps
+/// [`LinesRev`], so these lines refetch too.
 #[component]
 fn TxnRowBody(
     t: TransactionDto,
@@ -506,7 +575,11 @@ fn TxnRowBody(
     on_changed: EventHandler<()>,
 ) -> Element {
     let id = t.id.clone();
-    let mut lines_res = use_resource(move || get_transaction_lines(id.clone()));
+    let rev = try_use_context::<LinesRev>();
+    let lines_res = use_resource(move || {
+        track_lines_rev(rev);
+        get_transaction_lines(id.clone())
+    });
     let mut editing = use_signal(|| Option::<usize>::None);
 
     let body: Option<TxnLinesDto> = lines_res
@@ -550,9 +623,9 @@ fn TxnRowBody(
                         },
                         on_saved: move |()| {
                             editing.set(None);
-                            lines_res.restart();
                             on_changed.call(());
                         },
+                        on_refresh: move |()| on_changed.call(()),
                     }
                 }
                 div { class: "trow-foot",
@@ -781,30 +854,17 @@ fn ReceiptItem(
     editing: bool,
     on_pick: EventHandler<usize>,
     on_saved: EventHandler<()>,
+    on_refresh: EventHandler<()>,
 ) -> Element {
     let conf = l.confidence;
     let low = is_low_conf(conf);
     let row_cls = if low { "il flag" } else { "il" };
-    let nm_cls = if low { "nm pick low" } else { "nm pick" };
-    let nm_text = if low {
-        format!("{} ⚠", l.name)
-    } else {
-        l.name.clone()
-    };
     let qty_str = format!("{}×{}", l.qty, chf2(l.unit_price));
     rsx! {
         div { class: "{row_cls}",
             div { class: "nmwrap",
                 span { class: "cdot", ConfDot { conf } }
-                span {
-                    class: "{nm_cls}",
-                    title: "Review / correct this line",
-                    onclick: move |e: Event<MouseData>| {
-                        e.stop_propagation();
-                        on_pick.call(index);
-                    },
-                    "{nm_text}"
-                }
+                PickName { name: l.name.clone(), low, index, on_pick }
             }
             if l.signal_id.is_empty() {
                 CatTag { cat: l.category.clone() }
@@ -820,7 +880,15 @@ fn ReceiptItem(
                 div { class: "lp", "{chf2(l.line_total)}" }
                 div { class: "qty", "{qty_str}" }
             }
-            LineReview { receipt_id, index, l: l.clone(), editing, on_pick, on_saved }
+            LineReview {
+                receipt_id,
+                index,
+                l: l.clone(),
+                editing,
+                on_pick,
+                on_saved,
+                on_refresh,
+            }
         }
     }
 }
@@ -831,8 +899,9 @@ fn ReceiptItem(
 /// (detail: avg_confidence, source, ocr_regions count). Mounted only when a
 /// receipt is open, so neither read fires while closed.
 ///
-/// Lines are reviewable here too; a saved correction refetches the lines and
-/// the detail (average confidence) and tells the page (`on_changed`).
+/// Lines are reviewable here too. A saved correction tells the page
+/// (`on_changed`), which bumps [`LinesRev`]: the lines and the detail (average
+/// confidence) refetch here, and so do the accordion rows open underneath.
 #[component]
 fn ReceiptScreen(
     t: TransactionDto,
@@ -845,8 +914,15 @@ fn ReceiptScreen(
     let id2 = t.id.clone();
     let receipt_id = t.id.clone();
     let mut editing = use_signal(|| Option::<usize>::None);
-    let mut lines_res = use_resource(move || get_transaction_lines(id.clone()));
-    let mut detail_res = use_resource(move || get_transaction(id2.clone()));
+    let rev = try_use_context::<LinesRev>();
+    let lines_res = use_resource(move || {
+        track_lines_rev(rev);
+        get_transaction_lines(id.clone())
+    });
+    let detail_res = use_resource(move || {
+        track_lines_rev(rev);
+        get_transaction(id2.clone())
+    });
 
     let lbody: Option<TxnLinesDto> = lines_res
         .read()
@@ -1020,10 +1096,9 @@ fn ReceiptScreen(
                                     },
                                     on_saved: move |()| {
                                         editing.set(None);
-                                        lines_res.restart();
-                                        detail_res.restart();
                                         on_changed.call(());
                                     },
+                                    on_refresh: move |()| on_changed.call(()),
                                 }
                             }
                         }
@@ -1105,6 +1180,10 @@ pub fn TransactionsPage() -> Element {
     // calls there is no network round-trip to coalesce, so the query feeds the
     // filter directly and the list filters live — behaviourally identical to what
     // the debounced version converged to.
+    // Bumped with every list refetch after a line correction; see `LinesRev`.
+    let mut lines_rev = use_signal(|| 0_u64);
+    use_context_provider(|| LinesRev(lines_rev));
+
     let mut txns = use_resource(move || {
         let filter = TxnFilter {
             period: hz_period(&horizon()).to_string(),
@@ -1268,7 +1347,10 @@ pub fn TransactionsPage() -> Element {
                                                                     sel.set(Some(id));
                                                                     drawer_sig.set(true);
                                                                 },
-                                                                on_changed: move |()| txns.restart(),
+                                                                on_changed: move |()| {
+                                                                    txns.restart();
+                                                                    lines_rev += 1;
+                                                                },
                                                             }
                                                         }
                                                     }
@@ -1311,7 +1393,10 @@ pub fn TransactionsPage() -> Element {
                         sel.set(Some(id));
                         drawer_sig.set(true);
                     },
-                    on_changed: move |()| txns.restart(),
+                    on_changed: move |()| {
+                        txns.restart();
+                        lines_rev += 1;
+                    },
                 }
             }
         }
