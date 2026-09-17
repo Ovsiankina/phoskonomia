@@ -150,8 +150,11 @@ pub(crate) async fn load(store: &Store) -> Result<(), PhoskError> {
     for c in &chats {
         store.put(Bucket::Chat, &c.id.to_string(), c).await?;
     }
+    // In transcript order: chat messages are read back by insertion sequence.
     for m in messages {
-        store.put(Bucket::Message, &m.id.to_string(), &m).await?;
+        store
+            .put_in_sequence(Bucket::Message, &m.id.to_string(), &m)
+            .await?;
     }
     for s in ai_suggestions()? {
         store

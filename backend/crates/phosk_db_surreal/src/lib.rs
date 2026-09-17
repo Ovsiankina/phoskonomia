@@ -117,6 +117,8 @@ impl SurrealDb {
             .map_err(|e| PhoskError::Invalid(format!("surreal use ns/db: {e}")))?;
         let store = Store::new(db);
         migrate::run(&store).await?;
+        // Chat lines written from now on must sort after the stored ones.
+        store.resume_sequence(Bucket::Message).await?;
         Ok(Self { store })
     }
 
@@ -576,7 +578,8 @@ impl DatabaseAdapter for SurrealDb {
     }
 
     async fn chat_messages(&self, chat: ChatId) -> Result<Vec<Message>, PhoskError> {
-        let all: Vec<Message> = self.store.list(Bucket::Message).await?;
+        // Oldest→newest per the port: a plain table scan has no order.
+        let all: Vec<Message> = self.store.list_in_insertion_order(Bucket::Message).await?;
         Ok(all.into_iter().filter(|m| m.chat_id == chat).collect())
     }
 
@@ -586,7 +589,9 @@ impl DatabaseAdapter for SurrealDb {
     }
 
     async fn append_message(&self, m: Message) -> Result<(), PhoskError> {
-        self.store.put(Bucket::Message, &m.id.to_string(), &m).await
+        self.store
+            .put_in_sequence(Bucket::Message, &m.id.to_string(), &m)
+            .await
     }
 
     async fn clear_chat(&self, chat: ChatId) -> Result<(), PhoskError> {
@@ -709,6 +714,72 @@ mod tests {
                 "the write persisted to disk"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Chat lines appended after a reopen sort after the stored ones, even when
+    /// an earlier run left sequence numbers far ahead of this process's
+    /// counter; a line stored without a sequence number sorts first.
+    ///
+    /// Multi-threaded: the file engine finishes closing on background tasks,
+    /// and a write after reopening on the current-thread runtime breaks reads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chat_order_survives_reopening_a_store_from_an_earlier_run() {
+        const EARLIER_RUN_SEQ: i64 = 1 << 60;
+        let dir = std::env::temp_dir().join(format!("phosk_surreal_chat_{}", uuid()));
+        let path = dir.to_string_lossy().into_owned();
+
+        let chat_id = {
+            let db = SurrealDb::file_seeded(&path).await.expect("first open");
+            let chat = db.latest_chat().await.expect("read").expect("seed chat");
+            db.clear_chat(chat.id).await.expect("clear");
+            let line = |text: &str| Message {
+                id: phosk_id::MessageId::new(),
+                chat_id: chat.id,
+                who: "usr".to_owned(),
+                text: text.to_owned(),
+                at: chat.started,
+            };
+            let earlier = line("earlier run");
+            let doc = serde_json::to_string(&earlier).expect("serialize");
+            db.store
+                .raw()
+                .query("UPSERT type::thing($tb, $id) CONTENT { doc: $doc, seq: $seq } RETURN NONE")
+                .bind(("tb", Bucket::Message.table()))
+                .bind(("id", earlier.id.to_string()))
+                .bind(("doc", doc))
+                .bind(("seq", EARLIER_RUN_SEQ))
+                .await
+                .expect("raw write")
+                .check()
+                .expect("raw write ok");
+            let legacy = line("no sequence");
+            db.store
+                .put(Bucket::Message, &legacy.id.to_string(), &legacy)
+                .await
+                .expect("legacy write");
+            chat.id
+        };
+
+        let db = SurrealDb::file(&path).await.expect("reopen");
+        db.append_message(Message {
+            id: phosk_id::MessageId::new(),
+            chat_id,
+            who: "sys".to_owned(),
+            text: "after reopen".to_owned(),
+            at: naive(2026, 6, 19),
+        })
+        .await
+        .expect("append");
+        let texts: Vec<String> = db
+            .chat_messages(chat_id)
+            .await
+            .expect("messages")
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(texts, ["no sequence", "earlier run", "after reopen"]);
+        drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

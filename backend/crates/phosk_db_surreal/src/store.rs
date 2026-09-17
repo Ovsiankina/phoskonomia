@@ -11,12 +11,34 @@
 //! All four primitives ([`Store::put`], [`Store::get`], [`Store::delete`],
 //! [`Store::list`]) go through bound-parameter `query()` calls; a surreal or serde
 //! failure maps to a [`PhoskError`] (no panic, ADR §0).
+//!
+//! A table scan has no defined order, so buckets whose port contract is ordered
+//! (chat messages) are written with [`Store::put_in_sequence`], which adds an
+//! insertion `seq` next to `doc`, and read with
+//! [`Store::list_in_insertion_order`].
+
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use phosk_core::error::PhoskError;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Db;
+
+/// The next insertion sequence number handed out by
+/// [`Store::put_in_sequence`]. Process-wide, so every handle in the process
+/// shares one strictly increasing series; [`Store::resume_sequence`] moves it
+/// past what a reopened store already holds. The embedded engine is owned by a
+/// single process, so an in-process counter is enough.
+static NEXT_SEQ: AtomicI64 = AtomicI64::new(1);
+
+/// One row of an ordered bucket: the opaque document plus its sequence number
+/// (`0` for records written without one; real numbers start at `1`).
+#[derive(Debug, Deserialize)]
+struct SequencedDoc {
+    doc: String,
+    seq: i64,
+}
 
 /// The per-entity tables. The string is the SurrealDB table name; record ids are
 /// `⟨table⟩:⟨natural-key⟩`. Confined here so the rest of the crate names buckets
@@ -195,6 +217,82 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Upsert `value` like [`Store::put`], and also stamp the record with the
+    /// next insertion sequence number, so [`Store::list_in_insertion_order`] can
+    /// return the bucket in the order its records were written.
+    ///
+    /// Used for buckets whose port contract is ordered (chat messages): record
+    /// keys are random UUIDs and a table scan has no defined order.
+    pub(crate) async fn put_in_sequence<T: Serialize + Sync>(
+        &self,
+        bucket: Bucket,
+        key: &str,
+        value: &T,
+    ) -> Result<(), PhoskError> {
+        let doc = serde_json::to_string(value)
+            .map_err(|e| PhoskError::Invalid(format!("serialize {}: {e}", bucket.table())))?;
+        let seq = NEXT_SEQ.fetch_add(1, Ordering::SeqCst);
+        let sql = "UPSERT type::thing($tb, $id) CONTENT { doc: $doc, seq: $seq } RETURN NONE";
+        self.db
+            .query(sql)
+            .bind(("tb", bucket.table()))
+            .bind(("id", key.to_owned()))
+            .bind(("doc", doc))
+            .bind(("seq", seq))
+            .await
+            .map_err(|e| Self::map_err("put-seq", &e))?
+            .check()
+            .map_err(|e| Self::map_err("put-seq-check", &e))?;
+        Ok(())
+    }
+
+    /// Fetch and deserialize every record in `bucket`, oldest write first (by
+    /// the sequence number [`Store::put_in_sequence`] stamps). Records written
+    /// without one sort first, in no defined order among themselves.
+    pub(crate) async fn list_in_insertion_order<T: DeserializeOwned>(
+        &self,
+        bucket: Bucket,
+    ) -> Result<Vec<T>, PhoskError> {
+        // A missing `seq` cannot be decoded as an `Option`, so default it here.
+        let sql = "SELECT doc, seq ?? 0 AS seq FROM type::table($tb)";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("tb", bucket.table()))
+            .await
+            .map_err(|e| Self::map_err("list-seq", &e))?;
+        let mut rows: Vec<SequencedDoc> = res
+            .take(0)
+            .map_err(|e| Self::map_err("list-seq-take", &e))?;
+        rows.sort_by_key(|row| row.seq);
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_str(&row.doc).map_err(|e| {
+                    PhoskError::Invalid(format!("deserialize {}: {e}", bucket.table()))
+                })
+            })
+            .collect()
+    }
+
+    /// Move the process-wide sequence past every number already stored in
+    /// `bucket`, so writes after a reopen still sort after older records.
+    pub(crate) async fn resume_sequence(&self, bucket: Bucket) -> Result<(), PhoskError> {
+        let sql = "SELECT VALUE seq FROM type::table($tb) WHERE type::is::int(seq)";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("tb", bucket.table()))
+            .await
+            .map_err(|e| Self::map_err("resume-seq", &e))?;
+        let stored: Vec<i64> = res
+            .take(0)
+            .map_err(|e| Self::map_err("resume-seq-take", &e))?;
+        if let Some(max) = stored.into_iter().max() {
+            NEXT_SEQ.fetch_max(max.saturating_add(1), Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// Delete the record at `bucket:key` (no-op if absent — callers check first
