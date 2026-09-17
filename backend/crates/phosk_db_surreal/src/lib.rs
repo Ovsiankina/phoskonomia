@@ -153,6 +153,25 @@ impl SurrealDb {
         }
         Ok(me)
     }
+
+    /// Whether any stored row still names `category` — the guard behind
+    /// `delete_category` (receipts, their lines, subscriptions and signals).
+    async fn category_is_referenced(&self, category: &str) -> Result<bool, PhoskError> {
+        let receipts: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
+        if receipts.iter().any(|r| r.category == category) {
+            return Ok(true);
+        }
+        let lines: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        if lines.iter().any(|l| l.category == category) {
+            return Ok(true);
+        }
+        let subs: Vec<Subscription> = self.store.list(Bucket::Subscription).await?;
+        if subs.iter().any(|s| s.category == category) {
+            return Ok(true);
+        }
+        let signals: Vec<Signal> = self.store.list(Bucket::Signal).await?;
+        Ok(signals.iter().any(|s| s.parent == category))
+    }
 }
 
 #[async_trait]
@@ -366,16 +385,94 @@ impl DatabaseAdapter for SurrealDb {
             .await
     }
 
-    async fn insert_category(&self, _c: CategoryCap) -> Result<CategoryId, PhoskError> {
-        Err(PhoskError::Invalid("not implemented yet".to_owned()))
+    async fn insert_category(&self, c: CategoryCap) -> Result<CategoryId, PhoskError> {
+        let existing: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        if existing.iter().any(|x| x.name == c.name) {
+            return Err(PhoskError::Invalid(format!(
+                "category {} already exists",
+                c.name
+            )));
+        }
+        let id = c.id;
+        self.store
+            .put(Bucket::CategoryCap, &id.to_string(), &c)
+            .await?;
+        Ok(id)
     }
 
-    async fn rename_category(&self, _from: &str, _to: &str) -> Result<(), PhoskError> {
-        Err(PhoskError::Invalid("not implemented yet".to_owned()))
+    async fn rename_category(&self, from: &str, to: &str) -> Result<(), PhoskError> {
+        // Every guard runs against the current state before the first write, so
+        // a rejected rename writes nothing. The re-point itself is a sequence of
+        // per-record `put`s (the store exposes no multi-record transaction): a
+        // store fault part-way leaves the records already moved, which is why
+        // the category record is written LAST — until it moves, the old name is
+        // still the live one and re-running the rename finishes the job.
+        let caps: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        let mut target = caps
+            .iter()
+            .find(|c| c.name == from)
+            .cloned()
+            .ok_or_else(|| PhoskError::NotFound(format!("category {from}")))?;
+        if from == to {
+            return Ok(());
+        }
+        if caps.iter().any(|c| c.name == to) {
+            return Err(PhoskError::Invalid(format!("category {to} already exists")));
+        }
+
+        let receipts: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
+        for mut r in receipts.into_iter().filter(|r| r.category == from) {
+            r.category = to.to_owned();
+            self.store
+                .put(Bucket::Receipt, &r.id.to_string(), &r)
+                .await?;
+        }
+        let lines: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        for mut l in lines.into_iter().filter(|l| l.category == from) {
+            l.category = to.to_owned();
+            self.store
+                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .await?;
+        }
+        let subs: Vec<Subscription> = self.store.list(Bucket::Subscription).await?;
+        for mut s in subs.into_iter().filter(|s| s.category == from) {
+            s.category = to.to_owned();
+            self.store
+                .put(Bucket::Subscription, &s.id.to_string(), &s)
+                .await?;
+        }
+        let signals: Vec<Signal> = self.store.list(Bucket::Signal).await?;
+        for mut s in signals.into_iter().filter(|s| s.parent == from) {
+            s.parent = to.to_owned();
+            self.store
+                .put(Bucket::Signal, &s.id.to_string(), &s)
+                .await?;
+        }
+
+        target.name = to.to_owned();
+        target.provenance = Provenance {
+            source: Source::UserModified,
+            confidence: 1.0,
+        };
+        self.store
+            .put(Bucket::CategoryCap, &target.id.to_string(), &target)
+            .await
     }
 
-    async fn delete_category(&self, _name: &str) -> Result<(), PhoskError> {
-        Err(PhoskError::Invalid("not implemented yet".to_owned()))
+    async fn delete_category(&self, name: &str) -> Result<(), PhoskError> {
+        let caps: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        let target = caps
+            .into_iter()
+            .find(|c| c.name == name)
+            .ok_or_else(|| PhoskError::NotFound(format!("category {name}")))?;
+        if self.category_is_referenced(name).await? {
+            return Err(PhoskError::Invalid(format!(
+                "category {name} is still referenced"
+            )));
+        }
+        self.store
+            .delete(Bucket::CategoryCap, &target.id.to_string())
+            .await
     }
 
     async fn budget_history(&self, category: &str) -> Result<Vec<BudgetHistory>, PhoskError> {

@@ -579,7 +579,9 @@ async fn rename_category_rejects_unknown_and_colliding_names() {
 async fn rename_category_handles_same_name_and_case_only_changes() {
     let db = seeded();
     let before = db.category_cap_by_name("Rent").await.expect("seeded cap");
-    rename_category(&db, "Rent", "Rent").await.expect("no-op ok");
+    rename_category(&db, "Rent", "Rent")
+        .await
+        .expect("no-op ok");
     assert_eq!(
         db.category_cap_by_name("Rent").await.expect("still there"),
         before,

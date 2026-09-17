@@ -153,12 +153,10 @@ pub async fn create_category(
     } else {
         clean_text(&new.note, "category note", MAX_NOTE_CHARS)?
     };
-    if let Some(cap) = new.cap {
-        if cap.centimes() < 0 {
-            return Err(PhoskError::Invalid(
-                "category cap cannot be negative".to_owned(),
-            ));
-        }
+    if new.cap.is_some_and(|cap| cap.centimes() < 0) {
+        return Err(PhoskError::Invalid(
+            "category cap cannot be negative".to_owned(),
+        ));
     }
 
     let existing = db.category_caps().await?;
@@ -312,7 +310,7 @@ fn clean_text(raw: &str, what: &str, max: usize) -> Result<String, PhoskError> {
 }
 
 /// Whether two category names denote the same envelope to a human.
-fn same_name(a: &str, b: &str) -> bool {
+const fn same_name(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 
