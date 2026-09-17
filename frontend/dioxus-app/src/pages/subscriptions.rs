@@ -1444,6 +1444,7 @@ pub fn SubscriptionsPage() -> Element {
                                     }
                                 }
                                 div { class: "subs-controls",
+                                    crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Subscriptions }
                                     div { class: "modes",
                                         span { class: "mlbl", "SORT" }
                                         button { class: "{sort_due_cls}", onclick: move |_| sub_sort.set("due".to_string()), "DUE" }

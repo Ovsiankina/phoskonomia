@@ -59,7 +59,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 - [x] **T32** — Subscriptions: confirm / dismiss AI-detected recurring candidates (needs: T01)
 - [ ] **T33** — AI chat: send, persisted history, `/clear` command; panel wide + sticky per the old ROADMAP (needs: T01)
 - [ ] **T34** — Config page on real `phosk_settings`: get / set / reset preferences (needs: T01)
-- [ ] **T35** — CSV export buttons for transactions / budget / subscriptions (file download on web + desktop) (needs: T01)
+- [x] **T35** — CSV export buttons for transactions / budget / subscriptions (file download on web + desktop) (needs: T01)
 - [ ] **T36** — "NEW transaction" form (needs: T10)
 - [ ] **T37** — Edit / delete transaction from the detail view, with confirm step (needs: T11, T36)
 - [ ] **T38** — Subscriptions create / edit / lifecycle actions (needs: T15)

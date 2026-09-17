@@ -22,6 +22,7 @@
 //! * [`dashboard`]    — the composed dashboard read (REAL backend via `phosk_insights`).
 //! * [`transactions`] — receipt list, lines, receipt detail.
 //! * [`budgets`]      — envelopes, budget totals, allocation, category inspector.
+//! * [`csv_export`]   — CSV export of the transactions / budget / subscriptions lists.
 //! * [`subscriptions`]— standing charges, stats, billing sweep, detail.
 //! * [`debts`]        — open balances, stats, payoff trajectory, IOU ledger, detail.
 //! * [`analytics`]    — spend history, momentum, weekday rhythm, movers, insights.
@@ -49,6 +50,7 @@ use phosk_core::money::Money;
 pub mod ai;
 pub mod analytics;
 pub mod budgets;
+pub mod csv_export;
 pub mod cycle;
 pub mod dashboard;
 pub mod debts;
