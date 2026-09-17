@@ -24,9 +24,12 @@
 //! ## Deliberately not asserted
 //!
 //! - Order of rows that share a date, or have none (line items): the port says
-//!   "stored order" / "oldest→newest", but the `SurrealDB` adapter has no
-//!   insertion sequence, so same-day chat messages and a receipt's lines can
-//!   come back in any order there. Ordering checks use distinct dates.
+//!   "stored order" / "oldest→newest", but the `SurrealDB` adapter keeps no
+//!   insertion sequence for most tables, so same-day rows (budget history,
+//!   charges, debt payments) and a receipt's lines can come back in any order
+//!   there. Ordering checks use distinct dates. Chat messages are the
+//!   exception: both adapters return them in append order, and the
+//!   `phosk_adapter_db::contract` suite checks that for same-day lines.
 //! - Recording the same charge, payment, message or suggestion id twice:
 //!   `phosk_db_memory` appends a duplicate, `phosk_db_surreal` overwrites. The
 //!   port does not say which is right.
