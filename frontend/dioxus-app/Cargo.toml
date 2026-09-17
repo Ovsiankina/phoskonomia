@@ -31,6 +31,10 @@ phosk_planning = { path = "../../backend/crates/phosk_planning", optional = true
 phosk_recurring = { path = "../../backend/crates/phosk_recurring", optional = true }
 phosk_debts = { path = "../../backend/crates/phosk_debts", optional = true }
 phosk_ai = { path = "../../backend/crates/phosk_ai", optional = true }
+# The preferences service behind `/config`: get / set / reset plus the known-key
+# rule table the `data::settings` write fns validate user input against.
+# Server-only, like the services above.
+phosk_settings = { path = "../../backend/crates/phosk_settings", optional = true }
 # The L2 database PORT trait — the seam through which the server context (`Session`)
 # hands feature services a `&dyn DatabaseAdapter`. Server-only (the trait and the
 # concrete adapter live behind `server-deps`; neither enters the WASM client bundle).
@@ -78,6 +82,13 @@ tokio = { version = "1", features = ["sync"], optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
 
+# tokio (test-only): the runtime behind the `#[tokio::test]` data-layer tests that
+# drive the server-side inner fns against a fresh seeded `MemoryDb`. The
+# workspace pin carries `macros, rt`. Dev-dependencies never reach a shipped
+# build, and the WASM client bundle in particular.
+[dev-dependencies]
+tokio = { workspace = true }
+
 [features]
 default = ["web"]
 web = ["dioxus/web"]
@@ -91,6 +102,7 @@ server-deps = [
     "dep:phosk_recurring",
     "dep:phosk_debts",
     "dep:phosk_ai",
+    "dep:phosk_settings",
     "dep:phosk_adapter_db",
     "dep:phosk_db_memory",
     "dep:chrono",

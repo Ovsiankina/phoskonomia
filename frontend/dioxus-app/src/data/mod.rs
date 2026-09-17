@@ -24,6 +24,7 @@
 //! * [`budgets`]      — envelopes, budget totals, allocation, category inspector.
 //! * [`subscriptions`]— standing charges, stats, billing sweep, detail.
 //! * [`debts`]        — open balances, stats, payoff trajectory, IOU ledger, detail.
+//! * [`settings`]     — `/config` preferences: get / set / reset (REAL via `phosk_settings`).
 //! * [`analytics`]    — spend history, momentum, weekday rhythm, movers, insights.
 //!
 //! ## Money on the wire
@@ -52,6 +53,7 @@ pub mod budgets;
 pub mod cycle;
 pub mod dashboard;
 pub mod debts;
+pub mod settings;
 pub mod signals;
 pub mod subscriptions;
 pub mod transactions;
