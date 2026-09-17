@@ -1691,6 +1691,7 @@ dependencies = [
  "phosk_recurring",
  "phosk_storage_fs",
  "serde",
+ "serde_json",
  "tokio",
  "uuid",
 ]

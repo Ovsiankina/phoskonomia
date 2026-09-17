@@ -200,15 +200,24 @@ pub async fn track_signal(id: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        phosk_ledger::signals::track_signal(session.db(), &id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))
+        track_signal_with(session.db(), &id).await
     }
     #[cfg(not(feature = "server-deps"))]
     {
         let _ = id;
         Err(ServerFnError::new("server-only"))
     }
+}
+
+/// [`track_signal`]'s logic over an explicit DB port (tests pass a fresh store).
+#[cfg(feature = "server-deps")]
+pub(crate) async fn track_signal_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    id: &str,
+) -> Result<(), ServerFnError> {
+    phosk_ledger::signals::track_signal(db, id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
 /// Dismiss a candidate item-signal (`POST /signals/{id}/dismiss`).
@@ -219,15 +228,24 @@ pub async fn dismiss_signal(id: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        phosk_ledger::signals::dismiss_signal(session.db(), &id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))
+        dismiss_signal_with(session.db(), &id).await
     }
     #[cfg(not(feature = "server-deps"))]
     {
         let _ = id;
         Err(ServerFnError::new("server-only"))
     }
+}
+
+/// [`dismiss_signal`]'s logic over an explicit DB port (tests pass a fresh store).
+#[cfg(feature = "server-deps")]
+pub(crate) async fn dismiss_signal_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    id: &str,
+) -> Result<(), ServerFnError> {
+    phosk_ledger::signals::dismiss_signal(db, id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
 // ── mappers (service DTO → wire DTO) ───────────────────────────────────────────
