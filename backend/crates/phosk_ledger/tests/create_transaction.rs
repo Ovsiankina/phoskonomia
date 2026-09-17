@@ -90,9 +90,12 @@ fn entry(lines: Vec<NewLineInput>) -> NewTransaction {
 #[tokio::test]
 async fn create_transaction_persists_a_user_entered_receipt_with_its_lines() {
     let db = seeded();
-    let created = create_transaction(&db, entry(vec![line("Zopf", 1.0, 650), line("Gipfeli", 3.0, 190)]))
-        .await
-        .expect("create ok");
+    let created = create_transaction(
+        &db,
+        entry(vec![line("Zopf", 1.0, 650), line("Gipfeli", 3.0, 190)]),
+    )
+    .await
+    .expect("create ok");
 
     assert_eq!(created.amount.centimes(), 650 + 570, "650 + 3×190");
     assert_eq!(created.item_count, 2);
@@ -109,7 +112,10 @@ async fn create_transaction_persists_a_user_entered_receipt_with_its_lines() {
     assert_eq!(receipt.provenance.source, Source::UserEntered);
     assert_eq!(receipt.provenance.confidence, 1.0);
     assert_eq!(receipt.source_kind, "MANUAL");
-    assert!(receipt.ocr_engine.is_empty(), "no OCR engine for manual entry");
+    assert!(
+        receipt.ocr_engine.is_empty(),
+        "no OCR engine for manual entry"
+    );
     assert_eq!(receipt.ocr_regions, 0);
 
     let lines = db.line_items(receipt.id).await.expect("lines readable");
@@ -119,10 +125,9 @@ async fn create_transaction_persists_a_user_entered_receipt_with_its_lines() {
         "every line is bound to the new receipt"
     );
     assert!(
-        lines
-            .iter()
-            .all(|l| l.provenance.source == Source::UserEntered
-                && !l.provenance.is_low_confidence()),
+        lines.iter().all(
+            |l| l.provenance.source == Source::UserEntered && !l.provenance.is_low_confidence()
+        ),
         "typed-in lines are authoritative, never review-flagged"
     );
 }
@@ -135,7 +140,10 @@ async fn line_totals_and_the_receipt_total_are_backend_derived() {
     // 0.4 × 6600 = 2640 exactly; 2.5 × 349 = 872.5 → 873.
     let created = create_transaction(
         &db,
-        entry(vec![line("Gruyère AOP", 0.4, 6_600), line("Trauben", 2.5, 349)]),
+        entry(vec![
+            line("Gruyère AOP", 0.4, 6_600),
+            line("Trauben", 2.5, 349),
+        ]),
     )
     .await
     .expect("create ok");
@@ -436,9 +444,12 @@ async fn a_created_transaction_joins_the_cycle_aggregates() {
 #[tokio::test]
 async fn a_created_transaction_shows_up_in_the_transaction_list() {
     let db = seeded();
-    let created = create_transaction(&db, entry(vec![line("Zopf", 1.0, 650), line("Gipfeli", 3.0, 190)]))
-        .await
-        .expect("create ok");
+    let created = create_transaction(
+        &db,
+        entry(vec![line("Zopf", 1.0, 650), line("Gipfeli", 3.0, 190)]),
+    )
+    .await
+    .expect("create ok");
 
     let list = list_transactions(&db, as_of(), TxnFilter::default())
         .await

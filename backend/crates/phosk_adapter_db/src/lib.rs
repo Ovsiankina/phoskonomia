@@ -122,6 +122,17 @@ pub trait DatabaseAdapter: Send + Sync {
 
     /// Persist a [`Receipt`] together with its [`LineItem`]s; returns its id.
     ///
+    /// The receipt's stable `slug` is the idempotency key: a fresh slug is
+    /// appended, a known slug REPLACES the stored receipt and its line set in
+    /// place (keeping the stored id, which is the one returned).
+    ///
+    /// An adapter must also maintain the dashboard [`Transaction`] projection of
+    /// the receipt (date / shop / category / amount), so a written spend is
+    /// visible to [`Self::transactions_between`] and the cycle aggregates built
+    /// on it. Replacing a receipt replaces its projected row rather than
+    /// double-counting it. The projection is the adapter's job because only the
+    /// adapter can keep the two views from drifting apart.
+    ///
     /// # Errors
     /// [`PhoskError`] if the store rejects the write.
     async fn insert_receipt(

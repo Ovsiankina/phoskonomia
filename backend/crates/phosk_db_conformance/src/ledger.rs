@@ -114,7 +114,11 @@ pub async fn insert_receipt_same_slug_replaces_the_projection(db: &dyn DatabaseA
     let projected = db.transactions_between(day, day).await?;
     ensure_eq(&projected.len(), &1, "no duplicate projected transaction")?;
     let got = projected.into_iter().next().ok_or("no projected row")?;
-    ensure_eq(&got.amount.centimes(), &2_500, "projection follows the replacement")
+    ensure_eq(
+        &got.amount.centimes(),
+        &2_500,
+        "projection follows the replacement",
+    )
 }
 
 /// `receipts_between` keeps exactly the receipts dated inside `[from, to]`,
