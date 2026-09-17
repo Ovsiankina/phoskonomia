@@ -15,6 +15,12 @@
 //!   caller's own schema-validation / field-mapping code run against realistic,
 //!   on-schema shapes without a model. A scripted structured reply keyed by
 //!   prompt (via [`FakeLlm::with_structured`]) overrides the derived shape.
+//! - **Outage** — [`FakeLlm::reachable`] with `false` makes every call fail the
+//!   way a down model does (a transport error, not `Ok(false)`), so callers can
+//!   test their offline path without a socket.
+//! - **Failing model** — [`FakeLlm::fail_completions`] keeps `health` answering
+//!   but makes every generation call fail, like a model that cannot load or
+//!   times out after the health check passed.
 //!
 //! It is intentionally tiny and synchronous-at-heart (the `async fn`s resolve
 //! immediately) — no I/O, no clock, no randomness, so every test is repeatable.
@@ -54,6 +60,8 @@ pub struct FakeLlm {
     replies: HashMap<String, String>,
     structured: HashMap<String, Value>,
     healthy: bool,
+    reachable: bool,
+    fail_completions: bool,
 }
 
 impl Default for FakeLlm {
@@ -75,6 +83,8 @@ impl FakeLlm {
             replies: HashMap::new(),
             structured: HashMap::new(),
             healthy: true,
+            reachable: true,
+            fail_completions: false,
         }
     }
 
@@ -111,6 +121,46 @@ impl FakeLlm {
     pub const fn healthy(mut self, healthy: bool) -> Self {
         self.healthy = healthy;
         self
+    }
+
+    /// Make the fake behave like an unreachable model when `reachable` is
+    /// `false`: [`LlmAdapter::health`], [`LlmAdapter::complete`] and
+    /// [`LlmAdapter::generate_structured`] all return
+    /// [`PhoskError::Invalid`], scripted replies included. Builder-style; the
+    /// default is reachable.
+    #[must_use]
+    pub const fn reachable(mut self, reachable: bool) -> Self {
+        self.reachable = reachable;
+        self
+    }
+
+    /// Make the fake behave like a model that is reachable but cannot answer
+    /// (it fails to load, or generation times out) when `fail` is `true`:
+    /// [`LlmAdapter::health`] still reports the [`Self::healthy`] state, while
+    /// [`LlmAdapter::complete`] and [`LlmAdapter::generate_structured`] return
+    /// [`PhoskError::Invalid`]. Builder-style; the default is to answer.
+    #[must_use]
+    pub const fn fail_completions(mut self, fail: bool) -> Self {
+        self.fail_completions = fail;
+        self
+    }
+
+    /// The error every generation call returns while completions fail.
+    fn generation_failure(&self) -> Result<(), PhoskError> {
+        if self.fail_completions {
+            Err(PhoskError::Invalid("fake llm completion failed".to_owned()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The transport-style error every call returns while unreachable.
+    fn outage(&self) -> Result<(), PhoskError> {
+        if self.reachable {
+            Ok(())
+        } else {
+            Err(PhoskError::Invalid("fake llm unreachable".to_owned()))
+        }
     }
 
     /// Build a placeholder JSON value of the `type` declared by a JSON-Schema
@@ -155,10 +205,13 @@ impl LlmAdapter for FakeLlm {
     }
 
     async fn health(&self) -> Result<bool, PhoskError> {
+        self.outage()?;
         Ok(self.healthy)
     }
 
     async fn complete(&self, prompt: &str) -> Result<String, PhoskError> {
+        self.outage()?;
+        self.generation_failure()?;
         if prompt.is_empty() {
             return Err(PhoskError::Invalid("empty prompt".to_owned()));
         }
@@ -174,6 +227,8 @@ impl LlmAdapter for FakeLlm {
         prompt: &str,
         json_schema: &Value,
     ) -> Result<Value, PhoskError> {
+        self.outage()?;
+        self.generation_failure()?;
         if prompt.is_empty() {
             return Err(PhoskError::Invalid("empty prompt".to_owned()));
         }

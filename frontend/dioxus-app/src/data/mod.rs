@@ -17,7 +17,7 @@
 //! `#[server]` async fn(s) a page calls through `use_resource`:
 //!
 //! * [`cycle`]        — shared current-cycle window (`CycleDto`); every page top-bar uses it.
-//! * [`ai`]           — shared assistant read (feed/chat/status) for the left `AiPanel`.
+//! * [`ai`]           — shared assistant (feed/status read, live chat) for the left `AiPanel`.
 //! * [`signals`]      — shared item-signal vocabulary (`SignalDto`, candidates, movers).
 //! * [`dashboard`]    — the composed dashboard read (REAL backend via `phosk_insights`).
 //! * [`transactions`] — receipt list, lines, receipt detail.
@@ -234,8 +234,7 @@ impl Session {
         self.stack.db.as_ref()
     }
 
-    /// The LLM port (Ollama) the AI write-tools and narrative insights use.
-    #[allow(dead_code)] // wired into AI/pipeline server fns as they land.
+    /// The LLM port (Ollama) the AI chat, write-tools and narrative insights use.
     pub(crate) fn llm(&self) -> &dyn phosk_adapter_llm::LlmAdapter {
         self.stack.llm.as_ref()
     }

@@ -23,8 +23,8 @@ use phosk_adapter_db::DatabaseAdapter;
 use phosk_adapter_llm::{FakeLlm, LlmAdapter};
 use phosk_ai::ai_spine::ai_panel;
 use phosk_ai::ai_tools::{
-    CONFIDENCE_THRESHOLD, ProposedWrite, ToolEffect, auto_categorize, chat_reply,
-    narrative_insight, suggest,
+    CHAT_REPLY_MAX_CHARS, CONFIDENCE_THRESHOLD, ProposedWrite, ToolEffect, auto_categorize,
+    chat_reply, narrative_insight, suggest,
 };
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
@@ -93,6 +93,50 @@ async fn chat_reply_empty_text_is_invalid_and_persists_nothing() {
     }
     let after = ai_panel(&db).await.expect("after").msgs.len();
     assert_eq!(after, before, "a rejected turn must not be persisted");
+}
+
+#[tokio::test]
+async fn chat_reply_model_failure_persists_nothing() {
+    let db = db();
+    let before = ai_panel(&db).await.expect("before").msgs;
+    for llm in [
+        FakeLlm::new().reachable(false),       // model down
+        FakeLlm::new().fail_completions(true), // healthy, then fails to answer
+    ] {
+        assert!(
+            chat_reply(&db, &llm, "am I on budget?").await.is_err(),
+            "a failed completion is an error"
+        );
+        assert_eq!(
+            ai_panel(&db).await.expect("after").msgs,
+            before,
+            "neither the user line nor a reply is saved when the model fails"
+        );
+    }
+}
+
+#[tokio::test]
+async fn chat_reply_bounds_the_saved_model_reply() {
+    let db = db();
+    let prompt =
+        "You are Phoskonomia's budgeting assistant. Answer the user concisely.\nUser: essay";
+    let llm = FakeLlm::new().with_reply(prompt, "é".repeat(CHAT_REPLY_MAX_CHARS * 3));
+    let reply = chat_reply(&db, &llm, "essay").await.expect("chat_reply ok");
+    assert_eq!(reply.text.chars().count(), CHAT_REPLY_MAX_CHARS + 1);
+    assert!(reply.text.ends_with('…'), "the cut is marked");
+    let saved = ai_panel(&db).await.expect("after").msgs;
+    assert_eq!(
+        saved.last().map(|m| &m.text),
+        Some(&reply.text),
+        "the bounded reply is what is saved"
+    );
+
+    // A reply at the limit is kept whole.
+    let db = crate::db();
+    let exact = "x".repeat(CHAT_REPLY_MAX_CHARS);
+    let llm = FakeLlm::new().with_reply(prompt, exact.clone());
+    let reply = chat_reply(&db, &llm, "essay").await.expect("chat_reply ok");
+    assert_eq!(reply.text, exact);
 }
 
 // ── narrative_insight: READ tool, sentence from the model, live model badge ───

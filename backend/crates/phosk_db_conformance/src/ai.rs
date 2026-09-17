@@ -51,7 +51,8 @@ pub async fn latest_chat_holds_the_seeded_transcript(db: &dyn DatabaseAdapter) -
 }
 
 /// Appended messages are stored verbatim and read back oldest→newest
-/// (they fall on distinct days; see the crate docs on same-day order).
+/// (they fall on distinct days; same-day append order is checked by the
+/// `phosk_adapter_db::contract` suite, see the crate docs).
 pub async fn append_message_reads_back_oldest_first(db: &dyn DatabaseAdapter) -> Outcome {
     let chat = seeded_chat(db).await?;
     let seeded = db.chat_messages(chat.id).await?;

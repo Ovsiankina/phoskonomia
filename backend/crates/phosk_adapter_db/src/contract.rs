@@ -58,7 +58,9 @@ pub async fn run_all(db: &dyn DatabaseAdapter) -> Result<(), String> {
     debts(db).await?;
     settings(db).await?;
     ai(db).await?;
+    chat_seed_order(db).await?;
     write_paths(db).await?;
+    chat_append_order(db).await?;
     Ok(())
 }
 
@@ -675,4 +677,61 @@ fn sample_line(receipt: phosk_id::ReceiptId, name: &str, cents: i64) -> phosk_mo
             confidence: 0.9,
         },
     }
+}
+
+/// `chat_messages` is ordered oldest→newest: the seeded transcript reads back
+/// question first, answer second.
+async fn chat_seed_order(db: &dyn DatabaseAdapter) -> Result<(), String> {
+    let chat = db
+        .latest_chat()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("a seed chat must exist")?;
+    let who: Vec<String> = db
+        .chat_messages(chat.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|m| m.who)
+        .collect();
+    check(
+        who == ["usr", "sys"],
+        format!("seed chat reads back usr then sys, got {who:?}"),
+    )
+}
+
+/// `chat_messages` returns lines in append order, even though every line of a
+/// turn carries the same `at` date and ids are random. Runs after
+/// [`write_paths`] has cleared the seed chat.
+async fn chat_append_order(db: &dyn DatabaseAdapter) -> Result<(), String> {
+    let chat = db
+        .latest_chat()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("a seed chat must exist")?;
+    let at = d(2026, 6, 19)?;
+    let sent: Vec<String> = (0..8).map(|i| format!("line {i}")).collect();
+    for (i, text) in sent.iter().enumerate() {
+        db.append_message(phosk_model::Message {
+            id: phosk_id::MessageId::new(),
+            chat_id: chat.id,
+            who: if i % 2 == 0 { "usr" } else { "sys" }.to_owned(),
+            text: text.clone(),
+            at,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    let got: Vec<String> = db
+        .chat_messages(chat.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    check(
+        got == sent,
+        format!("chat lines read back in append order: sent {sent:?}, got {got:?}"),
+    )?;
+    db.clear_chat(chat.id).await.map_err(|e| e.to_string())
 }

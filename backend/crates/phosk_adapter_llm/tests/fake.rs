@@ -66,6 +66,73 @@ async fn health_reports_configured_state() {
     );
 }
 
+/// An unreachable model (Ollama down) is a transport failure on every call:
+/// `health` errs (not `Ok(false)`), and so do both generation surfaces.
+#[tokio::test]
+async fn unreachable_fake_fails_every_call_like_a_down_model() {
+    let llm = FakeLlm::new().reachable(false);
+    let schema = json!({ "type": "object", "properties": {} });
+
+    assert!(matches!(llm.health().await, Err(PhoskError::Invalid(_))));
+    assert!(matches!(
+        llm.complete("hi").await,
+        Err(PhoskError::Invalid(_))
+    ));
+    assert!(matches!(
+        llm.generate_structured("hi", &schema).await,
+        Err(PhoskError::Invalid(_))
+    ));
+    // Scripted replies do not bypass the outage.
+    let scripted = FakeLlm::new().with_reply("ping", "pong").reachable(false);
+    assert!(scripted.complete("ping").await.is_err());
+    // Reachable is the default.
+    assert_eq!(
+        FakeLlm::new()
+            .reachable(true)
+            .complete("x")
+            .await
+            .expect("up"),
+        "echo: x"
+    );
+}
+
+/// A model that is reachable but fails to answer (fails to load, times out):
+/// `health` still reports the configured state, every generation call errs.
+#[tokio::test]
+async fn failing_completions_fake_is_healthy_but_never_answers() {
+    let llm = FakeLlm::new()
+        .with_reply("ping", "pong")
+        .fail_completions(true);
+    let schema = json!({ "type": "object", "properties": {} });
+
+    assert!(matches!(llm.health().await, Ok(true)));
+    assert!(matches!(
+        FakeLlm::new()
+            .healthy(false)
+            .fail_completions(true)
+            .health()
+            .await,
+        Ok(false)
+    ));
+    assert!(matches!(
+        llm.complete("ping").await,
+        Err(PhoskError::Invalid(_))
+    ));
+    assert!(matches!(
+        llm.generate_structured("hi", &schema).await,
+        Err(PhoskError::Invalid(_))
+    ));
+    // Answering is the default.
+    assert_eq!(
+        FakeLlm::new()
+            .fail_completions(false)
+            .complete("x")
+            .await
+            .expect("answers"),
+        "echo: x"
+    );
+}
+
 #[tokio::test]
 async fn structured_output_matches_schema_properties() {
     let llm = FakeLlm::new();

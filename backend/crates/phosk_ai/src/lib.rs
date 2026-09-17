@@ -28,6 +28,6 @@ pub use ai_spine::{
     AiChatMsgDto, AiFeedItemDto, AiPanelDto, AiStatusDto, ai_panel, clear_chat, send_message,
 };
 pub use ai_tools::{
-    CONFIDENCE_THRESHOLD, ProposedWrite, ToolEffect, auto_categorize, chat_reply,
-    narrative_insight, suggest,
+    CHAT_REPLY_MAX_CHARS, CONFIDENCE_THRESHOLD, ProposedWrite, ToolEffect, auto_categorize,
+    chat_reply, narrative_insight, suggest,
 };
