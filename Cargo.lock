@@ -1690,6 +1690,7 @@ dependencies = [
  "phosk_planning",
  "phosk_recurring",
  "phosk_storage_fs",
+ "rfd",
  "serde",
  "tokio",
  "uuid",

@@ -405,6 +405,7 @@ pub fn BudgetsPage() -> Element {
                                     }
                                 }
                                 div { class: "bud-controls",
+                                    crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Budget }
                                     div { class: "modes",
                                         span { class: "mlbl", "SORT" }
                                         button {
