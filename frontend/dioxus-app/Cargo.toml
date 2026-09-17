@@ -69,6 +69,13 @@ phosk_ocr_vision = { path = "../../backend/crates/phosk_ocr_vision", optional = 
 # the WASM client.
 tokio = { version = "1", features = ["sync"], optional = true }
 
+# Desktop only: the native "save as" dialog of the CSV export button. The web
+# `data:` download link cannot work in the desktop webview (the Dioxus desktop
+# interpreter reroutes every `<a>` click to the OS URL opener). dioxus-desktop
+# already depends on this exact version with these features, so enabling it
+# adds no crate to the tree. Never in the WASM client or the server build.
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
+
 # WASM client (`web`) only: the shared domain types (`phosk_id`/`phosk_model`)
 # pull in `uuid` with v4, which needs a randomness source to even COMPILE on
 # `wasm32-unknown-unknown`. The client only ever DESERIALIZES ids off the wire
@@ -78,10 +85,17 @@ tokio = { version = "1", features = ["sync"], optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
 
+# Test-only, both already workspace dependencies used the same way by the
+# backend crates: `tokio` drives the async `#[server]` fn tests
+# (`#[tokio::test]`), `serde_json` asserts the view structs' wire form.
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-desktop = ["dioxus/desktop", "server-deps"]
+desktop = ["dioxus/desktop", "server-deps", "dep:rfd"]
 mobile = ["dioxus/mobile", "server-deps"]
 server = ["dioxus/server", "server-deps"]
 server-deps = [

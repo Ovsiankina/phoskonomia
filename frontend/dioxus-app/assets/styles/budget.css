@@ -145,3 +145,24 @@
 .insp-step { display: flex; align-items: center; gap: 12px; }
 .insp-step .cs { width: 34px; height: 30px; font-size: 17px; }
 .insp-step .cv { font-family: var(--font-display); font-size: 22px; color: var(--ink); }
+
+/* ---- inline cap edit (click the cap value; tokens only) ---- */
+.cap-val { background: none; border: 0; border-bottom: var(--bw-hair) dashed var(--hairline); border-radius: var(--r-0);
+  padding: 0; cursor: text; transition: color .12s, border-color .12s, text-shadow .12s; }
+.cap-val:not(:disabled):hover, .cap-val:focus-visible { outline: none; color: var(--indigo-neon); border-bottom-color: var(--indigo-neon); text-shadow: var(--glow-indigo); }
+.cap-edit { display: flex; flex-direction: column; align-items: flex-end; min-width: 0; }
+.insp-cap .cap-edit { align-items: flex-start; }
+.cap-in { display: flex; align-items: baseline; gap: var(--s-1); padding: var(--s-1) var(--s-2); cursor: text;
+  background: var(--bg-inset); border: var(--bw-hair) solid var(--indigo-neon); border-radius: var(--r-1); box-shadow: var(--glow-indigo); }
+.cap-in .cur { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag); color: var(--ink-3); }
+.cap-in input { width: var(--s-7); min-width: 0; padding: 0; background: transparent; border: 0; border-radius: var(--r-0);
+  color: var(--ink); font-family: var(--font-display); font-size: var(--t-sm); }
+.insp-step .cap-in input { width: calc(var(--s-8) + var(--s-5)); font-size: var(--t-h3); }
+.cap-in input:focus { outline: none; }
+.cap-act { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag); text-transform: uppercase;
+  padding: var(--s-1) var(--s-2); background: var(--bg-chip); color: var(--ink-2); cursor: pointer;
+  border: var(--bw-hair) solid var(--hairline); border-radius: var(--r-2); transition: background .12s, color .12s, border-color .12s; }
+.cap-act:hover { background: var(--bg-chip-hi); color: var(--ink); border-color: var(--indigo-neon); }
+.cap-act.ok { color: var(--indigo-neon); border-color: var(--indigo-neon); }
+.cap-act.ok:hover { box-shadow: var(--glow-indigo); text-shadow: var(--glow-indigo); }
+.cap-act:disabled, .cap-in input[readonly], .cap-val:disabled { cursor: progress; opacity: .5; }

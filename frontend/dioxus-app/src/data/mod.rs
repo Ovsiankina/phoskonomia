@@ -22,6 +22,7 @@
 //! * [`dashboard`]    — the composed dashboard read (REAL backend via `phosk_insights`).
 //! * [`transactions`] — receipt list, lines, receipt detail.
 //! * [`budgets`]      — envelopes, budget totals, allocation, category inspector.
+//! * [`csv_export`]   — CSV export of the transactions / budget / subscriptions lists.
 //! * [`subscriptions`]— standing charges, stats, billing sweep, detail.
 //! * [`debts`]        — open balances, stats, payoff trajectory, IOU ledger, detail.
 //! * [`analytics`]    — spend history, momentum, weekday rhythm, movers, insights.
@@ -37,9 +38,9 @@
 //! ## "Today" & the seed
 //!
 //! The deterministic Swiss seed pins the demo clock to **2026-06-18** (day 18 of
-//! the June cycle). Server fns resolve `as_of` via [`today`] and, where real logic
-//! exists (dashboard), drive it against `MemoryDb::seeded()`. All other reads are
-//! seeded mock values shaped exactly like the design.
+//! the June cycle). Server fns resolve `as_of` via [`today`] and drive the real
+//! feature services through the `Session` ports (the seeded `MemoryDb` by
+//! default). Tests live in `tests/` (see its module doc).
 //!
 //! F1 provides only the [`chf`] presentation formatter below (the one thing
 //! carried from React `data/phosk.js`); everything else is F3's.
@@ -49,6 +50,7 @@ use phosk_core::money::Money;
 pub mod ai;
 pub mod analytics;
 pub mod budgets;
+pub mod csv_export;
 pub mod cycle;
 pub mod dashboard;
 pub mod debts;
@@ -181,11 +183,27 @@ mod composition {
         Arc::new(phosk_adapter_ocr::FakeOcr::new())
     }
 
+    /// The stack unit tests run against: the seeded memory DB plus the
+    /// in-process fakes. It reads no `PHOSK_*` env, opens no socket and writes
+    /// no file, so `#[server]` fn tests are deterministic on any machine.
+    fn hermetic_stack() -> Result<Stack, phosk_core::error::PhoskError> {
+        Ok(Stack {
+            db: Arc::new(phosk_db_memory::MemoryDb::seeded()?),
+            llm: Arc::new(phosk_adapter_llm::FakeLlm::new()),
+            storage: Arc::new(phosk_adapter_storage::InMemoryStorage::new()),
+            ocr: Arc::new(phosk_adapter_ocr::FakeOcr::new()),
+        })
+    }
+
     /// Assemble (or return the cached) process-wide [`Stack`]. The first call
     /// opens the store / probes OCR; every later call is a cheap cache hit.
+    /// Test builds get [`hermetic_stack`] instead.
     pub(crate) async fn stack() -> Result<&'static Stack, phosk_core::error::PhoskError> {
         STACK
             .get_or_try_init(|| async {
+                if cfg!(test) {
+                    return hermetic_stack();
+                }
                 Ok(Stack {
                     db: build_db().await?,
                     llm: build_llm()?,
@@ -269,20 +287,28 @@ pub(crate) async fn build_session() -> Result<Session, dioxus::prelude::ServerFn
 /// Swiss-currency formatter: apostrophe thousands, dot decimal, `−` for negatives
 /// (e.g. `CHF 1'234.50` renders `1’234.50`, `-12.5` renders `−12.50`).
 ///
-/// Faithful port of React `data/phosk.js` `chf()`. Takes exact [`Money`] (never a
-/// float) and formats to `dp` decimal places (default 2). NOTE: every numeric
+/// Port of the design export's `chf(n, dp)`. Takes exact [`Money`] (never a
+/// float) and formats to `dp` decimal places (default 2), rounding half away
+/// from zero like its `toFixed(dp)` (so `12.50` at `dp = 0` is `13`, not `12`),
+/// but in exact integer arithmetic. NOTE: every numeric
 /// value the UI shows must render in the Pilowlava display font (design law) —
 /// this only produces the string; the page applies the font.
 #[must_use]
 pub fn chf(amount: Money, dp: usize) -> String {
     let centimes = amount.centimes();
     let neg = centimes < 0;
+    // `u64` holds |i64::MIN| + 50, so neither the abs nor the rounding overflows.
     let abs = centimes.unsigned_abs();
 
-    // Build the value scaled to `dp` decimals from exact centimes (2 decimals).
-    // Render franc.cc first, then re-trim/pad to `dp`.
-    let whole = abs / 100;
-    let cents = (abs % 100) as u8;
+    // Round the exact centimes to `min(dp, 2)` decimals; `dp > 2` pads zeros.
+    let (whole, frac) = match dp {
+        0 => ((abs + 50) / 100, String::new()),
+        1 => {
+            let tenths = (abs + 5) / 10;
+            (tenths / 10, (tenths % 10).to_string())
+        }
+        _ => (abs / 100, format!("{:02}{}", abs % 100, "0".repeat(dp - 2))),
+    };
 
     // Group the integer part with apostrophe thousands separators.
     let int_str = whole.to_string();
@@ -303,16 +329,7 @@ pub fn chf(amount: Money, dp: usize) -> String {
     out.push_str(&grouped);
     if dp > 0 {
         out.push('.');
-        // Two centime digits, then pad/truncate to dp.
-        let two = format!("{cents:02}");
-        if dp <= 2 {
-            out.push_str(&two[..dp]);
-        } else {
-            out.push_str(&two);
-            for _ in 0..(dp - 2) {
-                out.push('0');
-            }
-        }
+        out.push_str(&frac);
     }
     out
 }
@@ -323,3 +340,6 @@ pub fn chf(amount: Money, dp: usize) -> String {
 pub fn chf2(amount: Money) -> String {
     chf(amount, 2)
 }
+
+#[cfg(test)]
+mod tests;

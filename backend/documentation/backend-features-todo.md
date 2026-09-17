@@ -2,8 +2,8 @@
 
 > **SUPERSEDED by [`ROADMAP.md`](../../ROADMAP.md).** This list is kept for
 > historical context only. Its checkboxes were never maintained and do not
-> reflect what is built, and it describes the `phosk_api` REST surface, which is
-> frozen legacy (front↔back is Dioxus `#[server]` fns). Track work in
+> reflect what is built, and it describes the `phosk_api` REST surface, which has
+> been deleted (front↔back is Dioxus `#[server]` fns). Track work in
 > `ROADMAP.md`; do not tick boxes here.
 
 Everything the backend must implement to turn the `phosk_api` `501`s green and

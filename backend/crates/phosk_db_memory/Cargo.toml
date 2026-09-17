@@ -28,6 +28,9 @@ tokio = { workspace = true }
 # Re-list the PORT crate with the `contract` feature so tests can run the shared
 # conformance suite (ADR: memory + surreal kept in lockstep on the SAME seed).
 phosk_adapter_db = { path = "../phosk_adapter_db", features = ["contract"] }
+# The per-check conformance suite (`tests/conformance.rs`): one test per port
+# behaviour, shared with the other adapter.
+phosk_db_conformance = { path = "../phosk_db_conformance" }
 
 [lints]
 workspace = true

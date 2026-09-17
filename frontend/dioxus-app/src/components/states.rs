@@ -110,6 +110,35 @@ pub fn AwaitingInline(
     }
 }
 
+/// One-line status under a control that edits in place (a cap field, a row
+/// action): the pending note while a save is in flight, otherwise the error the
+/// save returned, otherwise nothing.
+///
+/// The compact sibling of [`Awaiting`]: HUD micro caps in VG5000, indigo while
+/// pending, the `--alert` token on failure. `role` lets assistive tech announce
+/// the change.
+#[component]
+pub fn InlineStatus(
+    #[props(default = false)] pending: bool,
+    #[props(default)] error: Option<String>,
+    #[props(default = String::from("Saving…"))] pending_label: String,
+) -> Element {
+    let base = "display:block;margin-top:var(--s-1);font-family:var(--font-body);\
+                font-size:var(--t-xs);line-height:var(--lh-snug);\
+                letter-spacing:var(--tracking-tag);text-transform:uppercase";
+    if pending {
+        rsx! {
+            span { role: "status", style: "{base};color:var(--indigo-3)", "⌁ {pending_label}" }
+        }
+    } else if let Some(msg) = error {
+        rsx! {
+            span { role: "alert", style: "{base};color:var(--alert)", "⚠ {msg}" }
+        }
+    } else {
+        rsx! {}
+    }
+}
+
 /// A single placeholder value for a KPI numeral when totals haven't loaded.
 ///
 /// Faithful port of `states.jsx` `Dash` (exported as `PhoskDash` on `window`):

@@ -6,6 +6,7 @@
 //!   * `prims`  — primitives: ScannerBg, Dot, HudCell, Spark, CatBar, PhoskChart,
 //!     SavingsDial (React `prims.jsx`).
 //!   * `comps`  — composite UI pieces (React `comps.jsx`).
+//!   * `csv_export` — the CSV export button of the list page headers.
 //!   * `shell`  — TopBar + left Nav sidebar — EVERY page must render these
 //!     (React `shell.jsx`).
 //!   * `states` — empty / loading states (React `states.jsx`).
@@ -15,6 +16,7 @@
 //! relocate it into `prims` if preferred, keeping the public name `ScannerBg`.
 
 pub mod comps;
+pub mod csv_export;
 pub mod prims;
 pub mod shell;
 pub mod states;
