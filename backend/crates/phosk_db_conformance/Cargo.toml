@@ -1,0 +1,26 @@
+# phosk_db_conformance — the shared `DatabaseAdapter` conformance suite.
+#
+# Test-support crate, never shipped: one async check per port behaviour, plus
+# the `database_adapter_conformance!` macro that stamps out one `#[tokio::test]`
+# per check for a given adapter factory. Each concrete adapter
+# (`phosk_db_memory`, `phosk_db_surreal`) invokes the macro from its own
+# `tests/conformance.rs` (a dev-dependency), so both run the SAME assertions.
+#
+# Layering: depends only on the PORT, the domain and the foundation crates —
+# never on a concrete adapter. The generated tests use the CALLING crate's
+# `tokio` dev-dependency, so tokio is not a dependency here.
+[package]
+name = "phosk_db_conformance"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+phosk_adapter_db = { path = "../phosk_adapter_db" }
+phosk_core = { path = "../phosk_core" }
+phosk_id = { path = "../phosk_id" }
+phosk_model = { path = "../phosk_model" }
+chrono = { workspace = true }
+
+[lints]
+workspace = true
