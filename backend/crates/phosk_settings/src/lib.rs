@@ -3,8 +3,9 @@
 //! This crate is the service that backs the `/config` page. It composes the
 //! [`Preference`] records behind the [`DatabaseAdapter`] PORT into the serde
 //! DTOs the Dioxus `#[server]` fns return verbatim (camelCase keys), and exposes
-//! the write paths (`set` / `reset` a preference) plus the canonical
-//! [`momentum_baseline_cycles`] accessor.
+//! the write paths (`set` / `reset` a preference), the known-key rule table
+//! ([`PREFERENCE_RULES`]) with its [`validate_preference`] check for user input,
+//! plus the canonical [`momentum_baseline_cycles`] accessor.
 //!
 //! [`momentum_baseline_cycles`] is the single source of truth for the trailing-N
 //! momentum baseline (build-contract §6): every analytics / signal service that
@@ -26,6 +27,7 @@
 pub mod preferences;
 
 pub use preferences::{
-    PreferenceDto, SettingsSummaryDto, momentum_baseline_cycles, preferences, reset_preference,
-    set_preference, settings_summary,
+    PREFERENCE_RULES, PreferenceDto, PreferenceRule, SettingsSummaryDto, momentum_baseline_cycles,
+    preference_rule, preferences, reset_preference, set_preference, settings_summary,
+    validate_preference,
 };

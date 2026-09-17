@@ -388,3 +388,161 @@ async fn momentum_baseline_cycles_reads_a_larger_explicit_setting() {
         .expect("momentum_baseline_cycles should succeed");
     assert_eq!(n, 12, "N is a user setting, not capped at the default");
 }
+
+// ── validate_preference(): the authoritative write rule for user input ──────
+
+use phosk_core::error::PhoskError;
+use phosk_model::Source;
+use phosk_settings::preferences::{PREFERENCE_RULES, preference_rule, validate_preference};
+
+#[test]
+fn every_seeded_key_has_a_rule_whose_default_is_the_seeded_value() {
+    assert_eq!(
+        PREFERENCE_RULES.len(),
+        SEEDED.len(),
+        "one rule per seeded key"
+    );
+    for (key, value, _, _) in SEEDED {
+        let rule = preference_rule(key).unwrap_or_else(|| panic!("rule for `{key}`"));
+        assert_eq!(rule.default, value, "factory default of `{key}`");
+        assert!(
+            validate_preference(key, rule.default).is_ok(),
+            "the default of `{key}` must itself be a valid value"
+        );
+    }
+}
+
+#[test]
+fn validate_preference_rejects_an_unknown_key() {
+    let err = validate_preference("theme", "dark").expect_err("unknown key must be rejected");
+    assert!(matches!(err, PhoskError::Invalid(_)), "got {err:?}");
+    assert!(preference_rule("theme").is_none());
+}
+
+#[test]
+fn validate_preference_accepts_momentum_baseline_one_to_twelve() {
+    for n in 1..=12 {
+        let v = n.to_string();
+        assert!(
+            validate_preference("momentum_baseline_cycles", &v).is_ok(),
+            "{n} cycles must be accepted"
+        );
+    }
+}
+
+#[test]
+fn validate_preference_rejects_bad_momentum_baselines() {
+    for bad in ["0", "13", "-2", "not-a-number", " 3", "3.0", ""] {
+        let err = validate_preference("momentum_baseline_cycles", bad)
+            .expect_err("out-of-range / malformed baseline must be rejected");
+        assert!(matches!(err, PhoskError::Invalid(_)), "{bad:?} → {err:?}");
+    }
+}
+
+#[test]
+fn validate_preference_never_lowers_the_confidence_floor() {
+    for ok in ["0.7", "0.8", "0.9"] {
+        assert!(
+            validate_preference("low_confidence_threshold", ok).is_ok(),
+            "{ok}"
+        );
+    }
+    for bad in ["0.6", "0.5", "0", "0.75", "1.5", "NaN", "0.70"] {
+        assert!(
+            validate_preference("low_confidence_threshold", bad).is_err(),
+            "{bad:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn validate_preference_locks_currency_cycle_period_and_telemetry() {
+    assert!(
+        validate_preference("currency", "EUR").is_err(),
+        "money is CHF-only"
+    );
+    assert!(
+        validate_preference("cycle_period", "week").is_err(),
+        "cycles are monthly"
+    );
+    assert!(
+        validate_preference("telemetry", "on").is_err(),
+        "zero telemetry"
+    );
+    for key in ["currency", "cycle_period", "telemetry"] {
+        let rule = preference_rule(key).expect("known key");
+        assert_eq!(
+            rule.allowed,
+            [rule.default],
+            "`{key}` is fixed to its default"
+        );
+    }
+}
+
+#[test]
+fn validate_preference_messages_do_not_echo_caller_input() {
+    let marker = "zz-caller-input-zz";
+    let unknown = validate_preference(marker, "x").expect_err("unknown key");
+    let bad_value = validate_preference("currency", marker).expect_err("bad value");
+    for err in [unknown, bad_value] {
+        assert!(
+            !err.to_string().contains(marker),
+            "error text must not echo caller input: {err}"
+        );
+    }
+}
+
+// ── PreferenceDto::user_modified ────────────────────────────────────────────
+
+#[tokio::test]
+async fn preference_dto_flags_user_modified_rows() {
+    let db = seeded_db();
+    let prefs = preferences(&db).await.expect("preferences should succeed");
+    for (key, _, _, _) in SEEDED {
+        let expected = matches!(key, "low_confidence_threshold" | "telemetry");
+        assert_eq!(
+            find(&prefs, key).user_modified,
+            expected,
+            "userModified of `{key}`"
+        );
+    }
+}
+
+#[tokio::test]
+async fn preference_dto_user_modified_follows_set_and_reset() {
+    let db = seeded_db();
+    set_preference(&db, "cycle_period", "month")
+        .await
+        .expect("set_preference should succeed");
+    reset_preference(&db, "telemetry")
+        .await
+        .expect("reset_preference should succeed");
+
+    let prefs = preferences(&db).await.expect("preferences should succeed");
+    assert!(
+        find(&prefs, "cycle_period").user_modified,
+        "a set stamps UserModified"
+    );
+    assert!(
+        !find(&prefs, "telemetry").user_modified,
+        "a reset clears it"
+    );
+
+    let stored = phosk_adapter_db::DatabaseAdapter::preference(&db, "telemetry")
+        .await
+        .expect("telemetry is stored");
+    assert_eq!(stored.provenance.source, Source::RuleGenerated);
+}
+
+#[tokio::test]
+async fn preference_dto_serializes_user_modified_camel_case() {
+    let db = seeded_db();
+    let prefs = preferences(&db).await.expect("preferences should succeed");
+    let json = serde_json::to_value(find(&prefs, "telemetry")).expect("serialize");
+    assert_eq!(
+        json.get("userModified")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert!(json.get("user_modified").is_none());
+}

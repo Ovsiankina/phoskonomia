@@ -676,19 +676,27 @@ Spec: `backend-features-todo.md §6` (no dioxus DTO file yet — derive shapes f
 `/config` page). Minimal DTOs:
 
 ```rust
-pub struct PreferenceDto { pub key: String, pub value: String, pub surface: String, pub storedOnDevice: bool }
+pub struct PreferenceDto { pub key: String, pub value: String, pub surface: String, pub storedOnDevice: bool, pub userModified: bool }
 pub struct SettingsSummaryDto { pub total_preferences: u32, pub changed_count: u32, pub engine: String, pub model: String }
+pub struct PreferenceRule { pub key: &'static str, pub default: &'static str, pub allowed: &'static [&'static str] }
+pub const PREFERENCE_RULES: &[PreferenceRule]; // the known keys, factory defaults, allowed values
 
 pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>, PhoskError>;
 pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummaryDto, PhoskError>;
 pub async fn set_preference(db: &dyn DatabaseAdapter, key: &str, value: &str) -> Result<(), PhoskError>;
 pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(), PhoskError>;
+/// Check user input against PREFERENCE_RULES (unknown key / disallowed value → Invalid):
+pub fn validate_preference(key: &str, value: &str) -> Result<&'static PreferenceRule, PhoskError>;
 /// THE momentum-baseline accessor every analytics/signal service reads:
 pub async fn momentum_baseline_cycles(db: &dyn DatabaseAdapter) -> Result<u32, PhoskError>; // default 3
 ```
 
 `momentum_baseline_cycles` reads the `Preference` key, parses to `u32`, defaults to `3` on
 `NotFound` or parse failure. `changed_count` = prefs whose `provenance.source == UserModified`.
+`set_preference` is the raw store write; every path that takes user input (the `/config`
+`#[server]` fns) calls `validate_preference` first. Allowed values: `momentum_baseline_cycles`
+1–12, `low_confidence_threshold` 0.7/0.8/0.9; `currency` (CHF), `cycle_period` (month) and
+`telemetry` (off) are fixed to their defaults.
 
 `Cargo.toml` deps: `phosk_core`, `phosk_model`, `phosk_adapter_db`, `phosk_id`, `serde`, `tracing`;
 dev: `phosk_db_memory`, `serde_json`, `tokio`.
