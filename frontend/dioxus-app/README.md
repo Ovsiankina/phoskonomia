@@ -58,6 +58,12 @@ cargo check --no-default-features --features server   # server side
 cargo check --target wasm32-unknown-unknown            # WASM client side
 ```
 
+This crate's own tests run on the server side:
+
+```bash
+cargo test --no-default-features --features server
+```
+
 The backend gates (from the repository root) exclude this crate:
 
 ```bash

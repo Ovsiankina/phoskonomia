@@ -1240,7 +1240,7 @@ mod core_prefs_tests {
     use super::*;
 
     #[test]
-    fn numeric_values_render_in_pilowlava() {
+    fn is_numeric_accepts_only_digit_and_dot_values() {
         for v in ["3", "12", "0.7"] {
             assert!(is_numeric(v), "{v} is a number");
         }
