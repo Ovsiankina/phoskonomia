@@ -250,11 +250,18 @@ impl Store {
 
     /// Fetch and deserialize every record in `bucket`, oldest write first (by
     /// the sequence number [`Store::put_in_sequence`] stamps). Records written
-    /// without one sort first, in no defined order among themselves.
-    pub(crate) async fn list_in_insertion_order<T: DeserializeOwned>(
+    /// without one sort first, ordered among themselves by `tiebreak` (sequence
+    /// numbers are unique, so it never reorders sequenced records).
+    pub(crate) async fn list_in_insertion_order<T, K, F>(
         &self,
         bucket: Bucket,
-    ) -> Result<Vec<T>, PhoskError> {
+        tiebreak: F,
+    ) -> Result<Vec<T>, PhoskError>
+    where
+        T: DeserializeOwned,
+        K: Ord,
+        F: Fn(&T) -> K,
+    {
         // A missing `seq` cannot be decoded as an `Option`, so default it here.
         let sql = "SELECT doc, seq ?? 0 AS seq FROM type::table($tb)";
         let mut res = self
@@ -263,17 +270,21 @@ impl Store {
             .bind(("tb", bucket.table()))
             .await
             .map_err(|e| Self::map_err("list-seq", &e))?;
-        let mut rows: Vec<SequencedDoc> = res
+        let rows: Vec<SequencedDoc> = res
             .take(0)
             .map_err(|e| Self::map_err("list-seq-take", &e))?;
-        rows.sort_by_key(|row| row.seq);
-        rows.into_iter()
+        let mut records = rows
+            .into_iter()
             .map(|row| {
-                serde_json::from_str(&row.doc).map_err(|e| {
-                    PhoskError::Invalid(format!("deserialize {}: {e}", bucket.table()))
-                })
+                serde_json::from_str::<T>(&row.doc)
+                    .map(|value| (row.seq, value))
+                    .map_err(|e| {
+                        PhoskError::Invalid(format!("deserialize {}: {e}", bucket.table()))
+                    })
             })
-            .collect()
+            .collect::<Result<Vec<(i64, T)>, PhoskError>>()?;
+        records.sort_by_key(|(seq, value)| (*seq, tiebreak(value)));
+        Ok(records.into_iter().map(|(_, value)| value).collect())
     }
 
     /// Move the process-wide sequence past every number already stored in

@@ -595,8 +595,12 @@ impl DatabaseAdapter for SurrealDb {
     }
 
     async fn chat_messages(&self, chat: ChatId) -> Result<Vec<Message>, PhoskError> {
-        // Oldest→newest per the port: a plain table scan has no order.
-        let all: Vec<Message> = self.store.list_in_insertion_order(Bucket::Message).await?;
+        // Oldest→newest per the port: a plain table scan has no order. Lines
+        // stored before sequencing (no `seq`) fall back to date order.
+        let all: Vec<Message> = self
+            .store
+            .list_in_insertion_order(Bucket::Message, |m: &Message| m.at)
+            .await?;
         Ok(all.into_iter().filter(|m| m.chat_id == chat).collect())
     }
 
@@ -798,6 +802,42 @@ mod tests {
         assert_eq!(texts, ["no sequence", "earlier run", "after reopen"]);
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Chat lines stored before sequencing (no `seq`) read back oldest-first by
+    /// date, whatever their record-key order, and ahead of sequenced lines.
+    #[tokio::test]
+    async fn unsequenced_chat_lines_read_back_in_date_order() {
+        let db = SurrealDb::memory().await.expect("mem engine");
+        let chat_id = phosk_id::ChatId::new();
+        let line = |text: &str, at: NaiveDate| Message {
+            id: phosk_id::MessageId::new(),
+            chat_id,
+            who: "usr".to_owned(),
+            text: text.to_owned(),
+            at,
+        };
+        // The record keys scan in the opposite order of the dates.
+        for (key, legacy) in [
+            ("a", line("newer legacy", naive(2026, 6, 3))),
+            ("b", line("older legacy", naive(2026, 6, 1))),
+        ] {
+            db.store
+                .put(Bucket::Message, key, &legacy)
+                .await
+                .expect("legacy write");
+        }
+        db.append_message(line("sequenced", naive(2026, 5, 1)))
+            .await
+            .expect("append");
+        let texts: Vec<String> = db
+            .chat_messages(chat_id)
+            .await
+            .expect("messages")
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(texts, ["older legacy", "newer legacy", "sequenced"]);
     }
 
     /// A tiny random suffix so concurrent test runs use distinct store dirs
