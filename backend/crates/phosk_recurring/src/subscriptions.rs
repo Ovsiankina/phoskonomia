@@ -43,7 +43,7 @@ const fn next_month(year: i32, month: u32) -> (i32, u32) {
 }
 
 /// The 1-based month number for an upper-case abbreviation (`"FEB"` ⇒ 2).
-fn month_from_abbr(abbr: &str) -> Option<u32> {
+pub(crate) fn month_from_abbr(abbr: &str) -> Option<u32> {
     MONTHS
         .iter()
         .position(|m| m.eq_ignore_ascii_case(abbr))

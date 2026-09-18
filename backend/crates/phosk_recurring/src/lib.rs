@@ -8,6 +8,9 @@
 //!   sweep, inspector) and the dashboard recurring panel. Mirrors the wire DTOs
 //!   in `frontend/dioxus-app/src/data/subscriptions.rs` and the dashboard
 //!   `RecurringDto`/`RecurringListDto`.
+//! - [`subscription_write`] — the subscription write path: create, edit and
+//!   delete a standing charge (input validation + `Provenance`; the lifecycle
+//!   transitions are a separate concern).
 //! - [`recurring_detect`] — the AI recurring-detection pre-pass: scan receipts
 //!   for repeated same-shop/same-amount monthly charges and surface candidate
 //!   subscriptions (`source == LlmInferred`); confirming one flips it to
@@ -29,4 +32,5 @@
 //! [`PhoskError`]: phosk_core::error::PhoskError
 
 pub mod recurring_detect;
+pub mod subscription_write;
 pub mod subscriptions;
