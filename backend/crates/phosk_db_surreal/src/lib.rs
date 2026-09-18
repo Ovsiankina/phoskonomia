@@ -440,6 +440,24 @@ impl DatabaseAdapter for SurrealDb {
         Ok(id)
     }
 
+    async fn delete_subscription(&self, id: SubscriptionId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self
+            .store
+            .get::<Subscription>(Bucket::Subscription, &key)
+            .await?
+            .is_none()
+        {
+            return Err(PhoskError::NotFound(format!("subscription {id}")));
+        }
+        // Cascade: a charge without its subscription is an orphan.
+        let charges: Vec<Charge> = self.store.list(Bucket::Charge).await?;
+        for c in charges.iter().filter(|c| c.subscription_id == id) {
+            self.store.delete(Bucket::Charge, &c.id.to_string()).await?;
+        }
+        self.store.delete(Bucket::Subscription, &key).await
+    }
+
     async fn record_charge(&self, c: Charge) -> Result<(), PhoskError> {
         self.store.put(Bucket::Charge, &c.id.to_string(), &c).await
     }

@@ -257,6 +257,15 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError`] if the store rejects the write.
     async fn upsert_subscription(&self, s: Subscription) -> Result<SubscriptionId, PhoskError>;
 
+    /// Delete a [`Subscription`] **and every [`Charge`] recorded against it** —
+    /// a charge has no meaning without its subscription, so the cascade is part
+    /// of the port contract rather than the caller's job.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no subscription has that id (so a second
+    /// delete of the same id reports it), or any store failure.
+    async fn delete_subscription(&self, id: SubscriptionId) -> Result<(), PhoskError>;
+
     /// Record a billing [`Charge`].
     ///
     /// # Errors
@@ -560,6 +569,9 @@ mod tests {
             _s: Subscription,
         ) -> Result<SubscriptionId, PhoskError> {
             Ok(SubscriptionId::new())
+        }
+        async fn delete_subscription(&self, _id: SubscriptionId) -> Result<(), PhoskError> {
+            Ok(())
         }
         async fn record_charge(&self, _c: Charge) -> Result<(), PhoskError> {
             Ok(())
