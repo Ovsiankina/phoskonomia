@@ -484,6 +484,18 @@ impl DatabaseAdapter for MemoryDb {
         Ok(id)
     }
 
+    async fn delete_subscription(&self, id: SubscriptionId) -> Result<(), PhoskError> {
+        let mut subs = lock(&self.subscriptions)?;
+        let before = subs.len();
+        subs.retain(|s| s.id != id);
+        if subs.len() == before {
+            return Err(PhoskError::NotFound(format!("subscription {id}")));
+        }
+        // Cascade: a charge without its subscription is an orphan.
+        lock(&self.charges)?.retain(|c| c.subscription_id != id);
+        Ok(())
+    }
+
     async fn record_charge(&self, c: Charge) -> Result<(), PhoskError> {
         lock(&self.charges)?.push(c);
         Ok(())

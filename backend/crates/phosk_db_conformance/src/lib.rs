@@ -81,6 +81,7 @@ macro_rules! database_adapter_conformance {
             recurring::subscriptions_lookup_by_id_and_slug_agree,
             recurring::upsert_subscription_inserts_then_replaces,
             recurring::subscription_charges_are_scoped_and_oldest_first,
+            recurring::delete_subscription_removes_it_and_its_charges,
             debts::debts_lookup_by_id_and_slug_agree,
             debts::upsert_debt_inserts_then_replaces,
             debts::debt_payments_are_scoped_and_oldest_first,

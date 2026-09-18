@@ -38,7 +38,7 @@ test) + input validation + `Provenance` + errors via `PhoskError`. No UI.
 - [ ] **T11** — `phosk_ledger`: `edit_transaction` (category, shop, fixed, date, amount → `UserModified`) and `delete_transaction` (needs: T10)
 - [ ] **T12** — `phosk_ledger`: category create / rename / delete-if-empty (needs: T04)
 - [ ] **T13** — `phosk_ledger`: category merge and split, re-pointing historical line items atomically (needs: T12)
-- [ ] **T14** — `phosk_recurring`: subscription create / edit / delete (needs: T04)
+- [x] **T14** — `phosk_recurring`: subscription create / edit / delete (needs: T04)
 - [ ] **T15** — `phosk_recurring`: lifecycle — pause, resume, cancel, mark-paid, record charge; derived status stays correct (needs: T14)
 - [ ] **T16** — `phosk_debts`: debt create / edit / delete, record payment, extra payment; amortisation outputs stay correct (needs: T04)
 - [ ] **T17** — `phosk_debts`: plan adjust (monthly/day/term) and refinance (needs: T16)
