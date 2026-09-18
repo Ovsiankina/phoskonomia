@@ -41,7 +41,8 @@ use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
-    AlertId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId, SuggestionId,
+    AlertId, CategoryId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId,
+    SuggestionId,
 };
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
@@ -176,6 +177,29 @@ impl MemoryDb {
             messages: Mutex::new(messages),
             ai_suggestions: Mutex::new(ai_suggestions),
         })
+    }
+}
+
+impl MemoryDb {
+    /// Whether any stored row still names `category` — the guard behind
+    /// `delete_category` (receipts, their lines, subscriptions and signals).
+    fn category_is_referenced(&self, category: &str) -> Result<bool, PhoskError> {
+        if lock(&self.receipts)?.iter().any(|r| r.category == category) {
+            return Ok(true);
+        }
+        if lock(&self.line_items)?
+            .iter()
+            .any(|l| l.category == category)
+        {
+            return Ok(true);
+        }
+        if lock(&self.subscriptions)?
+            .iter()
+            .any(|s| s.category == category)
+        {
+            return Ok(true);
+        }
+        Ok(lock(&self.signals)?.iter().any(|s| s.parent == category))
     }
 }
 
@@ -401,6 +425,80 @@ impl DatabaseAdapter for MemoryDb {
             source: Source::UserModified,
             confidence: 1.0,
         };
+        Ok(())
+    }
+
+    async fn insert_category(&self, c: CategoryCap) -> Result<CategoryId, PhoskError> {
+        let mut caps = lock(&self.category_caps)?;
+        if caps.iter().any(|x| x.name == c.name) {
+            return Err(PhoskError::Invalid(format!(
+                "category {} already exists",
+                c.name
+            )));
+        }
+        let id = c.id;
+        caps.push(c);
+        Ok(id)
+    }
+
+    async fn rename_category(&self, from: &str, to: &str) -> Result<(), PhoskError> {
+        // The guards run before anything is written, so a rejected rename
+        // leaves every collection untouched. The locks are taken in the same
+        // order as everywhere else in this file (caps → receipts → lines →
+        // subscriptions → signals) and held for the whole re-point, so a
+        // concurrent reader sees the rename all at once, never half of it.
+        let mut caps = lock(&self.category_caps)?;
+        if !caps.iter().any(|c| c.name == from) {
+            return Err(PhoskError::NotFound(format!("category {from}")));
+        }
+        if from == to {
+            return Ok(());
+        }
+        if caps.iter().any(|c| c.name == to) {
+            return Err(PhoskError::Invalid(format!("category {to} already exists")));
+        }
+        {
+            let target = caps
+                .iter_mut()
+                .find(|c| c.name == from)
+                .ok_or_else(|| PhoskError::NotFound(format!("category {from}")))?;
+            target.name = to.to_owned();
+            target.provenance = Provenance {
+                source: Source::UserModified,
+                confidence: 1.0,
+            };
+        }
+
+        let mut receipts = lock(&self.receipts)?;
+        let mut lines = lock(&self.line_items)?;
+        let mut subscriptions = lock(&self.subscriptions)?;
+        let mut signals = lock(&self.signals)?;
+        for r in receipts.iter_mut().filter(|r| r.category == from) {
+            r.category = to.to_owned();
+        }
+        for l in lines.iter_mut().filter(|l| l.category == from) {
+            l.category = to.to_owned();
+        }
+        for s in subscriptions.iter_mut().filter(|s| s.category == from) {
+            s.category = to.to_owned();
+        }
+        for s in signals.iter_mut().filter(|s| s.parent == from) {
+            s.parent = to.to_owned();
+        }
+        Ok(())
+    }
+
+    async fn delete_category(&self, name: &str) -> Result<(), PhoskError> {
+        let mut caps = lock(&self.category_caps)?;
+        if !caps.iter().any(|c| c.name == name) {
+            return Err(PhoskError::NotFound(format!("category {name}")));
+        }
+        if self.category_is_referenced(name)? {
+            return Err(PhoskError::Invalid(format!(
+                "category {name} is still referenced"
+            )));
+        }
+        caps.retain(|c| c.name != name);
         Ok(())
     }
 
