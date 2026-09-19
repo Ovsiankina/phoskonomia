@@ -2,12 +2,14 @@
 //! categories · signals), exposing a **service** over the `DatabaseAdapter`
 //! PORT (ADR-010 gateway).
 //!
-//! This first slice answers the dashboard's two spend-aggregation reads:
+//! This file holds the dashboard's two spend-aggregation reads:
 //!
-//! - [`top_shops`] — the cycle's shops ranked by total spend (descending), the
-//!   basis for the `GET /cycle/current/top-shops` endpoint.
-//! - [`daily_spend`] — the per-day spend totals across the cycle window, the
-//!   basis for the `daily[]` series in `GET /cycle/current/spend-series`.
+//! - [`top_shops`] — the cycle's shops ranked by total spend (descending).
+//! - [`daily_spend`] — the per-day spend totals across the cycle window.
+//!
+//! The rest of the context lives in the feature modules declared below —
+//! including the write side ([`transactions::create_transaction`] for manual
+//! entry, and the category create/rename/delete-if-empty in [`categories`]).
 //!
 //! **Layering (ADR-010).** The service takes `&dyn DatabaseAdapter` and depends
 //! only on the PORT trait crate (`phosk_adapter_db`) plus the domain/foundation
