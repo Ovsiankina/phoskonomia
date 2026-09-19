@@ -30,8 +30,8 @@ use chrono::NaiveDate;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
-    AlertId, CategoryId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId,
-    SuggestionId,
+    AlertId, CategoryId, ChatId, DebtId, LineItemId, PersonalIouId, ReceiptId, SignalId,
+    SubscriptionId, SuggestionId,
 };
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
@@ -248,12 +248,85 @@ pub trait DatabaseAdapter: Send + Sync {
     /// still named by a [`Receipt`], a [`LineItem`], a [`Subscription`] or a
     /// [`Signal`] cannot be deleted, so spend can never be stranded on a name
     /// that no longer exists. Re-pointing a non-empty category is
-    /// [`rename_category`](Self::rename_category)'s job (or, later, a merge).
+    /// [`rename_category`](Self::rename_category)'s or
+    /// [`merge_categories`](Self::merge_categories)' job.
     ///
     /// # Errors
     /// - [`PhoskError::NotFound`] if no category carries that `name`.
     /// - [`PhoskError::Invalid`] if the category is still referenced.
     async fn delete_category(&self, name: &str) -> Result<(), PhoskError>;
+
+    /// Fold the category `from` into `into` and drop the `from` record;
+    /// returns how many rows were re-pointed.
+    ///
+    /// Where a rename gives one envelope a new label, a merge makes two
+    /// envelopes one: every row that named `from` — `Receipt::category`,
+    /// `LineItem::category`, `Subscription::category` and `Signal::parent` —
+    /// names `into` afterwards, and only then is the `from` record removed. The
+    /// two halves are **one operation**: an adapter runs every guard before its
+    /// first write, and a caller never observes a store where the source record
+    /// is gone but its history is not moved (the source record is written last,
+    /// so even a store fault mid-way leaves the merge safely re-runnable).
+    ///
+    /// The surviving `into` record keeps its `id`, `slug`, `cap`, `glyph` and
+    /// `note` — a merge changes what points at a category, never what the
+    /// category *is*. Adding up the two caps would be a budgeting decision, and
+    /// belongs to the user on the Budgets page.
+    ///
+    /// Re-pointed rows keep their own [`Provenance`]: as in a rename, the rows
+    /// were not individually re-judged, so their OCR/AI confidence (and the
+    /// review flag it drives) must survive. Only the `into` record is stamped
+    /// [`Source::UserModified`](phosk_model::Source::UserModified).
+    ///
+    /// Note the one thing a merge cannot carry: [`BudgetHistory`] rows key on
+    /// `CategoryId`, the port has no write path for them, and summing two
+    /// cycles' history would again be a budgeting decision — so the source's
+    /// history rows stay behind with the deleted id.
+    ///
+    /// [`Provenance`]: phosk_model::Provenance
+    ///
+    /// # Errors
+    /// - [`PhoskError::NotFound`] if either category does not exist.
+    /// - [`PhoskError::Invalid`] if `from` and `into` are the same category.
+    /// - [`PhoskError`] if the store rejects a write.
+    async fn merge_categories(&self, from: &str, into: &str) -> Result<u32, PhoskError>;
+
+    /// Carve the category `new` out of `from` by moving exactly the
+    /// [`LineItem`]s in `lines` into it; returns how many lines moved.
+    ///
+    /// The mirror image of a merge, and the reason item-level categorization
+    /// exists: a category that grew too broad is split by picking the lines
+    /// that belong elsewhere. Only those lines move. The receipts they hang off
+    /// keep their own `category` (a receipt's category is its dominant one, not
+    /// the union of its lines), no line changes receipt, and no amount changes.
+    ///
+    /// Creating the category and re-pointing the lines is **one operation**:
+    /// every guard runs before the first write, so a rejected split leaves the
+    /// store untouched — in particular it never leaves an empty new category
+    /// behind. `new` arrives fully formed (validated name, derived slug,
+    /// stamped [`Provenance`]); deriving it is the caller's job
+    /// (`phosk_ledger::categories`), exactly as for
+    /// [`insert_category`](Self::insert_category).
+    ///
+    /// A moved line is stamped
+    /// [`Source::UserModified`](phosk_model::Source::UserModified): unlike a
+    /// rename or a merge, the user picked *this line* and re-judged where it
+    /// belongs, which is precisely what that provenance records.
+    ///
+    /// [`Provenance`]: phosk_model::Provenance
+    ///
+    /// # Errors
+    /// - [`PhoskError::NotFound`] if `from` does not exist, or if any id in
+    ///   `lines` names no stored line item.
+    /// - [`PhoskError::Invalid`] if a category named `new.name` already exists,
+    ///   or if any line in `lines` does not currently belong to `from`.
+    /// - [`PhoskError`] if the store rejects a write.
+    async fn split_category(
+        &self,
+        from: &str,
+        new: CategoryCap,
+        lines: &[LineItemId],
+    ) -> Result<u32, PhoskError>;
 
     /// The prior-cycle [`BudgetHistory`] rows for a category name (oldest→newest).
     ///
@@ -599,6 +672,17 @@ mod tests {
         }
         async fn delete_category(&self, _name: &str) -> Result<(), PhoskError> {
             Ok(())
+        }
+        async fn merge_categories(&self, _from: &str, _into: &str) -> Result<u32, PhoskError> {
+            Ok(0)
+        }
+        async fn split_category(
+            &self,
+            _from: &str,
+            _new: CategoryCap,
+            _lines: &[LineItemId],
+        ) -> Result<u32, PhoskError> {
+            Ok(0)
         }
         async fn budget_history(&self, _category: &str) -> Result<Vec<BudgetHistory>, PhoskError> {
             Ok(Vec::new())

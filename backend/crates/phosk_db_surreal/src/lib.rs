@@ -61,8 +61,8 @@ use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
-    AlertId, CategoryId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId,
-    SuggestionId,
+    AlertId, CategoryId, ChatId, DebtId, LineItemId, PersonalIouId, ReceiptId, SignalId,
+    SubscriptionId, SuggestionId,
 };
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
@@ -473,6 +473,124 @@ impl DatabaseAdapter for SurrealDb {
         self.store
             .delete(Bucket::CategoryCap, &target.id.to_string())
             .await
+    }
+
+    async fn merge_categories(&self, from: &str, into: &str) -> Result<u32, PhoskError> {
+        // Same discipline as `rename_category`: every guard runs against the
+        // current state before the first write, and the source record is
+        // removed LAST — the store exposes no multi-record transaction, so
+        // until that delete lands the merge is simply re-runnable.
+        let caps: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        let source = caps
+            .iter()
+            .find(|c| c.name == from)
+            .cloned()
+            .ok_or_else(|| PhoskError::NotFound(format!("category {from}")))?;
+        let mut target = caps
+            .iter()
+            .find(|c| c.name == into)
+            .cloned()
+            .ok_or_else(|| PhoskError::NotFound(format!("category {into}")))?;
+        if from == into {
+            return Err(PhoskError::Invalid(format!(
+                "category {from} cannot be merged into itself"
+            )));
+        }
+
+        let mut moved: u32 = 0;
+        let receipts: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
+        for mut r in receipts.into_iter().filter(|r| r.category == from) {
+            r.category = into.to_owned();
+            self.store
+                .put(Bucket::Receipt, &r.id.to_string(), &r)
+                .await?;
+            moved = moved.saturating_add(1);
+        }
+        let lines: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        for mut l in lines.into_iter().filter(|l| l.category == from) {
+            l.category = into.to_owned();
+            self.store
+                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .await?;
+            moved = moved.saturating_add(1);
+        }
+        let subs: Vec<Subscription> = self.store.list(Bucket::Subscription).await?;
+        for mut s in subs.into_iter().filter(|s| s.category == from) {
+            s.category = into.to_owned();
+            self.store
+                .put(Bucket::Subscription, &s.id.to_string(), &s)
+                .await?;
+            moved = moved.saturating_add(1);
+        }
+        let signals: Vec<Signal> = self.store.list(Bucket::Signal).await?;
+        for mut s in signals.into_iter().filter(|s| s.parent == from) {
+            s.parent = into.to_owned();
+            self.store
+                .put(Bucket::Signal, &s.id.to_string(), &s)
+                .await?;
+            moved = moved.saturating_add(1);
+        }
+
+        target.provenance = Provenance {
+            source: Source::UserModified,
+            confidence: 1.0,
+        };
+        self.store
+            .put(Bucket::CategoryCap, &target.id.to_string(), &target)
+            .await?;
+        self.store
+            .delete(Bucket::CategoryCap, &source.id.to_string())
+            .await?;
+        Ok(moved)
+    }
+
+    async fn split_category(
+        &self,
+        from: &str,
+        new: CategoryCap,
+        lines: &[LineItemId],
+    ) -> Result<u32, PhoskError> {
+        // Guards first, then the line moves, and the new category record LAST:
+        // a store fault part-way leaves lines pointing at a category that does
+        // not exist yet, which the re-run repairs — whereas writing the record
+        // first would leave a stray empty category behind.
+        let caps: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        if !caps.iter().any(|c| c.name == from) {
+            return Err(PhoskError::NotFound(format!("category {from}")));
+        }
+        if caps.iter().any(|c| c.name == new.name) {
+            return Err(PhoskError::Invalid(format!(
+                "category {} already exists",
+                new.name
+            )));
+        }
+
+        let stored: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        for id in lines {
+            let line = stored
+                .iter()
+                .find(|l| l.id == *id)
+                .ok_or_else(|| PhoskError::NotFound(format!("line item {id}")))?;
+            if line.category != from {
+                return Err(PhoskError::Invalid(format!(
+                    "line item {id} is not in category {from}"
+                )));
+            }
+        }
+
+        let mut moved: u32 = 0;
+        for mut l in stored.into_iter().filter(|l| lines.contains(&l.id)) {
+            l.category = new.name.clone();
+            l.provenance = Provenance::user_modified();
+            self.store
+                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .await?;
+            moved = moved.saturating_add(1);
+        }
+        self.store
+            .put(Bucket::CategoryCap, &new.id.to_string(), &new)
+            .await?;
+        Ok(moved)
     }
 
     async fn budget_history(&self, category: &str) -> Result<Vec<BudgetHistory>, PhoskError> {
