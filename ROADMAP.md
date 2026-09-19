@@ -39,7 +39,7 @@ test) + input validation + `Provenance` + errors via `PhoskError`. No UI.
 - [x] **T12** — `phosk_ledger`: category create / rename / delete-if-empty (needs: T04)
 - [ ] **T13** — `phosk_ledger`: category merge and split, re-pointing historical line items atomically (needs: T12)
 - [x] **T14** — `phosk_recurring`: subscription create / edit / delete (needs: T04)
-- [ ] **T15** — `phosk_recurring`: lifecycle — pause, resume, cancel, mark-paid, record charge; derived status stays correct (needs: T14)
+- [x] **T15** — `phosk_recurring`: lifecycle — pause, resume, cancel, mark-paid, record charge; derived status stays correct (needs: T14)
 - [ ] **T16** — `phosk_debts`: debt create / edit / delete, record payment, extra payment; amortisation outputs stay correct (needs: T04)
 - [ ] **T17** — `phosk_debts`: plan adjust (monthly/day/term) and refinance (needs: T16)
 - [ ] **T18** — `phosk_debts`: personal IOUs — create / edit / delete, record partial payment, settle (needs: T04)
