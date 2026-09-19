@@ -59,6 +59,53 @@ pub async fn upsert_subscription_inserts_then_replaces(db: &dyn DatabaseAdapter)
     Ok(())
 }
 
+/// A deleted subscription is gone from every read path, takes its charges with
+/// it, leaves its neighbours alone, and cannot be deleted twice.
+pub async fn delete_subscription_removes_it_and_its_charges(db: &dyn DatabaseAdapter) -> Outcome {
+    let before = db.subscriptions().await?;
+    let victim = first(before.clone())?;
+    let keeper = before
+        .get(1)
+        .ok_or("the seed has more than one subscription")?
+        .clone();
+    let keeper_charges = db.subscription_charges(keeper.id).await?;
+    let charge = Charge {
+        id: ChargeId::new(),
+        subscription_id: victim.id,
+        date: date(2027, 5, 9)?,
+        amount: Money::from_centimes(1_990),
+        note: "confirmed".to_owned(),
+        provenance: Provenance::user_entered(),
+    };
+    db.record_charge(charge).await?;
+    ensure(
+        !db.subscription_charges(victim.id).await?.is_empty(),
+        "the victim has a charge history",
+    )?;
+
+    db.delete_subscription(victim.id).await?;
+
+    let after = db.subscriptions().await?;
+    ensure_eq(&after.len(), &(before.len() - 1), "count after delete")?;
+    ensure(
+        after.iter().all(|s| s.id != victim.id),
+        "subscriptions() no longer lists it",
+    )?;
+    ensure_not_found(db.subscription(victim.id).await, "subscription(deleted)")?;
+    ensure_not_found(db.subscription_by_slug(&victim.slug).await, "by slug")?;
+    ensure(
+        db.subscription_charges(victim.id).await?.is_empty(),
+        "its charges went with it",
+    )?;
+    ensure_eq(
+        &db.subscription_charges(keeper.id).await?,
+        &keeper_charges,
+        "another subscription's charges untouched",
+    )?;
+    ensure_eq(&db.subscription(keeper.id).await?, &keeper, "keeper intact")?;
+    ensure_not_found(db.delete_subscription(victim.id).await, "delete again")
+}
+
 /// Charges are scoped to their subscription and come back oldest→newest.
 pub async fn subscription_charges_are_scoped_and_oldest_first(db: &dyn DatabaseAdapter) -> Outcome {
     let other = first(db.subscriptions().await?)?;

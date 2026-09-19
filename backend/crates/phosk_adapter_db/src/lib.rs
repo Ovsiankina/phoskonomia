@@ -30,7 +30,8 @@ use chrono::NaiveDate;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
-    AlertId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId, SuggestionId,
+    AlertId, CategoryId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId,
+    SuggestionId,
 };
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
@@ -212,6 +213,59 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError::NotFound`] if no such category.
     async fn set_category_cap(&self, name: &str, cap: Option<Money>) -> Result<(), PhoskError>;
 
+    /// Persist a brand-new spending category; returns its id.
+    ///
+    /// [`CategoryCap`] is the **user-facing category record** (name, cap, glyph,
+    /// note, provenance) — the thing the Budgets/Categories pages create and the
+    /// ledger's receipts and line items reference **by name**. (The leaner
+    /// [`Category`] returned by [`categories`](Self::categories) is the legacy
+    /// dashboard-trio read; it is a separate, uppercase name space and is not
+    /// touched by this write path.)
+    ///
+    /// The category `name` is its human identity (ADR-008) and must be unique:
+    /// an adapter rejects a name it already holds rather than shadowing it.
+    /// Deriving the `slug`, validating the name and stamping [`Provenance`] are
+    /// the caller's job (`phosk_ledger::categories`).
+    ///
+    /// [`Provenance`]: phosk_model::Provenance
+    ///
+    /// # Errors
+    /// - [`PhoskError::Invalid`] if a category with that `name` already exists.
+    /// - [`PhoskError`] if the store rejects the write.
+    async fn insert_category(&self, c: CategoryCap) -> Result<CategoryId, PhoskError>;
+
+    /// Rename a category from `from` to `to`, re-pointing every reference.
+    ///
+    /// The category's identity is its name, so a rename is a graph operation,
+    /// not a field edit: the adapter renames the category record **and** every
+    /// row that carries the old name — `Receipt::category`, `LineItem::category`,
+    /// `Subscription::category` and `Signal::parent` — so no history is orphaned.
+    /// The record's `id` and `slug` are stable and do **not** change (the UI and
+    /// [`BudgetHistory`] key on them), and its [`Provenance`] becomes
+    /// [`Source::UserModified`](phosk_model::Source::UserModified).
+    ///
+    /// Renaming to the same name is a no-op success; a case-only change
+    /// (`"groceries"` → `"Groceries"`) is a real rename.
+    ///
+    /// # Errors
+    /// - [`PhoskError::NotFound`] if no category is named `from`.
+    /// - [`PhoskError::Invalid`] if a *different* category is already named `to`.
+    /// - [`PhoskError`] if the store rejects a write.
+    async fn rename_category(&self, from: &str, to: &str) -> Result<(), PhoskError>;
+
+    /// Delete a category **only if nothing references it any more**.
+    ///
+    /// The guard is part of the contract, not the caller's courtesy: a category
+    /// still named by a [`Receipt`], a [`LineItem`], a [`Subscription`] or a
+    /// [`Signal`] cannot be deleted, so spend can never be stranded on a name
+    /// that no longer exists. Re-pointing a non-empty category is
+    /// [`rename_category`](Self::rename_category)'s job (or, later, a merge).
+    ///
+    /// # Errors
+    /// - [`PhoskError::NotFound`] if no category carries that `name`.
+    /// - [`PhoskError::Invalid`] if the category is still referenced.
+    async fn delete_category(&self, name: &str) -> Result<(), PhoskError>;
+
     /// The prior-cycle [`BudgetHistory`] rows for a category name (oldest→newest).
     ///
     /// # Errors
@@ -267,6 +321,15 @@ pub trait DatabaseAdapter: Send + Sync {
     /// # Errors
     /// [`PhoskError`] if the store rejects the write.
     async fn upsert_subscription(&self, s: Subscription) -> Result<SubscriptionId, PhoskError>;
+
+    /// Delete a [`Subscription`] **and every [`Charge`] recorded against it** —
+    /// a charge has no meaning without its subscription, so the cascade is part
+    /// of the port contract rather than the caller's job.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no subscription has that id (so a second
+    /// delete of the same id reports it), or any store failure.
+    async fn delete_subscription(&self, id: SubscriptionId) -> Result<(), PhoskError>;
 
     /// Record a billing [`Charge`].
     ///
@@ -539,6 +602,15 @@ mod tests {
         ) -> Result<(), PhoskError> {
             Ok(())
         }
+        async fn insert_category(&self, c: CategoryCap) -> Result<CategoryId, PhoskError> {
+            Ok(c.id)
+        }
+        async fn rename_category(&self, _from: &str, _to: &str) -> Result<(), PhoskError> {
+            Ok(())
+        }
+        async fn delete_category(&self, _name: &str) -> Result<(), PhoskError> {
+            Ok(())
+        }
         async fn budget_history(&self, _category: &str) -> Result<Vec<BudgetHistory>, PhoskError> {
             Ok(Vec::new())
         }
@@ -571,6 +643,9 @@ mod tests {
             _s: Subscription,
         ) -> Result<SubscriptionId, PhoskError> {
             Ok(SubscriptionId::new())
+        }
+        async fn delete_subscription(&self, _id: SubscriptionId) -> Result<(), PhoskError> {
+            Ok(())
         }
         async fn record_charge(&self, _c: Charge) -> Result<(), PhoskError> {
             Ok(())
