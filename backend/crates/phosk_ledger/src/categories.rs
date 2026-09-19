@@ -1,5 +1,6 @@
 //! `categories` — the ledger-side category breakdown of spend, and the
-//! category list's write side (create · rename · delete-if-empty).
+//! category list's write side (create · rename · delete-if-empty · merge ·
+//! split).
 //!
 //! The *read* half owns the observed per-category spend distribution derived
 //! from receipts — the filter option list the Transactions page shows and the
@@ -13,24 +14,27 @@
 //! alerts, history); this module owns its life cycle, because creating,
 //! renaming and deleting a category is a ledger-integrity operation: a rename
 //! must carry every historical reference with it, and a delete may only ever
-//! remove a category nothing points at. Re-pointing history *between two
-//! existing* categories (merge/split) is a separate, later service.
+//! remove a category nothing points at. [`merge_categories`] and
+//! [`split_category`] move history *between* categories — wholesale, or a
+//! hand-picked set of line items — each as one all-or-nothing operation.
 //!
 //! Everything here validates its input before it touches the store (names are
 //! trimmed, bounded and control-character free) and stamps [`Provenance`]:
-//! [`Source::UserEntered`] on create, [`Source::UserModified`] on rename.
+//! [`Source::UserEntered`] on create, [`Source::UserModified`] on rename, on a
+//! merge target, and on every line a split re-points.
 //!
 //! [`Source::UserEntered`]: phosk_model::Source::UserEntered
 //! [`Source::UserModified`]: phosk_model::Source::UserModified
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::cycle::Period;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
-use phosk_id::CategoryId;
+use phosk_id::{CategoryId, LineItemId};
 use phosk_model::{CategoryCap, Provenance};
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +146,22 @@ pub async fn create_category(
     db: &dyn DatabaseAdapter,
     new: NewCategory,
 ) -> Result<CategoryCap, PhoskError> {
+    let existing = db.category_caps().await?;
+    let record = validated_record(&new, &existing)?;
+    db.insert_category(record.clone()).await?;
+    tracing::debug!(slug = %record.slug, "created category");
+    Ok(record)
+}
+
+/// Turn caller input into the record the port stores: name/glyph/note cleaned,
+/// cap sanity-checked, name unique (case-insensitively) against `existing`,
+/// slug derived and made unique, provenance stamped. Writes nothing — the two
+/// callers ([`create_category`] and [`split_category`]) hand the result to a
+/// different port method.
+fn validated_record(
+    new: &NewCategory,
+    existing: &[CategoryCap],
+) -> Result<CategoryCap, PhoskError> {
     let name = clean_text(&new.name, "category name", MAX_NAME_CHARS)?;
     let glyph = if new.glyph.trim().is_empty() {
         DEFAULT_GLYPH.to_owned()
@@ -158,8 +178,6 @@ pub async fn create_category(
             "category cap cannot be negative".to_owned(),
         ));
     }
-
-    let existing = db.category_caps().await?;
     if let Some(clash) = existing.iter().find(|c| same_name(&c.name, &name)) {
         return Err(PhoskError::Invalid(format!(
             "category {} already exists",
@@ -167,19 +185,16 @@ pub async fn create_category(
         )));
     }
 
-    let record = CategoryCap {
+    Ok(CategoryCap {
         id: CategoryId::new(),
-        slug: unique_slug(&name, &existing),
+        slug: unique_slug(&name, existing),
         name,
         cap: new.cap,
         fixed: new.fixed,
         glyph,
         note,
         provenance: Provenance::user_entered(),
-    };
-    db.insert_category(record.clone()).await?;
-    tracing::debug!(slug = %record.slug, "created category");
-    Ok(record)
+    })
 }
 
 /// Rename a category, carrying every historical reference with it.
@@ -286,6 +301,122 @@ pub async fn delete_category(db: &dyn DatabaseAdapter, name: &str) -> Result<(),
         )));
     }
     db.delete_category(name).await
+}
+
+// ── Write side: merge · split ───────────────────────────────────────────────
+
+/// Fold the category `from` into `into`; returns how many stored rows were
+/// re-pointed.
+///
+/// The way out of the corner [`delete_category`] leaves a user in: a category
+/// that carries history cannot be deleted, but it *can* be merged away. Every
+/// receipt, line item, subscription and signal that named `from` names `into`
+/// afterwards, and only then does the `from` record go — one operation, so no
+/// spend is ever stranded (see
+/// [`DatabaseAdapter::merge_categories`](phosk_adapter_db::DatabaseAdapter::merge_categories)).
+///
+/// The target keeps its own cap: two envelopes becoming one does not mean their
+/// budgets add up, and deciding the new cap is the user's call on the Budgets
+/// page. The source's prior-cycle history rows stay with the deleted id.
+///
+/// Both names are matched case-insensitively, the way category names are
+/// unique in the first place.
+///
+/// # Errors
+/// - [`PhoskError::NotFound`] if either category does not exist.
+/// - [`PhoskError::Invalid`] if `from` and `into` name the same category
+///   (`"Coffee"` and `"coffee"` are one envelope).
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn merge_categories(
+    db: &dyn DatabaseAdapter,
+    from: &str,
+    into: &str,
+) -> Result<u32, PhoskError> {
+    // Both ends are resolved case-insensitively: names are unique that way
+    // (`create_category`), so the match is unambiguous, and it is what makes a
+    // case-only self-merge ("Coffee" into "coffee") land on the *same* record
+    // and be refused rather than reported as an unknown category.
+    let caps = db.category_caps().await?;
+    let source = caps
+        .iter()
+        .find(|c| same_name(&c.name, from))
+        .ok_or_else(|| PhoskError::NotFound(format!("category {from}")))?;
+    let target = caps
+        .iter()
+        .find(|c| same_name(&c.name, into))
+        .ok_or_else(|| PhoskError::NotFound(format!("category {into}")))?;
+    if same_name(&source.name, &target.name) {
+        return Err(PhoskError::Invalid(format!(
+            "category {from} cannot be merged into itself"
+        )));
+    }
+
+    let moved = db.merge_categories(&source.name, &target.name).await?;
+    tracing::debug!(moved, "merged category");
+    Ok(moved)
+}
+
+/// What the caller supplies to split a category: the source, the category to
+/// carve out of it, and the line items that move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategorySplit {
+    /// The category the picked lines currently belong to.
+    pub from: String,
+    /// The category to create for them. Validated exactly like
+    /// [`create_category`]'s input.
+    pub into: NewCategory,
+    /// The line items to move. Repeats are the same line, not extra ones.
+    pub lines: Vec<LineItemId>,
+}
+
+/// Carve a new category out of `split.from` by moving the picked line items
+/// into it; returns the created record.
+///
+/// The counterpart to a merge, at item granularity: "these five lines were
+/// never really Groceries". The new category is created and the lines are
+/// re-pointed as one operation, so a rejected split leaves nothing behind —
+/// not even an empty category. The receipts the lines hang off keep their own
+/// category and their amounts; only the lines move, and each moved line is
+/// stamped `UserModified`, because a human just re-judged where it belongs.
+///
+/// # Errors
+/// - [`PhoskError::Invalid`] if no line is picked, if the new category's
+///   name/glyph/note/cap fail validation, if that name is already taken, or if
+///   a picked line is not currently in `split.from`.
+/// - [`PhoskError::NotFound`] if `split.from` does not exist, or if a picked id
+///   names no stored line item.
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn split_category(
+    db: &dyn DatabaseAdapter,
+    split: CategorySplit,
+) -> Result<CategoryCap, PhoskError> {
+    // The same line listed twice is one line; keep the caller's order so the
+    // error naming a bad id is the first one they wrote.
+    let mut seen = HashSet::new();
+    let lines: Vec<LineItemId> = split
+        .lines
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+        .collect();
+    if lines.is_empty() {
+        return Err(PhoskError::Invalid(
+            "a split needs at least one line item".to_owned(),
+        ));
+    }
+
+    let caps = db.category_caps().await?;
+    let source = caps
+        .iter()
+        .find(|c| same_name(&c.name, &split.from))
+        .ok_or_else(|| PhoskError::NotFound(format!("category {}", split.from)))?;
+    let source_name = source.name.clone();
+    let record = validated_record(&split.into, &caps)?;
+
+    db.split_category(&source_name, record.clone(), &lines)
+        .await?;
+    tracing::debug!(slug = %record.slug, moved = lines.len(), "split category");
+    Ok(record)
 }
 
 /// Trim `raw`, then accept it only if it is non-empty, within `max` characters
