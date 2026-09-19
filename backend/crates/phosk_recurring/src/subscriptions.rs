@@ -101,6 +101,8 @@ pub(crate) fn last_charge_date(
     month: &str,
 ) -> Result<NaiveDate, PhoskError> {
     if cadence == "yearly" {
+        // Precondition: `month` is a validated abbreviation (the write path
+        // rejects anything else); January is a last-resort fallback only.
         let m = month_from_abbr(month).unwrap_or(1);
         // Yearly charges land on the 1st of the labelled month.
         let candidate = clamped_date(as_of.year(), m, 1)?;

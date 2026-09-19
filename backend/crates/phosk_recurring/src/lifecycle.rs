@@ -80,7 +80,7 @@ pub fn is_active(status: &str) -> bool {
 /// [`PhoskError::NotFound`] if `slug` resolves to no subscription,
 /// [`PhoskError::Invalid`] if it is already paused or cancelled; otherwise any
 /// port error.
-#[tracing::instrument(level = "debug", skip(db))]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn pause_subscription(db: &dyn DatabaseAdapter, slug: &str) -> Result<(), PhoskError> {
     let sub = db.subscription_by_slug(slug).await?;
     match sub.status.as_str() {
@@ -105,7 +105,7 @@ pub async fn pause_subscription(db: &dyn DatabaseAdapter, slug: &str) -> Result<
 /// # Errors
 /// [`PhoskError::NotFound`] if `slug` resolves to no subscription,
 /// [`PhoskError::Invalid`] if it is not paused; otherwise any port error.
-#[tracing::instrument(level = "debug", skip(db))]
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn resume_subscription(
     db: &dyn DatabaseAdapter,
     slug: &str,
@@ -130,7 +130,7 @@ pub async fn resume_subscription(
 /// [`PhoskError::NotFound`] if `slug` resolves to no subscription,
 /// [`PhoskError::Invalid`] if it is already cancelled; otherwise any port
 /// error.
-#[tracing::instrument(level = "debug", skip(db))]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn cancel_subscription(db: &dyn DatabaseAdapter, slug: &str) -> Result<(), PhoskError> {
     let sub = db.subscription_by_slug(slug).await?;
     if sub.status == STATUS_CANCELLED {
@@ -149,7 +149,7 @@ pub async fn cancel_subscription(db: &dyn DatabaseAdapter, slug: &str) -> Result
 /// [`PhoskError::NotFound`] if `slug` resolves to no subscription,
 /// [`PhoskError::Invalid`] if the charge is paused/cancelled or the cycle
 /// already holds a recorded charge; otherwise any port error.
-#[tracing::instrument(level = "debug", skip(db))]
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn mark_paid(
     db: &dyn DatabaseAdapter,
     slug: &str,
@@ -195,7 +195,7 @@ pub async fn mark_paid(
 /// [`PhoskError::Invalid`] if the charge is paused/cancelled, the amount is not
 /// positive, or the date falls outside the charge's life (before `since`, or in
 /// the future relative to `as_of`); otherwise any port error.
-#[tracing::instrument(level = "debug", skip(db))]
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn record_subscription_charge(
     db: &dyn DatabaseAdapter,
     slug: &str,
