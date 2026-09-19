@@ -6,16 +6,28 @@
 //!
 //! The services compute the derivations (`itemCount`, `lowConfCount`,
 //! `signalIds`, summary roll-ups, filter/sort) from receipt data.
+//!
+//! [`create_transaction`] is the manual-entry write path: a human-typed spend
+//! becomes a [`Receipt`] plus its [`LineItem`]s, stamped [`Source::UserEntered`]
+//! at full confidence. Every money value is backend-derived
+//! (`round(qty × unit_price)`, summed exactly); a total the caller states is
+//! only ever used to *cross-check*, never to overrule the itemisation.
+//!
+//! [`LineItem`]: phosk_model::LineItem
+//! [`Source::UserEntered`]: phosk_model::Source
 
 use std::collections::BTreeSet;
 
-use chrono::Datelike;
+use chrono::{Datelike, NaiveDate};
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::cycle::Period;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
-use phosk_model::Receipt;
+use phosk_id::{LineItemId, ReceiptId};
+use phosk_model::{LineItem, Provenance, Receipt};
 use serde::{Deserialize, Serialize};
+
+use crate::line_items::line_total;
 
 /// One receipt row in the list (`TransactionListDto::transactions` element).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +262,212 @@ const fn month_abbrev(month: u32) -> &'static str {
         11 => "NOV",
         _ => "DEC",
     }
+}
+
+// ── Manual entry (write path) ────────────────────────────────────────────────
+
+/// One typed-in line of a manual entry.
+///
+/// `line_total` is deliberately absent: the backend derives it from
+/// `qty × unit_price`, so a mis-keyed total cannot enter the ledger.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewLineInput {
+    /// Item name (required, trimmed).
+    pub name: String,
+    /// Quantity — must be a finite number greater than zero.
+    pub qty: f64,
+    /// Per-unit price in exact centimes; must not be negative.
+    #[serde(with = "phosk_model::money_centimes")]
+    pub unit_price: Money,
+    /// Category for this line; empty inherits the receipt's category.
+    pub category: String,
+    /// Slug of a tracked item-[`Signal`] to attach, or empty for none.
+    ///
+    /// [`Signal`]: phosk_model::Signal
+    pub signal_id: String,
+}
+
+/// A manually entered transaction: a dated spend at a shop, optionally itemised.
+///
+/// Either `lines` is non-empty (the total is derived from it) or `amount` is
+/// set (a total-only entry) — an entry with neither is not a spend record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTransaction {
+    /// Shop display name (required, trimmed).
+    pub shop: String,
+    /// Calendar date of the spend.
+    pub date: NaiveDate,
+    /// Primary category name (required, trimmed).
+    pub category: String,
+    /// `true` for a standing/fixed charge.
+    pub fixed: bool,
+    /// The receipt total, in exact centimes. Required when there are no lines;
+    /// with lines it is optional and, if given, must equal their sum.
+    #[serde(with = "phosk_model::opt_money_centimes")]
+    pub amount: Option<Money>,
+    /// The itemisation, possibly empty.
+    pub lines: Vec<NewLineInput>,
+}
+
+/// What a successful [`create_transaction`] produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedTxnDto {
+    /// The new receipt's stable slug — the `id` every read DTO keys on.
+    pub id: String,
+    /// The stored (backend-derived) total, exact centimes.
+    #[serde(with = "phosk_model::money_centimes")]
+    pub amount: Money,
+    /// Number of stored line items.
+    pub item_count: u32,
+}
+
+/// Create a transaction from manual entry.
+///
+/// Validates the input, derives every money value, stamps
+/// [`Provenance::user_entered`] on the receipt and each line, and persists both
+/// through `insert_receipt` (which also maintains the dashboard projection, so
+/// the new spend counts towards the cycle aggregates immediately).
+///
+/// The receipt is marked `source_kind = "MANUAL"` with no OCR metadata, and
+/// gets a fresh `manual:<uuid>` slug — a manual entry is never a re-import, so
+/// each call creates its own record rather than replacing an existing one.
+///
+/// # Errors
+/// - [`PhoskError::Invalid`] for a blank shop/category/line name, a quantity
+///   that is not finite and positive, a negative unit price or total, an entry
+///   with neither lines nor a total, or a stated total that contradicts the
+///   itemisation.
+/// - [`PhoskError::NotFound`] if a line names a signal slug that does not exist.
+/// - [`PhoskError::Overflow`] if the derived totals leave the centime range.
+#[tracing::instrument(level = "debug", skip_all, fields(date = %input.date, lines = input.lines.len()))]
+pub async fn create_transaction(
+    db: &dyn DatabaseAdapter,
+    input: NewTransaction,
+) -> Result<CreatedTxnDto, PhoskError> {
+    let shop = required(&input.shop, "shop")?;
+    let category = required(&input.category, "category")?;
+
+    let receipt_id = ReceiptId::new();
+    let mut lines = Vec::with_capacity(input.lines.len());
+    for raw in input.lines {
+        lines.push(build_line(db, receipt_id, &category, raw).await?);
+    }
+
+    let amount = resolve_amount(input.amount, &lines)?;
+    if amount.centimes() < 0 {
+        return Err(PhoskError::Invalid(format!(
+            "a transaction total must not be negative (got {} centimes)",
+            amount.centimes()
+        )));
+    }
+
+    let slug = format!("manual:{receipt_id}");
+    let item_count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    db.insert_receipt(
+        Receipt {
+            id: receipt_id,
+            slug: slug.clone(),
+            shop,
+            date: input.date,
+            category,
+            amount,
+            fixed: input.fixed,
+            provenance: Provenance::user_entered(),
+            source_kind: "MANUAL".to_owned(),
+            ocr_engine: String::new(),
+            ocr_regions: 0,
+        },
+        lines,
+    )
+    .await?;
+    tracing::debug!(%slug, item_count, "created a manual transaction");
+
+    Ok(CreatedTxnDto {
+        id: slug,
+        amount,
+        item_count,
+    })
+}
+
+/// A required free-text field, trimmed; blank is [`PhoskError::Invalid`].
+fn required(value: &str, field: &str) -> Result<String, PhoskError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PhoskError::Invalid(format!("{field} is required")));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Validate one typed-in line and turn it into a storable [`LineItem`]: the
+/// total is derived, the category falls back to the receipt's, and the signal
+/// slug (if any) is resolved to a typed id through the port.
+async fn build_line(
+    db: &dyn DatabaseAdapter,
+    receipt_id: ReceiptId,
+    receipt_category: &str,
+    raw: NewLineInput,
+) -> Result<LineItem, PhoskError> {
+    let name = required(&raw.name, "line name")?;
+    if !raw.qty.is_finite() || raw.qty <= 0.0 {
+        return Err(PhoskError::Invalid(format!(
+            "line `{name}`: qty must be a finite number greater than zero"
+        )));
+    }
+    if raw.unit_price.centimes() < 0 {
+        return Err(PhoskError::Invalid(format!(
+            "line `{name}`: unit price must not be negative"
+        )));
+    }
+    let signal_id = if raw.signal_id.trim().is_empty() {
+        None
+    } else {
+        Some(db.signal_by_slug(raw.signal_id.trim()).await?.id)
+    };
+    let category = match raw.category.trim() {
+        "" => receipt_category.to_owned(),
+        given => given.to_owned(),
+    };
+
+    Ok(LineItem {
+        id: LineItemId::new(),
+        receipt_id,
+        name,
+        qty: raw.qty,
+        unit_price: raw.unit_price,
+        line_total: line_total(raw.qty, raw.unit_price)?,
+        category,
+        signal_id,
+        // Typed in by a human: authoritative, never review-flagged.
+        provenance: Provenance::user_entered(),
+    })
+}
+
+/// The receipt total. With lines it is the exact sum of their derived totals; a
+/// `stated` total is then only a cross-check (a disagreement is the caller's
+/// bug and is refused, never silently overruled). Without lines the stated
+/// total is the record.
+fn resolve_amount(stated: Option<Money>, lines: &[LineItem]) -> Result<Money, PhoskError> {
+    if lines.is_empty() {
+        return stated.ok_or_else(|| {
+            PhoskError::Invalid(
+                "a transaction needs either line items or a total amount".to_owned(),
+            )
+        });
+    }
+    let derived = Money::sum(lines.iter().map(|l| l.line_total))?;
+    if let Some(stated) = stated
+        && stated != derived
+    {
+        return Err(PhoskError::Invalid(format!(
+            "stated total {} does not match the line items ({} centimes)",
+            stated.centimes(),
+            derived.centimes()
+        )));
+    }
+    Ok(derived)
 }
 
 /// One receipt's detail (avg confidence, OCR source/regions). Resolves the
