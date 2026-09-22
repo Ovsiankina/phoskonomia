@@ -777,6 +777,14 @@ impl DatabaseAdapter for MemoryDb {
         Ok(lock(&self.personal_ious)?.clone())
     }
 
+    async fn personal_iou_by_slug(&self, slug: &str) -> Result<PersonalIou, PhoskError> {
+        lock(&self.personal_ious)?
+            .iter()
+            .find(|i| i.slug == slug)
+            .cloned()
+            .ok_or_else(|| PhoskError::NotFound(format!("personal iou slug {slug}")))
+    }
+
     async fn upsert_personal_iou(&self, i: PersonalIou) -> Result<PersonalIouId, PhoskError> {
         let mut ious = lock(&self.personal_ious)?;
         let id = i.id;
@@ -786,6 +794,16 @@ impl DatabaseAdapter for MemoryDb {
             ious.push(i);
         }
         Ok(id)
+    }
+
+    async fn delete_personal_iou(&self, id: PersonalIouId) -> Result<(), PhoskError> {
+        let mut ious = lock(&self.personal_ious)?;
+        let before = ious.len();
+        ious.retain(|i| i.id != id);
+        if ious.len() == before {
+            return Err(PhoskError::NotFound(format!("personal iou {id}")));
+        }
+        Ok(())
     }
 
     // ── Analytics support ────────────────────────────────────────────────────

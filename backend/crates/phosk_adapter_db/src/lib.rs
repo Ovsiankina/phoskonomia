@@ -454,11 +454,25 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError`] if the store fails to answer.
     async fn personal_ious(&self) -> Result<Vec<PersonalIou>, PhoskError>;
 
+    /// One [`PersonalIou`] by its stable `slug` — the id the UI addresses it by.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no IOU has that slug, or any store failure.
+    async fn personal_iou_by_slug(&self, slug: &str) -> Result<PersonalIou, PhoskError>;
+
     /// Insert or update a [`PersonalIou`]; returns its id.
     ///
     /// # Errors
     /// [`PhoskError`] if the store rejects the write.
     async fn upsert_personal_iou(&self, i: PersonalIou) -> Result<PersonalIouId, PhoskError>;
+
+    /// Delete a [`PersonalIou`]. Nothing hangs off an IOU, so there is no
+    /// cascade.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no IOU has that id (so a second delete of
+    /// the same id reports it), or any store failure.
+    async fn delete_personal_iou(&self, id: PersonalIouId) -> Result<(), PhoskError>;
 
     // ── Analytics support ────────────────────────────────────────────────────
 
@@ -755,8 +769,14 @@ mod tests {
         async fn personal_ious(&self) -> Result<Vec<PersonalIou>, PhoskError> {
             Ok(Vec::new())
         }
+        async fn personal_iou_by_slug(&self, _slug: &str) -> Result<PersonalIou, PhoskError> {
+            Err(PhoskError::NotFound("personal iou".to_owned()))
+        }
         async fn upsert_personal_iou(&self, _i: PersonalIou) -> Result<PersonalIouId, PhoskError> {
             Ok(PersonalIouId::new())
+        }
+        async fn delete_personal_iou(&self, _id: PersonalIouId) -> Result<(), PhoskError> {
+            Ok(())
         }
         async fn spend_history(
             &self,
