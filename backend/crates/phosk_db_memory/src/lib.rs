@@ -41,8 +41,8 @@ use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
-    AlertId, CategoryId, ChatId, DebtId, PersonalIouId, ReceiptId, SignalId, SubscriptionId,
-    SuggestionId,
+    AlertId, CategoryId, ChatId, DebtId, LineItemId, PersonalIouId, ReceiptId, SignalId,
+    SubscriptionId, SuggestionId,
 };
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
@@ -500,6 +500,99 @@ impl DatabaseAdapter for MemoryDb {
         }
         caps.retain(|c| c.name != name);
         Ok(())
+    }
+
+    async fn merge_categories(&self, from: &str, into: &str) -> Result<u32, PhoskError> {
+        // Same shape as `rename_category`: every guard before the first write,
+        // the locks taken in this file's usual order (caps → receipts → lines
+        // → subscriptions → signals) and all held to the end, so a concurrent
+        // reader sees the merge whole — never a store where the source record
+        // is already gone but its history has not moved.
+        let mut caps = lock(&self.category_caps)?;
+        if !caps.iter().any(|c| c.name == from) {
+            return Err(PhoskError::NotFound(format!("category {from}")));
+        }
+        if !caps.iter().any(|c| c.name == into) {
+            return Err(PhoskError::NotFound(format!("category {into}")));
+        }
+        if from == into {
+            return Err(PhoskError::Invalid(format!(
+                "category {from} cannot be merged into itself"
+            )));
+        }
+
+        let mut receipts = lock(&self.receipts)?;
+        let mut lines = lock(&self.line_items)?;
+        let mut subscriptions = lock(&self.subscriptions)?;
+        let mut signals = lock(&self.signals)?;
+        let mut moved: u32 = 0;
+        for r in receipts.iter_mut().filter(|r| r.category == from) {
+            r.category = into.to_owned();
+            moved = moved.saturating_add(1);
+        }
+        for l in lines.iter_mut().filter(|l| l.category == from) {
+            l.category = into.to_owned();
+            moved = moved.saturating_add(1);
+        }
+        for s in subscriptions.iter_mut().filter(|s| s.category == from) {
+            s.category = into.to_owned();
+            moved = moved.saturating_add(1);
+        }
+        for s in signals.iter_mut().filter(|s| s.parent == from) {
+            s.parent = into.to_owned();
+            moved = moved.saturating_add(1);
+        }
+
+        if let Some(target) = caps.iter_mut().find(|c| c.name == into) {
+            target.provenance = Provenance {
+                source: Source::UserModified,
+                confidence: 1.0,
+            };
+        }
+        caps.retain(|c| c.name != from);
+        Ok(moved)
+    }
+
+    async fn split_category(
+        &self,
+        from: &str,
+        new: CategoryCap,
+        lines: &[LineItemId],
+    ) -> Result<u32, PhoskError> {
+        // Both locks are taken before the first write and held across it, so
+        // the new category and the lines it carries appear together.
+        let mut caps = lock(&self.category_caps)?;
+        if !caps.iter().any(|c| c.name == from) {
+            return Err(PhoskError::NotFound(format!("category {from}")));
+        }
+        if caps.iter().any(|c| c.name == new.name) {
+            return Err(PhoskError::Invalid(format!(
+                "category {} already exists",
+                new.name
+            )));
+        }
+
+        let mut items = lock(&self.line_items)?;
+        for id in lines {
+            let line = items
+                .iter()
+                .find(|l| l.id == *id)
+                .ok_or_else(|| PhoskError::NotFound(format!("line item {id}")))?;
+            if line.category != from {
+                return Err(PhoskError::Invalid(format!(
+                    "line item {id} is not in category {from}"
+                )));
+            }
+        }
+
+        let mut moved: u32 = 0;
+        for l in items.iter_mut().filter(|l| lines.contains(&l.id)) {
+            l.category = new.name.clone();
+            l.provenance = Provenance::user_modified();
+            moved = moved.saturating_add(1);
+        }
+        caps.push(new);
+        Ok(moved)
     }
 
     async fn budget_history(&self, category: &str) -> Result<Vec<BudgetHistory>, PhoskError> {

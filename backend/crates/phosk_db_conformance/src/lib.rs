@@ -81,6 +81,8 @@ macro_rules! database_adapter_conformance {
             categories::insert_category_appends_and_rejects_duplicates,
             categories::rename_category_repoints_every_reference,
             categories::delete_category_only_when_unreferenced,
+            categories::merge_categories_folds_one_into_the_other,
+            categories::split_category_carves_out_only_the_named_lines,
             planning::budget_history_is_oldest_to_newest,
             planning::spend_history_returns_the_recorded_cycles,
             planning::alerts_lookup_and_status_update,
