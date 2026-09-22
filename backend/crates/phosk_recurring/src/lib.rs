@@ -11,6 +11,9 @@
 //! - [`subscription_write`] — the subscription write path: create, edit and
 //!   delete a standing charge (input validation + `Provenance`; the lifecycle
 //!   transitions are a separate concern).
+//! - [`lifecycle`] — the lifecycle transitions: pause, resume, cancel,
+//!   mark-paid and record-charge, each keeping the derived status (`ok`/`soon`/
+//!   `due`) in step with the billing cycle.
 //! - [`recurring_detect`] — the AI recurring-detection pre-pass: scan receipts
 //!   for repeated same-shop/same-amount monthly charges and surface candidate
 //!   subscriptions (`source == LlmInferred`); confirming one flips it to
@@ -31,6 +34,7 @@
 //! [`Money`]: phosk_core::money::Money
 //! [`PhoskError`]: phosk_core::error::PhoskError
 
+pub mod lifecycle;
 pub mod recurring_detect;
 pub mod subscription_write;
 pub mod subscriptions;

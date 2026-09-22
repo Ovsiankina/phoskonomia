@@ -245,7 +245,7 @@ pub struct Subscription {
     pub day: u32,
     /// Month label for yearly (e.g. `"FEB"`); empty for monthly.
     pub month: String,
-    /// `"ok" | "soon" | "due" | "watch" | "paused"`.
+    /// `"ok" | "soon" | "due" | "watch" | "paused" | "cancelled"`.
     pub status: String,
     /// Category name.
     pub category: String,

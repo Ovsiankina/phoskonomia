@@ -42,6 +42,15 @@ const fn next_month(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
+/// `(year, month)` moved back one month (wrapping January → December).
+const fn prev_month(year: i32, month: u32) -> (i32, u32) {
+    if month <= 1 {
+        (year - 1, 12)
+    } else {
+        (year, month - 1)
+    }
+}
+
 /// The 1-based month number for an upper-case abbreviation (`"FEB"` ⇒ 2).
 pub(crate) fn month_from_abbr(abbr: &str) -> Option<u32> {
     MONTHS
@@ -81,6 +90,34 @@ fn next_charge_date(
     }
     let (ny, nm) = next_month(as_of.year(), as_of.month());
     clamped_date(ny, nm, day)
+}
+
+/// The billing day of the cycle in progress: the last charge date on or before
+/// `as_of`.
+pub(crate) fn last_charge_date(
+    as_of: NaiveDate,
+    day: u32,
+    cadence: &str,
+    month: &str,
+) -> Result<NaiveDate, PhoskError> {
+    if cadence == "yearly" {
+        // Precondition: `month` is a validated abbreviation (the write path
+        // rejects anything else); January is a last-resort fallback only.
+        let m = month_from_abbr(month).unwrap_or(1);
+        // Yearly charges land on the 1st of the labelled month.
+        let candidate = clamped_date(as_of.year(), m, 1)?;
+        if candidate <= as_of {
+            return Ok(candidate);
+        }
+        return clamped_date(as_of.year() - 1, m, 1);
+    }
+    // Monthly: the last occurrence of day-of-month `day` on/before `as_of`.
+    let this = clamped_date(as_of.year(), as_of.month(), day)?;
+    if this <= as_of {
+        return Ok(this);
+    }
+    let (py, pm) = prev_month(as_of.year(), as_of.month());
+    clamped_date(py, pm, day)
 }
 
 // ── DTOs ────────────────────────────────────────────────────────────────────
@@ -371,7 +408,13 @@ pub async fn subscription_stats(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
 ) -> Result<SubStatsDto, PhoskError> {
-    let subs = list_subscriptions(db, as_of, SubFilter::default()).await?;
+    let all = list_subscriptions(db, as_of, SubFilter::default()).await?;
+    // A paused or cancelled charge stays on the page but costs nothing, so it
+    // is out of every roll-up (ADR: the KPI band counts ACTIVE charges).
+    let subs: Vec<SubscriptionDto> = all
+        .into_iter()
+        .filter(|s| crate::lifecycle::is_active(&s.status))
+        .collect();
     let count = u32::try_from(subs.len()).unwrap_or(u32::MAX);
     let monthly = Money::sum(subs.iter().map(|s| s.monthly_equiv))?;
     let annual_total = Money::from_centimes(
@@ -450,7 +493,8 @@ pub async fn billing_sweep(
     let mut paid_total = Money::ZERO;
     let mut due_total = Money::ZERO;
     for sub in &subs {
-        if sub.cadence != "monthly" {
+        // Paused/cancelled charges do not bill, so they emit no impulse.
+        if sub.cadence != "monthly" || !crate::lifecycle::is_active(&sub.status) {
             continue;
         }
         let paid = sub.day < day_index;
@@ -477,7 +521,9 @@ pub async fn billing_sweep(
     // The next upcoming (not-yet-paid) charge, soonest first.
     let mut upcoming: Vec<&Subscription> = subs
         .iter()
-        .filter(|s| s.cadence == "monthly" && s.day >= day_index)
+        .filter(|s| {
+            s.cadence == "monthly" && s.day >= day_index && crate::lifecycle::is_active(&s.status)
+        })
         .collect();
     upcoming.sort_by_key(|s| s.day);
     let next = match upcoming.first() {
@@ -614,7 +660,12 @@ fn annual(amount: Money, cadence: &str) -> Result<Money, PhoskError> {
 }
 
 /// Whole days from `as_of` to the next occurrence of the charge date. `≤0` = due.
-fn days_until(as_of: NaiveDate, day: u32, cadence: &str, month: &str) -> Result<i32, PhoskError> {
+pub(crate) fn days_until(
+    as_of: NaiveDate,
+    day: u32,
+    cadence: &str,
+    month: &str,
+) -> Result<i32, PhoskError> {
     let next = next_charge_date(as_of, day, cadence, month)?;
     let days = (next - as_of).num_days();
     i32::try_from(days).map_err(|_| PhoskError::Overflow("days_until".to_owned()))
@@ -639,10 +690,11 @@ fn next_label(
 /// Human status label for a status key.
 fn status_label(status: &str) -> String {
     match status {
-        "due" => "NOT SEEN",
-        "soon" => "DUE SOON",
-        "watch" => "REVIEW",
-        "paused" => "PAUSED",
+        crate::lifecycle::STATUS_DUE => "NOT SEEN",
+        crate::lifecycle::STATUS_SOON => "DUE SOON",
+        crate::lifecycle::STATUS_WATCH => "REVIEW",
+        crate::lifecycle::STATUS_PAUSED => "PAUSED",
+        crate::lifecycle::STATUS_CANCELLED => "CANCELLED",
         _ => "ACTIVE",
     }
     .to_owned()
