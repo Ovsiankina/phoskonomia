@@ -368,6 +368,24 @@ impl DatabaseAdapter for MemoryDb {
         Ok(stored_id)
     }
 
+    async fn delete_receipt(&self, id: ReceiptId) -> Result<(), PhoskError> {
+        // Same lock order as `insert_receipt` (receipts → lines → projection)
+        // so the two write paths can never deadlock against each other.
+        let mut receipts = lock(&self.receipts)?;
+        let before = receipts.len();
+        receipts.retain(|r| r.id != id);
+        if receipts.len() == before {
+            return Err(PhoskError::NotFound(format!("receipt {id}")));
+        }
+        lock(&self.line_items)?.retain(|l| l.receipt_id != id);
+        // Drop the dashboard projection this receipt owns, so the deleted spend
+        // stops counting towards `transactions_between` (port contract). The
+        // seeded demo rows in `self.transactions` belong to no receipt and are
+        // left alone.
+        lock(&self.receipt_transactions)?.retain(|(rid, _)| *rid != id);
+        Ok(())
+    }
+
     async fn update_line_item(&self, line: LineItem) -> Result<(), PhoskError> {
         let mut lines = lock(&self.line_items)?;
         let slot = lines

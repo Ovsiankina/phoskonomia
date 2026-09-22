@@ -142,6 +142,25 @@ pub trait DatabaseAdapter: Send + Sync {
         lines: Vec<LineItem>,
     ) -> Result<ReceiptId, PhoskError>;
 
+    /// Remove a [`Receipt`], its [`LineItem`]s and its dashboard projection.
+    ///
+    /// The counterpart of [`insert_receipt`](Self::insert_receipt): whatever
+    /// that call wrote, this one takes back. A deleted spend must stop counting
+    /// everywhere at once — it leaves [`Self::all_receipts`],
+    /// [`Self::receipts_between`], [`Self::line_items`] (no orphan lines) and
+    /// the [`Transaction`] projection behind [`Self::transactions_between`], so
+    /// the cycle aggregates cannot keep a ghost amount. Seeded demo rows of the
+    /// dashboard view have no receipt behind them and are not touched.
+    ///
+    /// The correction audit log ([`Self::record_correction`]) is deliberately
+    /// **not** cleaned up: it records what happened, including to records that
+    /// no longer exist.
+    ///
+    /// # Errors
+    /// - [`PhoskError::NotFound`] if no receipt carries that id.
+    /// - [`PhoskError`] if the store rejects a write.
+    async fn delete_receipt(&self, id: ReceiptId) -> Result<(), PhoskError>;
+
     /// Replace a stored [`LineItem`] with a corrected version.
     ///
     /// # Errors
@@ -630,6 +649,9 @@ mod tests {
             _lines: Vec<LineItem>,
         ) -> Result<ReceiptId, PhoskError> {
             Ok(ReceiptId::new())
+        }
+        async fn delete_receipt(&self, _id: ReceiptId) -> Result<(), PhoskError> {
+            Ok(())
         }
         async fn update_line_item(&self, _line: LineItem) -> Result<(), PhoskError> {
             Ok(())

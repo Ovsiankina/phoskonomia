@@ -121,6 +121,54 @@ pub async fn insert_receipt_same_slug_replaces_the_projection(db: &dyn DatabaseA
     )
 }
 
+/// `delete_receipt` takes back everything `insert_receipt` wrote — the receipt,
+/// its lines and its dashboard projection — and leaves its neighbours alone.
+/// Deleting an unknown (or already deleted) receipt is `NotFound`.
+pub async fn delete_receipt_removes_it_its_lines_and_its_projection(
+    db: &dyn DatabaseAdapter,
+) -> Outcome {
+    let day = date(2027, 1, 10)?;
+    let (gone, kept) = (ReceiptId::new(), ReceiptId::new());
+    db.insert_receipt(
+        receipt(gone, "conf-del", day, 1_000),
+        vec![line(gone, "Apples", 400), line(gone, "Bread", 600)],
+    )
+    .await?;
+    db.insert_receipt(
+        receipt(kept, "conf-del-keep", day, 700),
+        vec![line(kept, "Cheese", 700)],
+    )
+    .await?;
+    let before = db.all_receipts().await?.len();
+
+    db.delete_receipt(gone).await?;
+    ensure_eq(&db.all_receipts().await?.len(), &(before - 1), "count")?;
+    ensure_not_found(db.receipt(gone).await, "receipt(deleted)")?;
+    ensure_not_found(db.receipt_by_slug("conf-del").await, "receipt_by_slug")?;
+    ensure(
+        db.line_items(gone).await?.is_empty(),
+        "no orphan line items",
+    )?;
+
+    let projected = db.transactions_between(day, day).await?;
+    ensure_eq(&projected.len(), &1, "only the surviving projection")?;
+    let got = projected.into_iter().next().ok_or("no projected row")?;
+    ensure_eq(&got.amount.centimes(), &700, "the deleted spend is gone")?;
+
+    ensure_eq(
+        &db.receipt(kept).await?.amount.centimes(),
+        &700,
+        "neighbour",
+    )?;
+    ensure_eq(&db.line_items(kept).await?.len(), &1, "neighbour's lines")?;
+
+    ensure_not_found(db.delete_receipt(gone).await, "delete_receipt(twice)")?;
+    ensure_not_found(
+        db.delete_receipt(ReceiptId::new()).await,
+        "delete_receipt(unknown)",
+    )
+}
+
 /// `receipts_between` keeps exactly the receipts dated inside `[from, to]`,
 /// and rejects `from > to` as invalid input.
 pub async fn receipts_between_filters_inclusively(db: &dyn DatabaseAdapter) -> Outcome {
