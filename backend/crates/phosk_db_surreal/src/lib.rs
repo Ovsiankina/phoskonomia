@@ -304,6 +304,30 @@ impl DatabaseAdapter for SurrealDb {
         Ok(stable_id)
     }
 
+    async fn delete_receipt(&self, id: ReceiptId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self
+            .store
+            .get::<Receipt>(Bucket::Receipt, &key)
+            .await?
+            .is_none()
+        {
+            return Err(PhoskError::NotFound(format!("receipt {id}")));
+        }
+        let lines: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        for line in lines.into_iter().filter(|l| l.receipt_id == id) {
+            self.store
+                .delete(Bucket::LineItem, &line.id.to_string())
+                .await?;
+        }
+        // The dashboard projection `insert_receipt` maintains is keyed on the
+        // receipt id, so deleting that key removes the spend from
+        // `transactions_between` without touching the seeded rows (keyed on a
+        // content digest). Mirrors `phosk_db_memory`.
+        self.store.delete(Bucket::Transaction, &key).await?;
+        self.store.delete(Bucket::Receipt, &key).await
+    }
+
     async fn update_line_item(&self, line: LineItem) -> Result<(), PhoskError> {
         let key = line.id.to_string();
         if self

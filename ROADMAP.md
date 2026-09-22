@@ -35,7 +35,7 @@ Each task: service fn(s) in the feature crate + any new port method in **both** 
 test) + input validation + `Provenance` + errors via `PhoskError`. No UI.
 
 - [x] **T10** — `phosk_ledger`: `create_transaction` (manual entry, with line items; `UserEntered`) (needs: T04)
-- [ ] **T11** — `phosk_ledger`: `edit_transaction` (category, shop, fixed, date, amount → `UserModified`) and `delete_transaction` (needs: T10)
+- [x] **T11** — `phosk_ledger`: `edit_transaction` (category, shop, fixed, date, amount → `UserModified`) and `delete_transaction` (needs: T10)
 - [x] **T12** — `phosk_ledger`: category create / rename / delete-if-empty (needs: T04)
 - [x] **T13** — `phosk_ledger`: category merge and split, re-pointing historical line items atomically (needs: T12)
 - [x] **T14** — `phosk_recurring`: subscription create / edit / delete (needs: T04)

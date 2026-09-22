@@ -13,6 +13,11 @@
 //! (`round(qty × unit_price)`, summed exactly); a total the caller states is
 //! only ever used to *cross-check*, never to overrule the itemisation.
 //!
+//! [`edit_transaction`] corrects such a record (shop · date · category · fixed ·
+//! total) into [`Source::UserModified`], keeping its identity and its lines;
+//! [`delete_transaction`] removes it together with its lines and its dashboard
+//! projection. Both append to the correction audit log.
+//!
 //! [`LineItem`]: phosk_model::LineItem
 //! [`Source::UserEntered`]: phosk_model::Source
 
@@ -23,8 +28,8 @@ use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::cycle::Period;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
-use phosk_id::{LineItemId, ReceiptId};
-use phosk_model::{LineItem, Provenance, Receipt};
+use phosk_id::{CorrectionId, LineItemId, ReceiptId};
+use phosk_model::{CorrectionEvent, LineItem, Provenance, Receipt};
 use serde::{Deserialize, Serialize};
 
 use crate::line_items::line_total;
@@ -468,6 +473,190 @@ fn resolve_amount(stated: Option<Money>, lines: &[LineItem]) -> Result<Money, Ph
         )));
     }
     Ok(derived)
+}
+
+// ── Editing and deleting (write path) ────────────────────────────────────────
+
+/// A correction to an existing transaction: every field is optional and
+/// `None` means "leave it alone". A field set to the value it already holds is
+/// not a change.
+///
+/// The itemisation is not editable here — a line is corrected through
+/// [`correct_line`](crate::line_items::correct_line), which owns per-line
+/// provenance and the audit trail.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TxnEdit {
+    /// New shop display name (trimmed, must not be blank).
+    pub shop: Option<String>,
+    /// New calendar date of the spend.
+    pub date: Option<NaiveDate>,
+    /// New primary category name (trimmed, must not be blank).
+    pub category: Option<String>,
+    /// New fixed/standing-charge flag.
+    pub fixed: Option<bool>,
+    /// New total, exact centimes. Only meaningful for a receipt with no lines:
+    /// with an itemisation the total is derived, so a differing value is
+    /// refused rather than overruling the lines.
+    #[serde(with = "phosk_model::opt_money_centimes")]
+    pub amount: Option<Money>,
+}
+
+/// What a successful [`edit_transaction`] produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditedTxnDto {
+    /// The receipt's slug — unchanged by an edit; it is the record's identity.
+    pub id: String,
+    /// The stored total after the edit, exact centimes.
+    #[serde(with = "phosk_model::money_centimes")]
+    pub amount: Money,
+    /// The field names that actually changed (empty for a no-op edit).
+    pub changed: Vec<String>,
+}
+
+/// Correct an existing transaction's shop, date, category, fixed flag or total.
+///
+/// Resolves the receipt by its `slug`, validates the requested fields, and — if
+/// anything actually changes — rewrites the record with
+/// [`Provenance::user_modified`], appends one [`CorrectionEvent`] per changed
+/// field to the audit log, and persists through `insert_receipt` (the slug is
+/// the idempotency key, so the receipt keeps its id and its dashboard
+/// projection is replaced rather than duplicated).
+///
+/// The receipt's [`LineItem`]s are carried over verbatim: their ids, amounts,
+/// categories and provenance are the line-level write path's business, not
+/// this one's. An edit that changes nothing writes nothing.
+///
+/// # Errors
+/// - [`PhoskError::NotFound`] if no receipt carries that slug.
+/// - [`PhoskError::Invalid`] for a blank shop/category, a negative total, or a
+///   total that contradicts the receipt's itemisation.
+/// - [`PhoskError::Overflow`] if re-deriving the itemised total leaves the
+///   centime range.
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn edit_transaction(
+    db: &dyn DatabaseAdapter,
+    slug: &str,
+    edit: TxnEdit,
+) -> Result<EditedTxnDto, PhoskError> {
+    let mut receipt = db.receipt_by_slug(slug).await?;
+    let lines = db.line_items(receipt.id).await?;
+    let mut audit: Vec<CorrectionEvent> = Vec::new();
+
+    if let Some(shop) = edit.shop {
+        let shop = required(&shop, "shop")?;
+        if shop != receipt.shop {
+            audit.push(change(receipt.id, "shop", &receipt.shop, &shop));
+            receipt.shop = shop;
+        }
+    }
+    if let Some(category) = edit.category {
+        let category = required(&category, "category")?;
+        if category != receipt.category {
+            audit.push(change(receipt.id, "category", &receipt.category, &category));
+            receipt.category = category;
+        }
+    }
+    if let Some(date) = edit.date
+        && date != receipt.date
+    {
+        audit.push(change(
+            receipt.id,
+            "date",
+            &receipt.date.to_string(),
+            &date.to_string(),
+        ));
+        receipt.date = date;
+    }
+    if let Some(fixed) = edit.fixed
+        && fixed != receipt.fixed
+    {
+        audit.push(change(
+            receipt.id,
+            "fixed",
+            &receipt.fixed.to_string(),
+            &fixed.to_string(),
+        ));
+        receipt.fixed = fixed;
+    }
+    if let Some(amount) = edit.amount {
+        // With an itemisation this only ever cross-checks (a disagreement is
+        // refused, exactly as on create); without one it is the record.
+        let amount = resolve_amount(Some(amount), &lines)?;
+        if amount.centimes() < 0 {
+            return Err(PhoskError::Invalid(format!(
+                "a transaction total must not be negative (got {} centimes)",
+                amount.centimes()
+            )));
+        }
+        if amount != receipt.amount {
+            audit.push(change(
+                receipt.id,
+                "amount",
+                &receipt.amount.centimes().to_string(),
+                &amount.centimes().to_string(),
+            ));
+            receipt.amount = amount;
+        }
+    }
+
+    if audit.is_empty() {
+        tracing::debug!("edit changed nothing; leaving the record untouched");
+        return Ok(EditedTxnDto {
+            id: receipt.slug,
+            amount: receipt.amount,
+            changed: Vec::new(),
+        });
+    }
+
+    receipt.provenance = Provenance::user_modified();
+    let (id, amount) = (receipt.slug.clone(), receipt.amount);
+    let changed: Vec<String> = audit.iter().map(|c| c.field.clone()).collect();
+    db.insert_receipt(receipt, lines).await?;
+    for event in audit {
+        db.record_correction(event).await?;
+    }
+    tracing::debug!(fields = changed.len(), "edited a transaction");
+
+    Ok(EditedTxnDto {
+        id,
+        amount,
+        changed,
+    })
+}
+
+/// One audit-log entry for a receipt field that changed, dated today.
+fn change(receipt: ReceiptId, field: &str, old_value: &str, new_value: &str) -> CorrectionEvent {
+    CorrectionEvent {
+        id: CorrectionId::new(),
+        entity_id: receipt.to_string(),
+        field: field.to_owned(),
+        old_value: old_value.to_owned(),
+        new_value: new_value.to_owned(),
+        at: chrono::Utc::now().date_naive(),
+    }
+}
+
+/// Delete a transaction: the receipt, its line items and its dashboard
+/// projection, resolved by `slug`.
+///
+/// The spend stops counting everywhere at once (list, detail and the cycle
+/// aggregates). The correction audit log is left intact — it records what
+/// happened, including to records that no longer exist.
+///
+/// # Errors
+/// - [`PhoskError::NotFound`] if no receipt carries that slug (deleting the
+///   same record twice is an error, never a silent success).
+/// - [`PhoskError`] if the store rejects the write.
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn delete_transaction(db: &dyn DatabaseAdapter, slug: &str) -> Result<(), PhoskError> {
+    let receipt = db.receipt_by_slug(slug).await?;
+    db.delete_receipt(receipt.id).await?;
+    db.record_correction(change(receipt.id, "deleted", slug, ""))
+        .await?;
+    tracing::debug!("deleted a transaction");
+    Ok(())
 }
 
 /// One receipt's detail (avg confidence, OCR source/regions). Resolves the
