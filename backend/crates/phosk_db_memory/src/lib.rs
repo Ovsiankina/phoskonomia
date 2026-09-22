@@ -60,6 +60,10 @@ mod seed;
 #[derive(Debug)]
 pub struct MemoryDb {
     transactions: Vec<Transaction>,
+    // The dashboard `Transaction` projection of every receipt written through
+    // `insert_receipt`, keyed by the stored receipt id so a re-import replaces
+    // its row. Read back alongside `transactions` by `transactions_between`.
+    receipt_transactions: Mutex<Vec<(ReceiptId, Transaction)>>,
     categories: Vec<Category>,
     budget: BudgetConfig,
     // Richer write-side entities (ADR-008 / locked decision #3). Mutable
@@ -99,6 +103,7 @@ impl MemoryDb {
     ) -> Self {
         Self {
             transactions,
+            receipt_transactions: Mutex::new(Vec::new()),
             categories,
             budget,
             receipts: Mutex::new(Vec::new()),
@@ -156,6 +161,7 @@ impl MemoryDb {
 
         Ok(Self {
             transactions,
+            receipt_transactions: Mutex::new(Vec::new()),
             categories,
             budget,
             receipts: Mutex::new(receipts),
@@ -222,12 +228,21 @@ impl DatabaseAdapter for MemoryDb {
                 "transactions_between: from ({from}) is after to ({to})"
             )));
         }
-        let matched: Vec<Transaction> = self
+        let mut matched: Vec<Transaction> = self
             .transactions
             .iter()
             .filter(|tx| tx.date >= from && tx.date <= to)
             .cloned()
             .collect();
+        // Plus the projection of every receipt written through `insert_receipt`
+        // (port contract) — a manually created or approved spend is a
+        // transaction like any other.
+        matched.extend(
+            lock(&self.receipt_transactions)?
+                .iter()
+                .filter(|(_, tx)| tx.date >= from && tx.date <= to)
+                .map(|(_, tx)| tx.clone()),
+        );
         tracing::debug!(count = matched.len(), "filtered transactions in window");
         Ok(matched)
     }
@@ -304,11 +319,12 @@ impl DatabaseAdapter for MemoryDb {
         let id = r.id;
         let slug = r.slug.clone();
 
-        // Lock receipts first, then lines, in a fixed order to avoid deadlock.
+        // Lock receipts, then lines, then the dashboard projection, in a fixed
+        // order to avoid deadlock.
         let mut receipts = lock(&self.receipts)?;
         let mut all_lines = lock(&self.line_items)?;
 
-        if let Some(slot) = receipts.iter_mut().find(|x| x.slug == slug) {
+        let (stored_id, stored) = if let Some(slot) = receipts.iter_mut().find(|x| x.slug == slug) {
             // Replace the existing receipt's payload but keep its stable id so
             // existing relations (line_items.receipt_id) stay valid.
             let existing_id = slot.id;
@@ -321,17 +337,35 @@ impl DatabaseAdapter for MemoryDb {
                 line.receipt_id = existing_id;
                 all_lines.push(line);
             }
-            Ok(existing_id)
+            (existing_id, slot.clone())
         } else {
-            receipts.push(r);
             for mut line in lines {
                 // Defensive: bind every incoming line to this receipt's id so a
                 // caller that minted lines before the receipt id still links.
                 line.receipt_id = id;
                 all_lines.push(line);
             }
-            Ok(id)
+            receipts.push(r.clone());
+            (id, r)
+        };
+
+        // Maintain the dashboard `Transaction` projection of the receipt (port
+        // contract) so the written spend reaches `transactions_between` and the
+        // cycle aggregates. Keyed on the stored receipt id, so a re-import
+        // replaces its row instead of double-counting the spend.
+        let projected = Transaction {
+            date: stored.date,
+            shop: stored.shop,
+            category: stored.category,
+            amount: stored.amount,
+        };
+        let mut mirror = lock(&self.receipt_transactions)?;
+        if let Some(slot) = mirror.iter_mut().find(|(rid, _)| *rid == stored_id) {
+            slot.1 = projected;
+        } else {
+            mirror.push((stored_id, projected));
         }
+        Ok(stored_id)
     }
 
     async fn update_line_item(&self, line: LineItem) -> Result<(), PhoskError> {

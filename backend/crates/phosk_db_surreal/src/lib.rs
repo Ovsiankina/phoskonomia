@@ -285,6 +285,22 @@ impl DatabaseAdapter for SurrealDb {
                 .put(Bucket::LineItem, &line.id.to_string(), &line)
                 .await?;
         }
+
+        // Maintain the dashboard `Transaction` projection of the receipt (port
+        // contract) so the written spend reaches `transactions_between`. Keyed
+        // on the stored receipt id — a re-import replaces the projected row
+        // instead of double-counting the spend. (The seeded rows, which have no
+        // receipt behind them, are keyed on a content digest and never collide
+        // with a receipt id.) Mirrors `phosk_db_memory`.
+        let projected = Transaction {
+            date: receipt.date,
+            shop: receipt.shop,
+            category: receipt.category,
+            amount: receipt.amount,
+        };
+        self.store
+            .put(Bucket::Transaction, &stable_id.to_string(), &projected)
+            .await?;
         Ok(stable_id)
     }
 
