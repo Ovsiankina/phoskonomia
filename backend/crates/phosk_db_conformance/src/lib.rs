@@ -95,6 +95,7 @@ macro_rules! database_adapter_conformance {
             recurring::delete_subscription_removes_it_and_its_charges,
             debts::debts_lookup_by_id_and_slug_agree,
             debts::upsert_debt_inserts_then_replaces,
+            debts::delete_debt_removes_it_and_its_payments,
             debts::debt_payments_are_scoped_and_oldest_first,
             debts::upsert_personal_iou_inserts_then_replaces,
             settings::preferences_lookup_by_key,
