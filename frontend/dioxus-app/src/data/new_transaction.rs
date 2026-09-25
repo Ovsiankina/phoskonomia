@@ -130,7 +130,6 @@ pub(crate) async fn create_transaction_with(
 /// the authority and re-checks everything.
 #[cfg(feature = "server-deps")]
 pub(crate) mod entry {
-    use chrono::NaiveDate;
     use dioxus::prelude::ServerFnError;
     use phosk_core::error::PhoskError;
     use phosk_core::money::Money;
@@ -138,7 +137,8 @@ pub(crate) mod entry {
 
     use super::{NewTxnForm, NewTxnLineForm};
     use crate::data::transactions::line_fix::{
-        check_qty, check_unit_price, label, parse_qty, MAX_CATEGORY_CHARS, MAX_NAME_CHARS,
+        check_qty, check_unit_price, label, parse_date, parse_qty, MAX_CATEGORY_CHARS,
+        MAX_NAME_CHARS,
     };
 
     /// Most line items one entry may carry.
@@ -149,8 +149,7 @@ pub(crate) mod entry {
     /// The typed form → the ledger's input, or the first problem found.
     pub(super) fn parse(form: &NewTxnForm) -> Result<NewTransaction, String> {
         let shop = label(&form.shop, "Shop", MAX_NAME_CHARS).map_err(hint)?;
-        let date = NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d")
-            .map_err(|_| "Date: pick a date.".to_owned())?;
+        let date = parse_date(form.date.trim())?;
         let category = label(&form.category, "Category", MAX_CATEGORY_CHARS).map_err(hint)?;
         let amount = match form.total.trim() {
             "" => None,

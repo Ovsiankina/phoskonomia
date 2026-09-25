@@ -4,6 +4,7 @@
 
 use dioxus::prelude::ServerFnError;
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_core::cycle::Period;
 use phosk_db_memory::MemoryDb;
 use phosk_ledger::transactions::{list_transactions, TransactionDto, TxnFilter};
 use phosk_model::Source;
@@ -37,6 +38,11 @@ async fn row(db: &MemoryDb, id: &str) -> Option<TransactionDto> {
         .transactions
         .into_iter()
         .find(|t| t.id == id)
+}
+
+/// The June cycle window the seed's `today()` resolves to.
+fn june() -> phosk_core::cycle::CycleWindow {
+    Period::Month.resolve(today()).expect("June resolves")
 }
 
 /// A total-only entry of CHF 45.00 on 10 JUN; its slug.
@@ -80,6 +86,10 @@ async fn an_edit_is_saved_user_modified_and_the_list_follows() {
         money(5_875),
         "an itemised total stays derived"
     );
+    assert_eq!(
+        edited.date, "12 JUN",
+        "the caller gets the new date's label, not the pre-edit one"
+    );
     assert_eq!(edited.changed.len(), 4, "shop, category, date, fixed");
 
     let receipt = db.receipt_by_slug(T1).await.expect("stored");
@@ -116,6 +126,46 @@ async fn the_total_of_a_total_only_entry_is_editable() {
     assert_eq!(
         row(&db, &slug).await.expect("listed").amount,
         money(123_450)
+    );
+
+    let window = june();
+    let projected = db
+        .transactions_between(window.start, window.end)
+        .await
+        .expect("projection")
+        .into_iter()
+        .find(|t| t.shop == "Test Kiosk")
+        .expect("the dashboard projection carries this entry");
+    assert_eq!(
+        projected.amount,
+        money(123_450),
+        "the dashboard projection follows the edit, not just the receipt list"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_total_only_entry_removes_its_projection_row() {
+    let db = fresh_db();
+    let slug = total_only(&db).await;
+    let window = june();
+    let before = db
+        .transactions_between(window.start, window.end)
+        .await
+        .expect("projection");
+    assert!(
+        before.iter().any(|t| t.shop == "Test Kiosk"),
+        "projected before the delete"
+    );
+
+    delete_transaction_with(&db, slug).await.expect("deleted");
+
+    let after = db
+        .transactions_between(window.start, window.end)
+        .await
+        .expect("projection");
+    assert!(
+        !after.iter().any(|t| t.shop == "Test Kiosk"),
+        "the dashboard projection row is gone with the receipt"
     );
 }
 
@@ -232,4 +282,44 @@ fn an_unreachable_server_shows_the_fallback() {
         txn_action_error_text(&err, "Could not reach the server."),
         "Could not reach the server."
     );
+}
+
+#[test]
+fn a_server_error_this_module_never_wrote_shows_the_fallback_not_its_own_text() {
+    // What `ServerFnError::from_axum_response` or the "server-only" sentinel
+    // (`server-deps` off) can synthesize: a real `ServerError`, but not one of
+    // this module's own fixed lines.
+    for message in [
+        "HTTP 500: internal server error",
+        "server-only",
+        "unhandled error: panicked at line 12",
+    ] {
+        let err = ServerFnError::ServerError {
+            message: message.to_owned(),
+            code: 500,
+            details: None,
+        };
+        assert_eq!(
+            txn_action_error_text(&err, "fallback"),
+            "fallback",
+            "{message} is not one of this module's fixed lines"
+        );
+    }
+}
+
+#[test]
+fn a_field_hint_from_the_shared_validators_is_shown_verbatim() {
+    for message in [
+        "Shop cannot be empty.",
+        "Category is too long (at most 60 characters).",
+        "Date: pick a date.",
+        "Total: too large (at most CHF 1'000'000).",
+    ] {
+        let err = ServerFnError::ServerError {
+            message: message.to_owned(),
+            code: 400,
+            details: None,
+        };
+        assert_eq!(txn_action_error_text(&err, "fallback"), message);
+    }
 }

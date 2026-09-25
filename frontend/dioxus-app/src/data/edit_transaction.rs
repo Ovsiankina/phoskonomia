@@ -43,6 +43,11 @@ pub struct EditedTxnDto {
     /// The stored total after the edit, exact centimes.
     #[serde(with = "phosk_model::money_centimes")]
     pub amount: Money,
+    /// The stored date's display label after the edit (`"12 JUN"`), exactly as
+    /// `phosk_ledger`'s `date_label` formats it — including when the edit left
+    /// the date untouched. The page uses this instead of re-deriving a label
+    /// from the pre-edit row, which would go stale the moment the date moves.
+    pub date: String,
     /// The field names that changed (empty for a no-op edit).
     pub changed: Vec<String>,
 }
@@ -88,15 +93,46 @@ pub async fn delete_transaction(id: String) -> Result<(), ServerFnError> {
     }
 }
 
-/// The text to show for a failed EDIT or DELETE: the server's own message
-/// (always one of this module's fixed lines), or `unreachable` when the call
-/// never got a server answer.
+/// A receipt no longer found by its slug (deleted, or never existed).
+const GONE: &str = "This transaction no longer exists.";
+/// An itemised receipt's total was targeted by an amount edit.
+const ITEMISED: &str =
+    "This transaction is itemised: its total comes from its lines. Correct a line instead.";
+
+/// The text to show for a failed EDIT or DELETE: one of this module's own
+/// fixed lines, or `unreachable` for anything else. A `ServerError` can also
+/// carry text this module never wrote — dioxus-fullstack's own synthesized
+/// messages (an unhandled extractor/middleware failure, an `"HTTP {status}:
+/// {body}"` from a raw response) or the `"server-only"` sentinel returned when
+/// the `server-deps` feature is off — none of which is page-safe, so only a
+/// known message is ever shown verbatim.
 #[must_use]
 pub fn txn_action_error_text(err: &ServerFnError, unreachable: &str) -> String {
     match err {
-        ServerFnError::ServerError { message, .. } if !message.is_empty() => message.clone(),
+        ServerFnError::ServerError { message, .. } if is_known_message(message) => message.clone(),
         _ => unreachable.to_owned(),
     }
+}
+
+/// Whether `message` is one of the fixed lines [`edit_transaction_with`] /
+/// [`delete_transaction_with`] can produce: [`GONE`], [`ITEMISED`], one of
+/// `patch::failed`'s or `unavailable`'s constant lines, or a field hint from
+/// `label` / `entry::total` / `parse_date` — those never embed anything the
+/// caller typed, only a fixed shape prefixed by the field name.
+fn is_known_message(message: &str) -> bool {
+    const FIXED: &[&str] = &[
+        GONE,
+        ITEMISED,
+        "The edit was refused. Check the values and try again.",
+        "The transaction could not be saved. Try again.",
+        "The transaction store is unavailable. Try again.",
+        "The transaction could not be deleted. Try again.",
+        "Date: pick a date.",
+    ];
+    FIXED.contains(&message)
+        || message.starts_with("Shop ")
+        || message.starts_with("Category ")
+        || message.starts_with("Total: ")
 }
 
 /// The logic behind [`edit_transaction`], driven through the database port.
@@ -121,7 +157,7 @@ pub(crate) async fn edit_transaction_with(
             .map_err(patch::failed)?
             .is_empty()
     {
-        return Err(reply(400, patch::ITEMISED));
+        return Err(reply(400, ITEMISED));
     }
     let edited = phosk_ledger::transactions::edit_transaction(db, &form.id, edit)
         .await
@@ -129,6 +165,7 @@ pub(crate) async fn edit_transaction_with(
     Ok(EditedTxnDto {
         id: edited.id,
         amount: edited.amount,
+        date: edited.date,
         changed: edited.changed,
     })
 }
@@ -146,7 +183,7 @@ pub(crate) async fn delete_transaction_with(
     phosk_ledger::transactions::delete_transaction(db, &id)
         .await
         .map_err(|err| match err {
-            phosk_core::error::PhoskError::NotFound(_) => reply(404, patch::GONE),
+            phosk_core::error::PhoskError::NotFound(_) => reply(404, GONE),
             _ => reply(500, "The transaction could not be deleted. Try again."),
         })
 }
@@ -167,18 +204,15 @@ fn unavailable() -> ServerFnError {
 /// only what the NEW form could.
 #[cfg(feature = "server-deps")]
 mod patch {
-    use chrono::NaiveDate;
     use dioxus::prelude::ServerFnError;
     use phosk_core::error::PhoskError;
     use phosk_ledger::transactions::TxnEdit;
 
-    use super::{reply, EditTxnForm};
+    use super::{reply, EditTxnForm, GONE};
     use crate::data::new_transaction::entry::{hint, total};
-    use crate::data::transactions::line_fix::{label, MAX_CATEGORY_CHARS, MAX_NAME_CHARS};
-
-    pub(super) const GONE: &str = "This transaction no longer exists.";
-    pub(super) const ITEMISED: &str =
-        "This transaction is itemised: its total comes from its lines. Correct a line instead.";
+    use crate::data::transactions::line_fix::{
+        label, parse_date, MAX_CATEGORY_CHARS, MAX_NAME_CHARS,
+    };
 
     /// The typed form → the ledger's patch, or the first problem found.
     pub(super) fn parse(form: &EditTxnForm) -> Result<TxnEdit, String> {
@@ -186,10 +220,7 @@ mod patch {
         let category = label(&form.category, "Category", MAX_CATEGORY_CHARS).map_err(hint)?;
         let date = match form.date.trim() {
             "" => None,
-            raw => Some(
-                NaiveDate::parse_from_str(raw, "%Y-%m-%d")
-                    .map_err(|_| "Date: pick a date.".to_owned())?,
-            ),
+            raw => Some(parse_date(raw)?),
         };
         let amount = match form.total.trim() {
             "" => None,
