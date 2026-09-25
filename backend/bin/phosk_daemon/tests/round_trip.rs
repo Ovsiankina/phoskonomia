@@ -5,9 +5,13 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use phosk_daemon::{Daemon, IngestOutcome, NullIngest, PollConfig, QueueClient};
+use phosk_core::error::PhoskError;
+use phosk_daemon::{
+    Daemon, DrainedBlob, IngestOutcome, NullIngest, PollConfig, QueueClient, ReceiptIngest,
+};
 use phosk_queue::{QueueConfig, QueueState, build_app};
 
 /// A minimal but magic-valid JPEG blob (the queue sniffs `FF D8 FF`).
@@ -148,4 +152,70 @@ async fn long_poll_wakes_on_a_late_arrival() {
     let (outcome, received) = poller.await.expect("poller task");
     assert!(outcome.is_some(), "long-poll woke on the late arrival");
     assert_eq!(received.len(), 1, "the late blob was drained");
+}
+
+/// Records a blob only after a delay, and signals when it has started — lets a
+/// test fire shutdown while a drained blob is mid-ingest.
+struct SlowIngest {
+    started: Arc<tokio::sync::Notify>,
+    done: tokio::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl ReceiptIngest for SlowIngest {
+    async fn ingest(&self, blob: DrainedBlob) -> Result<IngestOutcome, PhoskError> {
+        self.started.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        self.done.lock().await.push(blob.id.clone());
+        Ok(IngestOutcome::Queued { blob_id: blob.id })
+    }
+}
+
+#[tokio::test]
+async fn shutdown_during_ingest_lets_the_drained_blob_finish() {
+    let state = QueueState::new(QueueConfig::default());
+    let base = spawn_queue(state.clone()).await;
+    reqwest::Client::new()
+        .post(format!("{base}/queue/photo"))
+        .body(jpeg_blob(0x11))
+        .send()
+        .await
+        .expect("enqueue");
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let daemon = Daemon::new(
+        QueueClient::new(&base).expect("client"),
+        SlowIngest {
+            started: started.clone(),
+            done: tokio::sync::Mutex::new(Vec::new()),
+        },
+        PollConfig::default(),
+    );
+
+    // Ctrl-C arrives after the destructive pop, while the pipeline runs.
+    let summary = daemon.run(async move { started.notified().await }).await;
+    assert_eq!(summary.processed, 1, "the in-flight blob was not dropped");
+    assert_eq!(daemon.ingest().done.lock().await.len(), 1);
+    assert!(state.is_empty().await);
+}
+
+#[tokio::test]
+async fn oversized_body_is_refused_before_it_is_read_fully() {
+    let state = QueueState::new(QueueConfig::default());
+    let base = spawn_queue(state).await;
+    reqwest::Client::new()
+        .post(format!("{base}/queue/photo"))
+        .body(jpeg_blob(0x22))
+        .send()
+        .await
+        .expect("enqueue");
+
+    let client = QueueClient::new(&base)
+        .expect("client")
+        .with_max_blob_bytes(16);
+    let err = client.poll_next(Duration::from_millis(0)).await;
+    assert!(
+        matches!(&err, Err(PhoskError::Invalid(m)) if m.contains("exceeds")),
+        "{err:?}"
+    );
 }
