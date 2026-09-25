@@ -159,7 +159,7 @@ pub struct SettingsSummaryDto {
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to answer.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>, PhoskError> {
     let prefs = db.preferences().await?;
     Ok(prefs
@@ -180,7 +180,7 @@ pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>,
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to answer.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummaryDto, PhoskError> {
     let prefs = db.preferences().await?;
     let total_preferences = u32::try_from(prefs.len()).unwrap_or(u32::MAX);
@@ -206,7 +206,7 @@ pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummar
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to persist.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn set_preference(
     db: &dyn DatabaseAdapter,
     key: &str,
@@ -219,7 +219,7 @@ pub async fn set_preference(
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to persist.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(), PhoskError> {
     let default_value = match default_for(key) {
         Some(v) => v.to_owned(),
@@ -244,7 +244,7 @@ pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(),
 /// # Errors
 /// Returns a [`PhoskError`] only on an underlying store failure other than
 /// `NotFound` (an unset / unparseable preference is the default, not an error).
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn momentum_baseline_cycles(db: &dyn DatabaseAdapter) -> Result<u32, PhoskError> {
     match db.preference("momentum_baseline_cycles").await {
         Ok(pref) => Ok(pref

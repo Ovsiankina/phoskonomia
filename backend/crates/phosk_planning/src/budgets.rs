@@ -304,7 +304,7 @@ pub async fn allocation(
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if no category matches `name`; propagates
 /// any other [`PhoskError`]; [`PhoskError::Overflow`] on checked centime overflow.
-#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of, name = %name))]
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn category_detail(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
@@ -342,7 +342,7 @@ pub async fn category_detail(
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if no category matches `name`; propagates
 /// any other [`PhoskError`].
-#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of, name = %name))]
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn category_transactions(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
@@ -376,7 +376,7 @@ pub async fn category_transactions(
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if no category matches `name`; propagates
 /// any adapter [`PhoskError`].
-#[tracing::instrument(level = "debug", skip_all, fields(name = %name))]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn set_cap(
     db: &dyn DatabaseAdapter,
     name: &str,
