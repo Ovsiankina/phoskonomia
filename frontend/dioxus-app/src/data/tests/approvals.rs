@@ -3,13 +3,15 @@
 
 use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_core::error::PhoskError;
 use phosk_db_memory::MemoryDb;
 use phosk_model::{AiSuggestion, LineItem, Provenance, Receipt, ReceiptProposal, Source};
 
 use super::support::{fresh_db, money, server_error};
 use crate::data::approvals::{
-    approve_proposal_with, approve_receipt_proposals_with, list_pending_proposals,
-    list_pending_proposals_with, reject_proposal_with, ReceiptGroupDto,
+    approve_error_text, approve_proposal_with, approve_receipt_proposals_with, get_proposal_with,
+    line_mismatch, list_pending_proposals, list_pending_proposals_with, reject_error_text,
+    reject_proposal_with, Booked, ReceiptGroupDto, BOOKED, HALF_DONE, REFUSED, RETRY, UNCONFIRMED,
 };
 
 const SLUG: &str = "rcpt:synthetic-a";
@@ -67,9 +69,16 @@ fn proposal(slug: &str) -> ReceiptProposal {
     }
 }
 
+const GONE: &str = "This proposal is no longer pending. Refresh to see the current queue.";
+
 /// Stage `p` and enqueue its open `receipt` suggestion, as intake does.
 async fn enqueue(db: &MemoryDb, p: &ReceiptProposal) -> String {
     db.stage_receipt_proposal(p.clone()).await.expect("stage");
+    enqueue_only(db, p).await
+}
+
+/// Enqueue `p`'s open `receipt` suggestion WITHOUT staging its payload.
+async fn enqueue_only(db: &MemoryDb, p: &ReceiptProposal) -> String {
     db.enqueue_suggestion(AiSuggestion {
         id: p.suggestion_id,
         kind: "receipt".to_owned(),
@@ -203,9 +212,7 @@ async fn an_invalid_proposal_is_refused_with_a_user_safe_message() {
     let listed = queue(&db).await;
     assert!(!listed[0].proposals[0].bookable, "flagged before approval");
 
-    let fixed = "This proposal can't be booked: it failed validation, was already \
-                 rejected, or conflicts with another open proposal for this receipt. \
-                 Nothing was booked.";
+    let fixed = REFUSED;
     let single = server_error(approve_proposal_with(&db, &id).await);
     let bulk = server_error(approve_receipt_proposals_with(&db, SLUG).await);
     assert_eq!(single, fixed);
@@ -243,11 +250,147 @@ async fn hostile_model_text_is_bounded() {
     let db = fresh_db();
     let mut p = proposal(SLUG);
     p.receipt.shop = format!("{}\u{1b}[31m", "A".repeat(10_000));
+    p.line_items[0].name = "Bana\u{202E}sen\u{200B}ab".to_owned();
     enqueue(&db, &p).await;
 
     let groups = queue(&db).await;
     let r = groups[0].proposals[0].receipt.as_ref().expect("inline");
     assert!(r.shop.chars().count() <= 201, "clipped (+ ellipsis)");
     assert!(!r.shop.chars().any(char::is_control), "no control chars");
+    assert_eq!(r.lines[0].name, "Banasenab", "bidi + zero-width stripped");
     assert!(!groups[0].proposals[0].bookable);
+
+    // The bulk-approve slug check uses the same rule as the service.
+    let msg = server_error(approve_receipt_proposals_with(&db, "rcpt:a\u{202E}b").await);
+    assert_eq!(msg, "That is not a valid receipt.");
+}
+
+#[tokio::test]
+async fn every_line_shows_the_amount_it_books_and_mismatches_are_flagged() {
+    let db = fresh_db();
+    let mut p = proposal(SLUG);
+    // Reads as "1 × CHF 2.45" but books CHF 245.00; the total still adds up,
+    // so the service would book it.
+    p.line_items[0].line_total = money(24_500);
+    p.receipt.amount = money(24_500 + 320 + 300);
+    enqueue(&db, &p).await;
+
+    let groups = queue(&db).await;
+    let prop = &groups[0].proposals[0];
+    assert!(prop.bookable, "validation alone does not catch it");
+    let r = prop.receipt.as_ref().expect("inline");
+    assert_eq!(r.lines[0].line_total, money(24_500));
+    assert_eq!(r.lines[0].unit_price, money(245));
+    let flags: Vec<bool> = r.lines.iter().map(|l| l.mismatch).collect();
+    assert_eq!(flags, [true, false, false]);
+}
+
+#[test]
+fn line_mismatch_rounds_once_to_centimes_with_one_centime_tolerance() {
+    assert!(!line_mismatch(1.0, money(245), money(245)));
+    assert!(line_mismatch(1.0, money(245), money(24_500)));
+    // 3 × 3.33 = 9.99 vs 10.00: within one centime.
+    assert!(!line_mismatch(3.0, money(333), money(1_000)));
+    assert!(line_mismatch(2.0, money(100), money(203)));
+    // 0.5 × 2.45 = 1.225 → 1.23 (half away from zero).
+    assert!(!line_mismatch(0.5, money(245), money(123)));
+    assert!(!line_mismatch(0.5, money(245), money(122)), "tolerance");
+    assert!(line_mismatch(0.5, money(245), money(121)));
+    assert!(line_mismatch(f64::NAN, money(245), money(245)));
+    assert!(line_mismatch(f64::INFINITY, money(245), money(245)));
+}
+
+#[test]
+fn approve_failures_never_claim_what_the_ledger_does_not_show() {
+    let storage = PhoskError::Invalid("db /var/lib/phosk.db locked".to_owned());
+    // `apply` inserted the receipt, then the status update failed.
+    assert_eq!(approve_error_text(&storage, Booked::Yes), HALF_DONE);
+    assert!(!HALF_DONE.contains("Nothing was booked"));
+    assert_eq!(approve_error_text(&storage, Booked::Unknown), UNCONFIRMED);
+    assert_eq!(approve_error_text(&storage, Booked::No), REFUSED);
+    let gone = PhoskError::NotFound("suggestion".to_owned());
+    assert_eq!(approve_error_text(&gone, Booked::No), GONE);
+    assert_eq!(approve_error_text(&gone, Booked::Yes), HALF_DONE);
+    let overflow = PhoskError::Overflow("sum".to_owned());
+    assert_eq!(approve_error_text(&overflow, Booked::No), RETRY);
+}
+
+#[test]
+fn reject_says_booked_only_for_an_accepted_proposal() {
+    let refused = PhoskError::Invalid("already applied".to_owned());
+    assert_eq!(reject_error_text(&refused, "accepted"), BOOKED);
+    // Any other `Invalid` is a storage failure, not a ledger fact.
+    assert_eq!(reject_error_text(&refused, "open"), RETRY);
+    assert_eq!(
+        reject_error_text(&PhoskError::NotFound("x".to_owned()), "open"),
+        GONE
+    );
+}
+
+#[tokio::test]
+async fn conflicting_proposals_are_refused_single_and_bulk() {
+    let db = fresh_db();
+    let before = ledger_len(&db).await;
+    let a = enqueue(&db, &proposal(SLUG)).await;
+    let b = enqueue(&db, &proposal(SLUG)).await;
+    assert_eq!(queue(&db).await[0].proposals.len(), 2);
+
+    for id in [&a, &b] {
+        let msg = server_error(approve_proposal_with(&db, id).await);
+        assert_eq!(msg, REFUSED);
+    }
+    let msg = server_error(approve_receipt_proposals_with(&db, SLUG).await);
+    assert_eq!(msg, REFUSED);
+    assert_eq!(ledger_len(&db).await, before, "nothing booked");
+    assert!(db.receipt_by_slug(SLUG).await.is_err());
+    assert_eq!(queue(&db).await[0].proposals.len(), 2, "both still open");
+}
+
+#[tokio::test]
+async fn a_non_receipt_suggestion_is_gone_and_not_dismissed() {
+    let db = fresh_db();
+    let seeded = db
+        .ai_suggestions()
+        .await
+        .expect("suggestions")
+        .into_iter()
+        .find(|s| s.kind != "receipt" && s.status == "open")
+        .expect("the seed has a non-receipt suggestion");
+    let id = seeded.id.to_string();
+
+    assert_eq!(server_error(approve_proposal_with(&db, &id).await), GONE);
+    assert_eq!(server_error(reject_proposal_with(&db, &id).await), GONE);
+    assert_eq!(server_error(get_proposal_with(&db, &id).await), GONE);
+    let after = db
+        .ai_suggestions()
+        .await
+        .expect("suggestions")
+        .into_iter()
+        .find(|s| s.id == seeded.id)
+        .expect("still there");
+    assert_eq!(after.status, "open", "not dismissed");
+}
+
+#[tokio::test]
+async fn a_missing_payload_is_listed_unbookable() {
+    let db = fresh_db();
+    let id = enqueue_only(&db, &proposal(SLUG)).await;
+
+    let groups = queue(&db).await;
+    let p = &groups[0].proposals[0];
+    assert_eq!(p.suggestion_id, id);
+    assert_eq!(p.receipt, None);
+    assert!(!p.bookable);
+    assert_eq!(get_proposal_with(&db, &id).await.expect("get"), *p);
+}
+
+#[tokio::test]
+async fn get_proposal_reads_one_open_proposal() {
+    let db = fresh_db();
+    let id = enqueue(&db, &proposal(SLUG)).await;
+    let listed = queue(&db).await[0].proposals[0].clone();
+    assert_eq!(get_proposal_with(&db, &id).await.expect("get"), listed);
+
+    reject_proposal_with(&db, &id).await.expect("reject");
+    assert_eq!(server_error(get_proposal_with(&db, &id).await), GONE);
 }
