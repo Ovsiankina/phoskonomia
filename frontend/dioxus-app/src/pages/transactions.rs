@@ -74,10 +74,27 @@ fn hz_period(h: &str) -> &'static str {
     }
 }
 
-/// Whether a reading is below the review threshold — the same `< 0.7` rule as
-/// `phosk_model::Provenance::is_low_confidence` on the backend.
+/// Whether a reading is below the review threshold — delegates to
+/// `phosk_model::is_low_confidence`, the single source of truth this crate
+/// shares with the backend (including how a NaN/out-of-range reading is
+/// treated as low-confidence, never as confident).
 fn is_low_conf(c: f64) -> bool {
-    c < 0.7
+    phosk_model::is_low_confidence(c)
+}
+
+#[cfg(test)]
+mod is_low_conf_tests {
+    use super::is_low_conf;
+
+    #[test]
+    fn nan_confidence_is_low_confidence() {
+        assert!(is_low_conf(f64::NAN));
+    }
+
+    #[test]
+    fn a_normal_confident_value_is_not_low_confidence() {
+        assert!(!is_low_conf(0.9));
+    }
 }
 
 /// Confidence tone (React `ConfDot`): `>=0.85` ok, `>=0.7` blue, else `warn`.

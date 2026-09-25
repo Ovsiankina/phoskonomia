@@ -33,14 +33,15 @@ use phosk_adapter_llm::LlmAdapter;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{MessageId, SuggestionId};
-use phosk_model::{AiSuggestion, Message};
+use phosk_model::{AiSuggestion, Message, is_low_confidence};
 
 use crate::ai_features::InsightDto;
 use crate::ai_spine::AiChatMsgDto;
 
 /// The ADR confidence threshold: proposals below this are flagged (coral),
-/// never silently dropped.
-pub const CONFIDENCE_THRESHOLD: f64 = 0.7;
+/// never silently dropped. A re-export, not a second definition — the
+/// canonical value lives at [`phosk_model::LOW_CONFIDENCE_THRESHOLD`].
+pub use phosk_model::LOW_CONFIDENCE_THRESHOLD as CONFIDENCE_THRESHOLD;
 
 /// Longest model chat reply (in characters) that [`chat_reply`] saves and
 /// returns; a longer completion is cut and the cut marked with `…`.
@@ -90,7 +91,7 @@ impl ProposedWrite {
 /// the low-confidence flag from the ADR threshold. Forces `status = "open"`.
 fn enqueue(mut suggestion: AiSuggestion, model: &str) -> ProposedWrite {
     "open".clone_into(&mut suggestion.status);
-    let low_confidence = suggestion.confidence < CONFIDENCE_THRESHOLD;
+    let low_confidence = is_low_confidence(suggestion.confidence);
     ProposedWrite {
         suggestion,
         model: model.to_owned(),
