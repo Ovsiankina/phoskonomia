@@ -147,11 +147,11 @@ async fn act_on_alert_rejects_bad_input_without_side_effects() {
         act_on_alert_with(&db, "no-such-alert", "dismiss").await,
         404,
     );
-    assert!(msg.starts_with("not found"), "{msg}");
+    assert_eq!(msg, crate::data::server_msg::NOT_FOUND);
     let msg = server_error(act_on_alert_with(&db, "a1", "explode").await, 400);
-    assert!(msg.starts_with("invalid input"), "{msg}");
+    assert_eq!(msg, crate::data::server_msg::INVALID);
     // a3 has no target envelope to raise.
     let msg = server_error(act_on_alert_with(&db, "a3", "apply").await, 400);
-    assert!(msg.starts_with("invalid input"), "{msg}");
+    assert_eq!(msg, crate::data::server_msg::INVALID);
     assert_eq!(active_ids(&db).await, ["a1", "a2", "a3"]);
 }

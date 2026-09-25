@@ -273,47 +273,64 @@ impl Session {
 /// # Errors
 /// A failure from adapter construction (store open, key setup, model-name
 /// validation) can carry a filesystem path or other operational detail (e.g.
-/// a "create surreal dir: …" I/O error), so unlike [`server_err`] it is
-/// **never** passed through: any failure here surfaces to the client as one
-/// fixed, generic [`dioxus::prelude::ServerFnError`].
+/// a "surreal file engine at {path}: …" error), so it is mapped by
+/// [`session_err`], which **never** passes the carried text through.
 #[cfg(feature = "server-deps")]
 pub(crate) async fn build_session() -> Result<Session, dioxus::prelude::ServerFnError> {
     let stack = composition::stack()
         .await
-        .map_err(|_| dioxus::prelude::ServerFnError::ServerError {
-            message: "The app server is unavailable. Please try again.".to_owned(),
-            code: 503,
-            details: None,
-        })?
+        .map_err(|e| session_err(&e))?
         .clone();
     Ok(Session { stack })
+}
+
+/// The fixed, user-facing texts [`server_err`] and [`session_err`] return.
+/// Keyed on the error variant only: no carried string ever reaches a screen.
+#[cfg(feature = "server-deps")]
+pub(crate) mod server_msg {
+    pub(crate) const INVALID: &str =
+        "That request could not be completed. Check the values and try again.";
+    pub(crate) const NOT_FOUND: &str = "That item no longer exists.";
+    pub(crate) const OVERFLOW: &str = "That amount is too large.";
+    pub(crate) const INVALID_DATE: &str = "That date is not valid.";
+    pub(crate) const UNAVAILABLE: &str = "The app server is unavailable. Please try again.";
+}
+
+/// Maps a [`build_session`] failure (adapter construction) to the client:
+/// always [`server_msg::UNAVAILABLE`] at 503, whatever the variant or text.
+#[cfg(feature = "server-deps")]
+pub(crate) fn session_err(_err: &phosk_core::error::PhoskError) -> dioxus::prelude::ServerFnError {
+    dioxus::prelude::ServerFnError::ServerError {
+        message: server_msg::UNAVAILABLE.to_owned(),
+        code: 503,
+        details: None,
+    }
 }
 
 /// Sanitising boundary from [`phosk_core::error::PhoskError`] to the
 /// [`dioxus::prelude::ServerFnError`] a `#[server]` fn returns to the client.
 ///
-/// `Invalid` and `NotFound` messages are written by the feature services **for
-/// the user** (a rejected preference value, "no such receipt") — the services
-/// are the source of those strings, and they never embed a filesystem path or
-/// another user's data, so they pass through unchanged, at the error's own
-/// [`PhoskError::http_status`]. Every other variant (`InvalidDate`,
-/// `Overflow`) can originate from adapter/storage/internal code — carried
-/// strings there are written for a log line, not a screen, and can include a
-/// path or transport detail — so it becomes one fixed, generic message at the
-/// right status instead.
+/// `PhoskError` has no storage/internal variant, so adapters report driver,
+/// I/O and transport failures as `Invalid` (e.g. `phosk_db_surreal`'s
+/// "surreal {context}: {driver error}", `phosk_storage_fs`'s "read blob: {io
+/// error}" with a path) and put internal ids or caller input in `NotFound`
+/// ("receipt {id}", "storage ref {token}"). The carried string is therefore
+/// written for a log line, never a screen: every variant becomes one fixed
+/// [`server_msg`] text at its own [`PhoskError::http_status`]. Pages that need
+/// a field-specific message produce it client-side or via their own
+/// fixed-text mapper (e.g. `budgets::cap_store_error`).
 #[cfg(feature = "server-deps")]
 pub(crate) fn server_err(err: phosk_core::error::PhoskError) -> dioxus::prelude::ServerFnError {
     use phosk_core::error::PhoskError;
-    let code = err.http_status();
     let message = match &err {
-        PhoskError::Invalid(_) | PhoskError::NotFound(_) => err.to_string(),
-        PhoskError::InvalidDate(_) | PhoskError::Overflow(_) => {
-            "Something went wrong. Please try again.".to_owned()
-        }
+        PhoskError::Invalid(_) => server_msg::INVALID,
+        PhoskError::NotFound(_) => server_msg::NOT_FOUND,
+        PhoskError::Overflow(_) => server_msg::OVERFLOW,
+        PhoskError::InvalidDate(_) => server_msg::INVALID_DATE,
     };
     dioxus::prelude::ServerFnError::ServerError {
-        message,
-        code,
+        message: message.to_owned(),
+        code: err.http_status(),
         details: None,
     }
 }

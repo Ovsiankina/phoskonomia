@@ -168,7 +168,7 @@ async fn get_transaction_describes_the_receipt_source() {
 #[tokio::test]
 async fn unknown_receipts_are_not_found() {
     let msg = server_error(get_transaction("t404".into()).await, 404);
-    assert!(msg.starts_with("not found"), "{msg}");
+    assert_eq!(msg, crate::data::server_msg::NOT_FOUND);
     let msg = server_error(get_transaction_lines("t404".into()).await, 404);
-    assert!(msg.starts_with("not found"), "{msg}");
+    assert_eq!(msg, crate::data::server_msg::NOT_FOUND);
 }
