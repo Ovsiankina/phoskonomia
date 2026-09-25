@@ -122,7 +122,7 @@ pub struct NewCategory {
     pub cap: Option<Money>,
     /// Whether this is a fixed (non-discretionary) envelope.
     pub fixed: bool,
-    /// Display glyph; empty falls back to [`DEFAULT_GLYPH`].
+    /// Display glyph; empty falls back to the crate's default glyph (`"◆"`).
     pub glyph: String,
     /// Free-text guidance line shown next to the envelope.
     pub note: String,
