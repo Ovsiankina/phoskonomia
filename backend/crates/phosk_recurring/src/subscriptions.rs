@@ -330,6 +330,10 @@ pub struct SubscriptionDetailDto {
     pub guidance: SubGuidanceDto,
     /// `true` for an AI candidate (CONFIRM/DISMISS instead of cancel).
     pub candidate: bool,
+    /// The lifecycle transitions the backend accepts right now, primary first.
+    pub actions: Vec<crate::lifecycle::LifecycleAction>,
+    /// Whether a charge can be recorded against it right now.
+    pub can_record_charge: bool,
 }
 
 /// Subscription list options for `list_subscriptions`.
@@ -598,12 +602,15 @@ pub async fn subscription_detail(
     };
 
     let candidate = source_str(sub.source) == "llm";
+    let actions = crate::lifecycle::available_actions(&sub, &charges, as_of)?;
 
     Ok(SubscriptionDetailDto {
         subscription: dto,
         recent,
         guidance,
         candidate,
+        actions,
+        can_record_charge: crate::lifecycle::can_record_charge(&sub),
     })
 }
 

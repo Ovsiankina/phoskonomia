@@ -28,9 +28,13 @@
 //!     (the AI CANDIDATES section + the inspector). The open-candidate list
 //!     (`list_recurring_candidates`) is the authority for which records show
 //!     them; only a click confirms.
-//!   * the other mutations (DETECT / MARK PAID / PAUSE / CANCEL / RESUME /
-//!     SNOOZE) have no server fn yet, so those buttons render faithfully but are
-//!     inert (mirroring how the dashboard's `AlertItem` actions are empty).
+//!   * NEW / EDIT / DELETE (with a confirm step) and the lifecycle actions
+//!     (MARK PAID / PAUSE / RESUME / CANCEL / RECORD CHARGE) go through the
+//!     write-path server fns; the inspector offers only the actions the
+//!     backend reports it accepts (`SubscriptionDetailDto::actions`). One write
+//!     at a time; every write re-reads the list, roll-ups, sweep and inspector.
+//!   * DETECT / SNOOZE have no server fn yet, so those buttons render
+//!     faithfully but are inert.
 
 use dioxus::prelude::*;
 use phosk_core::money::Money;
@@ -43,6 +47,10 @@ use crate::data::subscriptions::{
     confirm_recurring_candidate, dismiss_recurring_candidate, get_billing_sweep, get_subscription,
     get_subscription_stats, list_recurring_candidates, list_subscriptions, BillingSweepDto,
     ImpulseDto, RecurringCandidateDto, SubFilter, SubscriptionDetailDto, SubscriptionDto,
+};
+use crate::data::subscriptions::{
+    create_subscription, delete_subscription, edit_subscription, record_subscription_charge,
+    run_subscription_action, SubAction, SubscriptionForm,
 };
 use crate::data::{chf, chf2, cycle::get_cycle, cycle::CycleDto};
 
@@ -730,9 +738,9 @@ fn SubRow(
 
 /// Faithful port of React `SubInspector`. CONFIRM / DISMISS show only for an
 /// OPEN candidate (`candidate_open`, from the candidate list) and route to
-/// `on_candidate`. The other lifecycle actions (MARK PAID / PAUSE / CANCEL /
-/// RESUME / SNOOZE) have no server fn yet, so those buttons render exactly but
-/// are inert (mirroring the dashboard's empty actions).
+/// `on_candidate`. Otherwise the lifecycle actions valid for the status, plus
+/// RECORD CHARGE / EDIT / DELETE (two-step), route to `on_write`. SNOOZE has
+/// no server fn yet and stays inert.
 #[component]
 fn SubInspector(
     detail: Option<SubscriptionDetailDto>,
@@ -744,6 +752,12 @@ fn SubInspector(
     candidate_pending: Option<CandidateAction>,
     candidate_error: Option<String>,
     on_candidate: EventHandler<(String, CandidateAction)>,
+    write_busy: bool,
+    write_error: Option<String>,
+    on_write: EventHandler<SubWrite>,
+    on_edit: EventHandler<(String, SubscriptionForm)>,
+    confirm_del: Signal<Option<String>>,
+    charge: Signal<Option<ChargeDraft>>,
     #[props(default)] variant: Option<String>,
 ) -> Element {
     let panel_cls = match &variant {
@@ -840,12 +854,11 @@ fn SubInspector(
     } else {
         s.since.clone()
     };
-    let primary_label = if s.status == "due" {
-        "MARK PAID"
-    } else {
-        "PAUSE"
-    };
-    let paused = s.status == "paused";
+    let actions = d.actions;
+    let can_charge = d.can_record_charge;
+    let deleting = confirm_del().as_deref() == Some(s.id.as_str());
+    let charge_v = charge().filter(|c| c.id == s.id);
+    let edit_form = form_from_sub(&s);
     let hist = s.hist.clone();
     let cadence_str = s.cadence.clone();
     let price_rose = s.price_rose;
@@ -945,11 +958,24 @@ fn SubInspector(
                         "{dismiss_lbl}"
                     }
                 } else {
-                    button { class: "gbtn p", "{primary_label}" }
-                    if paused {
-                        button { class: "gbtn", "RESUME" }
-                    } else {
-                        button { class: "gbtn coral", "CANCEL" }
+                    for (i , a) in actions.into_iter().enumerate() {
+                        {
+                            let cls = match (a, i) {
+                                (SubAction::Cancel, _) => "gbtn coral",
+                                (_, 0) => "gbtn p",
+                                _ => "gbtn",
+                            };
+                            let id = s.id.clone();
+                            rsx! {
+                                button {
+                                    key: "{a.label()}",
+                                    class: "{cls}",
+                                    disabled: write_busy,
+                                    onclick: move |_| on_write.call(SubWrite::Action(id.clone(), a)),
+                                    "{a.label()}"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -962,8 +988,66 @@ fn SubInspector(
                 }
             }
 
-            div { class: "insp-acts", style: "margin-top:8px",
+            div { class: "insp-acts", style: "margin-top:var(--s-2)",
                 button { class: "gbtn", "SNOOZE" }
+                if can_charge && !candidate {
+                    button {
+                        class: "gbtn",
+                        disabled: write_busy,
+                        onclick: {
+                            let id = s.id.clone();
+                            let amount = edit_form.amount.clone();
+                            move |_| charge.set(Some(ChargeDraft { id: id.clone(), amount: amount.clone(), date: String::new() }))
+                        },
+                        "RECORD CHARGE"
+                    }
+                }
+                if !candidate {
+                    button {
+                        class: "gbtn",
+                        disabled: write_busy,
+                        onclick: {
+                            let id = s.id.clone();
+                            move |_| on_edit.call((id.clone(), edit_form.clone()))
+                        },
+                        "EDIT"
+                    }
+                    if deleting {
+                        button {
+                            class: "gbtn p",
+                            disabled: write_busy,
+                            onclick: {
+                                let id = s.id.clone();
+                                move |_| on_write.call(SubWrite::Delete(id.clone()))
+                            },
+                            if write_busy { "DELETING…" } else { "CONFIRM DELETE" }
+                        }
+                        button { class: "gbtn", disabled: write_busy, onclick: move |_| confirm_del.set(None), "KEEP" }
+                    } else {
+                        button {
+                            class: "gbtn",
+                            disabled: write_busy,
+                            onclick: {
+                                let id = s.id.clone();
+                                move |_| confirm_del.set(Some(id.clone()))
+                            },
+                            "DELETE"
+                        }
+                    }
+                }
+            }
+
+            if let Some(c) = charge_v {
+                ChargeForm { draft: c, busy: write_busy, charge, on_write }
+            }
+
+            if let Some(msg) = write_error {
+                Awaiting {
+                    label: "MOD·SUB · WRITE".to_string(),
+                    legend: Some("NOT SAVED".to_string()),
+                    message: Some(msg),
+                    style: "margin:var(--s-3) var(--s-4)".to_string(),
+                }
             }
 
             if !guidance.is_empty() {
@@ -976,6 +1060,214 @@ fn SubInspector(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  WRITE PATH — create / edit / delete / lifecycle (T38).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// One write the page can run. All of them go through `on_write`, which allows
+/// a single write in flight and refreshes every read afterwards.
+#[derive(Debug, Clone, PartialEq)]
+enum SubWrite {
+    Create(SubscriptionForm),
+    Edit(String, SubscriptionForm),
+    Delete(String),
+    Action(String, SubAction),
+    Charge(ChargeDraft),
+}
+
+impl SubWrite {
+    /// `true` for a write from the create / edit form (its errors show there);
+    /// every other write comes from the inspector.
+    const fn is_form_write(&self) -> bool {
+        matches!(self, Self::Create(_) | Self::Edit(..))
+    }
+}
+
+/// The RECORD CHARGE draft: CHF text + `YYYY-MM-DD` date (empty = today).
+#[derive(Debug, Clone, PartialEq)]
+struct ChargeDraft {
+    id: String,
+    amount: String,
+    date: String,
+}
+
+const MONTH_LABELS: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
+/// The edit form pre-filled from a listed subscription.
+fn form_from_sub(s: &SubscriptionDto) -> SubscriptionForm {
+    SubscriptionForm {
+        name: s.name.clone(),
+        amount: crate::data::budgets::cap_input_text(s.amount),
+        cadence: s.cadence.clone(),
+        day: if s.day == 0 {
+            String::new()
+        } else {
+            s.day.to_string()
+        },
+        // A monthly charge has no month; YEARLY must start on a real one.
+        month: if s.month.is_empty() {
+            "JAN".to_string()
+        } else {
+            s.month.clone()
+        },
+        category: s.category.clone(),
+        glyph: s.glyph.clone(),
+        note: s.note.clone(),
+    }
+}
+
+/// A blank create form (monthly by default).
+fn blank_form() -> SubscriptionForm {
+    SubscriptionForm {
+        cadence: "monthly".to_string(),
+        month: "JAN".to_string(),
+        ..SubscriptionForm::default()
+    }
+}
+
+/// The create / edit form. `editing` is the target id; `None` creates.
+#[component]
+fn SubForm(
+    initial: SubscriptionForm,
+    editing: Option<String>,
+    busy: bool,
+    error: Option<String>,
+    on_write: EventHandler<SubWrite>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut draft = use_signal(|| initial.clone());
+    let d = draft.read().clone();
+    let yearly = d.cadence == "yearly";
+    let (legend, submit) = match (&editing, busy) {
+        (Some(_), false) => ("MOD·SUB · EDIT", "SAVE"),
+        (Some(_), true) => ("MOD·SUB · EDIT", "SAVING…"),
+        (None, false) => ("MOD·SUB · NEW", "CREATE"),
+        (None, true) => ("MOD·SUB · NEW", "CREATING…"),
+    };
+    let submit_write = move |_| {
+        let f = draft.read().clone();
+        on_write.call(match &editing {
+            Some(id) => SubWrite::Edit(id.clone(), f),
+            None => SubWrite::Create(f),
+        });
+    };
+
+    rsx! {
+        div { class: "sub-form osc-bkt blue",
+            span { class: "osc-leg", "{legend}" }
+            div { class: "sub-form-grid",
+                label { class: "sub-f",
+                    span { class: "k", "Name" }
+                    input { value: "{d.name}", disabled: busy, oninput: move |e| draft.write().name = e.value() }
+                }
+                label { class: "sub-f",
+                    span { class: "k", "Amount · CHF" }
+                    input { class: "num", inputmode: "decimal", value: "{d.amount}", disabled: busy, oninput: move |e| draft.write().amount = e.value() }
+                }
+                label { class: "sub-f",
+                    span { class: "k", "Cadence" }
+                    select { value: "{d.cadence}", disabled: busy, onchange: move |e| draft.write().cadence = e.value(),
+                        option { value: "monthly", "MONTHLY" }
+                        option { value: "yearly", "YEARLY" }
+                    }
+                }
+                if yearly {
+                    label { class: "sub-f",
+                        span { class: "k", "Month" }
+                        select { value: "{d.month}", disabled: busy, onchange: move |e| draft.write().month = e.value(),
+                            for m in MONTH_LABELS {
+                                option { key: "{m}", value: "{m}", "{m}" }
+                            }
+                        }
+                    }
+                } else {
+                    label { class: "sub-f",
+                        span { class: "k", "Day of month" }
+                        input { class: "num", inputmode: "numeric", value: "{d.day}", disabled: busy, oninput: move |e| draft.write().day = e.value() }
+                    }
+                }
+                label { class: "sub-f",
+                    span { class: "k", "Category" }
+                    input { value: "{d.category}", disabled: busy, oninput: move |e| draft.write().category = e.value() }
+                }
+                label { class: "sub-f",
+                    span { class: "k", "Glyph" }
+                    input { value: "{d.glyph}", disabled: busy, oninput: move |e| draft.write().glyph = e.value() }
+                }
+                label { class: "sub-f wide",
+                    span { class: "k", "Note" }
+                    input { value: "{d.note}", disabled: busy, oninput: move |e| draft.write().note = e.value() }
+                }
+            }
+            if let Some(msg) = error {
+                Awaiting {
+                    label: "MOD·SUB · SAVE".to_string(),
+                    legend: Some("NOT SAVED".to_string()),
+                    message: Some(msg),
+                    style: "margin-top:var(--s-3)".to_string(),
+                }
+            }
+            div { class: "sub-form-acts",
+                button { class: "gbtn", disabled: busy, onclick: move |_| on_close.call(()), "CLOSE" }
+                button { class: "gbtn p", disabled: busy, onclick: submit_write, "{submit}" }
+            }
+        }
+    }
+}
+
+/// The inspector's RECORD CHARGE form (amount + date).
+#[component]
+fn ChargeForm(
+    draft: ChargeDraft,
+    busy: bool,
+    charge: Signal<Option<ChargeDraft>>,
+    on_write: EventHandler<SubWrite>,
+) -> Element {
+    let submit = if busy { "RECORDING…" } else { "RECORD" };
+    let send = draft.clone();
+    rsx! {
+        div { class: "sub-form osc-bkt blue", style: "margin:var(--s-3) var(--s-4)",
+            span { class: "osc-leg", "MOD·SUB · CHARGE" }
+            div { class: "sub-form-grid",
+                label { class: "sub-f",
+                    span { class: "k", "Amount · CHF" }
+                    input {
+                        class: "num",
+                        inputmode: "decimal",
+                        value: "{draft.amount}",
+                        disabled: busy,
+                        oninput: move |e| {
+                            if let Some(c) = charge.write().as_mut() {
+                                c.amount = e.value();
+                            }
+                        },
+                    }
+                }
+                label { class: "sub-f",
+                    span { class: "k", "Date · empty = today" }
+                    input {
+                        class: "num",
+                        placeholder: "YYYY-MM-DD",
+                        value: "{draft.date}",
+                        disabled: busy,
+                        oninput: move |e| {
+                            if let Some(c) = charge.write().as_mut() {
+                                c.date = e.value();
+                            }
+                        },
+                    }
+                }
+            }
+            div { class: "sub-form-acts",
+                button { class: "gbtn", disabled: busy, onclick: move |_| charge.set(None), "CLOSE" }
+                button { class: "gbtn p", disabled: busy, onclick: move |_| on_write.call(SubWrite::Charge(send.clone())), "{submit}" }
             }
         }
     }
@@ -1265,6 +1557,79 @@ pub fn SubscriptionsPage() -> Element {
         });
     });
 
+    // ---- write path: create / edit / delete / lifecycle ----
+    let mut write_pending = use_signal(|| false);
+    // The last failed write's message, and whether it came from the form.
+    let mut write_error = use_signal(|| Option::<(bool, String)>::None);
+    // `(edit target, initial form)` of the open form; target `None` creates.
+    let mut form = use_signal(|| Option::<(Option<String>, SubscriptionForm)>::None);
+    let mut confirm_del = use_signal(|| Option::<String>::None);
+    let mut charge = use_signal(|| Option::<ChargeDraft>::None);
+    let on_write = use_callback(move |w: SubWrite| {
+        // One write at a time, never against a list that is still refreshing.
+        if *write_pending.peek() || list.pending() {
+            return;
+        }
+        write_pending.set(true);
+        write_error.set(None);
+        let mut candidates = candidates;
+        let mut list = list;
+        let mut stats = stats;
+        let mut sweep = sweep;
+        let mut detail = detail;
+        spawn(async move {
+            let from_form = w.is_form_write();
+            // Only the UI state belonging to the write that succeeded closes:
+            // a PAUSE never discards a half-typed create/edit form.
+            let done = w.clone();
+            let result = match w {
+                SubWrite::Create(f) => create_subscription(f).await.map(Some),
+                SubWrite::Edit(id, f) => edit_subscription(id, f).await.map(|()| None),
+                SubWrite::Delete(id) => delete_subscription(id).await.map(|()| None),
+                SubWrite::Action(id, a) => run_subscription_action(id, a).await.map(|()| None),
+                SubWrite::Charge(c) => record_subscription_charge(c.id, c.amount, c.date)
+                    .await
+                    .map(|()| None),
+            };
+            match (result, done) {
+                (Ok(created), SubWrite::Create(_)) => {
+                    form.set(None);
+                    sel.set(created);
+                }
+                (Ok(_), SubWrite::Edit(..)) => form.set(None),
+                (Ok(_), SubWrite::Charge(_)) => charge.set(None),
+                (Ok(_), SubWrite::Delete(id)) => {
+                    confirm_del.set(None);
+                    if form.peek().as_ref().and_then(|(t, _)| t.as_deref()) == Some(id.as_str()) {
+                        form.set(None);
+                    }
+                    if charge.peek().as_ref().map(|c| c.id.as_str()) == Some(id.as_str()) {
+                        charge.set(None);
+                    }
+                    sel.set(None);
+                }
+                (Ok(_), SubWrite::Action(..)) => {}
+                (Err(e), _) => write_error.set(Some((from_form, candidate_error_text(&e)))),
+            }
+            // Whatever the outcome, re-read everything derived from the store.
+            list.restart();
+            stats.restart();
+            sweep.restart();
+            detail.restart();
+            candidates.restart();
+            write_pending.set(false);
+        });
+    });
+    let list_refreshing = *list.state().read() == UseResourceState::Pending;
+    let write_busy = write_pending() || list_refreshing;
+    let form_v = form();
+    let form_error = write_error()
+        .filter(|(from_form, _)| *from_form && form_v.is_some())
+        .map(|(_, msg)| msg);
+    let insp_error = write_error()
+        .filter(|(from_form, _)| !*from_form)
+        .map(|(_, msg)| msg);
+
     let cand_refreshing = *candidates.state().read() == UseResourceState::Pending;
     let cand_list: Option<Vec<RecurringCandidateDto>> = candidates
         .read()
@@ -1460,6 +1825,15 @@ pub fn SubscriptionsPage() -> Element {
                                     }
                                     div { class: "modes",
                                         button { class: "m", title: "AI: scan transactions for recurring charges", "⌁ DETECT" }
+                                        button {
+                                            class: "m",
+                                            disabled: write_busy,
+                                            onclick: move |_| {
+                                                write_error.set(None);
+                                                form.set(Some((None, blank_form())));
+                                            },
+                                            "+ NEW"
+                                        }
                                     }
                                 }
                             }
@@ -1519,6 +1893,21 @@ pub fn SubscriptionsPage() -> Element {
                                     sel.set(if cur.as_deref() == Some(id.as_str()) { None } else { Some(id) });
                                 },
                                 cycle_label: cycle_label.clone(),
+                            }
+
+                            if let Some((target, initial)) = form_v {
+                                SubForm {
+                                    key: "{target.clone().unwrap_or_default()}",
+                                    initial,
+                                    editing: target,
+                                    busy: write_busy,
+                                    error: form_error,
+                                    on_write,
+                                    on_close: move |()| {
+                                        write_error.set(None);
+                                        form.set(None);
+                                    },
+                                }
                             }
 
                             // ===================== AI CANDIDATES =====================
@@ -1615,6 +2004,15 @@ pub fn SubscriptionsPage() -> Element {
                     candidate_pending: sel_candidate_pending,
                     candidate_error: sel_candidate_error,
                     on_candidate,
+                    write_busy,
+                    write_error: insp_error,
+                    on_write,
+                    on_edit: move |(id, f): (String, SubscriptionForm)| {
+                        write_error.set(None);
+                        form.set(Some((Some(id), f)));
+                    },
+                    confirm_del,
+                    charge,
                 }
             }
         }

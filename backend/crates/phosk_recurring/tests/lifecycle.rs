@@ -27,8 +27,8 @@ use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
 use phosk_recurring::lifecycle::{
-    NewCharge, cancel_subscription, mark_paid, pause_subscription, record_subscription_charge,
-    resume_subscription,
+    LifecycleAction, NewCharge, cancel_subscription, mark_paid, pause_subscription,
+    record_subscription_charge, resume_subscription,
 };
 use phosk_recurring::subscription_write::{NewSubscription, create_subscription};
 use phosk_recurring::subscriptions::{self, SubFilter};
@@ -574,5 +574,76 @@ async fn recording_a_charge_on_an_unknown_subscription_is_not_found() {
         )
         .await,
         "record",
+    );
+}
+
+// ── offered actions ⇔ accepted transitions ───────────────────────────────────
+
+/// Put a fresh seeded store's `slug` into a lifecycle state, then return it.
+async fn prepared(slug: &str, prep: &str) -> MemoryDb {
+    let db = db();
+    match prep {
+        "paused" => pause_subscription(&db, slug).await.expect("pause prep"),
+        "cancelled" => cancel_subscription(&db, slug).await.expect("cancel prep"),
+        _ => {}
+    }
+    db
+}
+
+/// Every seeded charge, in every lifecycle state: the inspector offers an
+/// action exactly when the backend then accepts it, and offers RECORD CHARGE
+/// exactly when a charge dated today is accepted.
+#[tokio::test]
+async fn offered_actions_are_exactly_the_accepted_transitions() {
+    let slugs: Vec<String> = db()
+        .subscriptions()
+        .await
+        .expect("seed")
+        .into_iter()
+        .map(|s| s.slug)
+        .collect();
+    assert!(!slugs.is_empty(), "the seed has standing charges");
+    let mut offered_paid = 0;
+    for slug in &slugs {
+        for prep in ["", "paused", "cancelled"] {
+            let detail =
+                subscriptions::subscription_detail(&prepared(slug, prep).await, as_of(), slug)
+                    .await
+                    .expect("detail");
+            for action in [
+                LifecycleAction::MarkPaid,
+                LifecycleAction::Pause,
+                LifecycleAction::Resume,
+                LifecycleAction::Cancel,
+            ] {
+                let db = prepared(slug, prep).await;
+                let accepted = match action {
+                    LifecycleAction::MarkPaid => mark_paid(&db, slug, as_of()).await,
+                    LifecycleAction::Pause => pause_subscription(&db, slug).await,
+                    LifecycleAction::Resume => resume_subscription(&db, slug, as_of()).await,
+                    LifecycleAction::Cancel => cancel_subscription(&db, slug).await,
+                }
+                .is_ok();
+                assert_eq!(
+                    detail.actions.contains(&action),
+                    accepted,
+                    "{slug} ({prep:?}) {action:?}: offered ⇔ accepted"
+                );
+            }
+            offered_paid += usize::from(detail.actions.contains(&LifecycleAction::MarkPaid));
+            let db = prepared(slug, prep).await;
+            let recorded =
+                record_subscription_charge(&db, slug, as_of(), cycle_charge(as_of(), 500))
+                    .await
+                    .is_ok();
+            assert_eq!(
+                detail.can_record_charge, recorded,
+                "{slug} ({prep:?}) record charge"
+            );
+        }
+    }
+    assert!(
+        offered_paid > 0,
+        "the seed has unsettled cycles to mark paid"
     );
 }
