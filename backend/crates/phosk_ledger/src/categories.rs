@@ -149,7 +149,7 @@ pub async fn create_category(
     let existing = db.category_caps().await?;
     let record = validated_record(&new, &existing)?;
     db.insert_category(record.clone()).await?;
-    tracing::debug!(slug = %record.slug, "created category");
+    tracing::debug!("created category");
     Ok(record)
 }
 
@@ -415,7 +415,7 @@ pub async fn split_category(
 
     db.split_category(&source_name, record.clone(), &lines)
         .await?;
-    tracing::debug!(slug = %record.slug, moved = lines.len(), "split category");
+    tracing::debug!(moved = lines.len(), "split category");
     Ok(record)
 }
 

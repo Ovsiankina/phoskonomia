@@ -560,7 +560,7 @@ pub async fn billing_sweep(
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if `slug` resolves to no subscription;
 /// otherwise propagates any port/derivation error.
-#[tracing::instrument(skip_all, fields(as_of = %as_of, slug))]
+#[tracing::instrument(skip_all, fields(as_of = %as_of))]
 pub async fn subscription_detail(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,

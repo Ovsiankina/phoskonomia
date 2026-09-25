@@ -206,7 +206,7 @@ pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummar
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to persist.
-#[tracing::instrument(skip_all, fields(key))]
+#[tracing::instrument(skip_all)]
 pub async fn set_preference(
     db: &dyn DatabaseAdapter,
     key: &str,
@@ -219,7 +219,7 @@ pub async fn set_preference(
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to persist.
-#[tracing::instrument(skip_all, fields(key))]
+#[tracing::instrument(skip_all)]
 pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(), PhoskError> {
     let default_value = match default_for(key) {
         Some(v) => v.to_owned(),
