@@ -17,12 +17,15 @@
 //! bad rows are reported by row number without aborting the good ones, and
 //! oversized input is refused. All data below is synthetic.
 
+use std::fmt::Write as _;
+
 use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_db_memory::MemoryDb;
 use phosk_ledger::import::{
     AmountColumns, CsvMapping, ImportOptions, MAX_FILE_BYTES, MAX_ROWS, import_csv, parse_csv,
+    parse_csv_as_of,
 };
 use phosk_model::Source;
 
@@ -182,16 +185,37 @@ fn quoted_field_may_span_lines_and_escape_quotes() {
 
 #[test]
 fn garbage_never_panics() {
-    let inputs: [&[u8]; 6] = [
-        b"",
-        b"\"",
-        b";;;;\n\"\"\"\n",
-        b"\xff\xfe\x00garbage",
-        b"\n\n\r\r\n",
-        b"01.06.2026;\"unterminated;-1.00\n02.06.2026;x;-1.00",
-    ];
+    let inputs: [&[u8]; 4] = [b"", b"\"", b";;;;\n\"\"\"\n", b"\n\n\r\r\n"];
     for input in inputs {
         let _ = parse_csv(input, &signed_mapping());
+    }
+}
+
+#[test]
+fn non_utf8_file_is_refused() {
+    assert!(matches!(
+        parse_csv(b"\xff\xfe\x00garbage", &signed_mapping()),
+        Err(PhoskError::Invalid(_))
+    ));
+}
+
+#[test]
+fn unterminated_quote_refuses_the_whole_file() {
+    // A stray quote would otherwise swallow every later record into one
+    // field; half-importing the file would silently drop those rows.
+    let mut csv = String::from("Date;Description;Amount\n");
+    for i in 1..=9 {
+        writeln!(csv, "0{i}.06.2026;Laden {i};-1.00").unwrap();
+    }
+    csv.push_str("10.06.2026;\"Offen;-1.00\n");
+    for _ in 0..490 {
+        csv.push_str("11.06.2026;Danach;-1.00\n");
+    }
+    match parse_csv(csv.as_bytes(), &signed_mapping()) {
+        Err(PhoskError::Invalid(msg)) => {
+            assert!(msg.contains("row 11"), "names the opening row: {msg}");
+        }
+        other => panic!("expected a file-level error, got {other:?}"),
     }
 }
 
@@ -329,4 +353,120 @@ async fn blank_category_is_refused() {
         import_csv(&db, SIGNED.as_bytes(), &opts).await,
         Err(PhoskError::Invalid(_))
     ));
+}
+
+// ── Header detection ───────────────────────────────────────────────────────
+
+#[test]
+fn header_is_the_first_non_blank_record() {
+    let csv = "\n\r\nDate;Description;Amount\n02.06.2026;Kiosk;-1.00\n";
+    let parsed = parse_csv(csv.as_bytes(), &signed_mapping()).expect("parse ok");
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_eq!(parsed.rows.len(), 1);
+    assert_eq!(parsed.rows[0].row, 4, "blank lines still count as rows");
+}
+
+// ── Dates: two-digit pivot and plausibility window ─────────────────────────
+
+fn no_header() -> CsvMapping {
+    CsvMapping {
+        has_header: false,
+        ..signed_mapping()
+    }
+}
+
+fn dates_as_of(today: NaiveDate, dates: &[&str]) -> (Vec<NaiveDate>, Vec<usize>) {
+    let csv = dates.iter().fold(String::new(), |mut csv, d| {
+        writeln!(csv, "{d};Laden;-1.00").unwrap();
+        csv
+    });
+    let parsed = parse_csv_as_of(csv.as_bytes(), &no_header(), today).expect("parse ok");
+    (
+        parsed.rows.iter().map(|r| r.date).collect(),
+        parsed.errors.iter().map(|e| e.row).collect(),
+    )
+}
+
+#[test]
+fn two_digit_years_pivot_on_next_year() {
+    // As of 2026: yy <= 27 is 20yy, yy >= 28 is 19yy (so 28..=69 lands
+    // before the window — see the next test).
+    let (got, errors) = dates_as_of(d(2026, 9, 25), &["01.01.27", "31.12.99", "01.01.70"]);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(got, vec![d(2027, 1, 1), d(1999, 12, 31), d(1970, 1, 1)]);
+}
+
+#[test]
+fn dates_outside_the_plausibility_window_are_row_errors() {
+    let today = d(2026, 9, 25);
+    // Window: 1970-01-01 ..= today + 1 year.
+    let (got, errors) = dates_as_of(
+        today,
+        &[
+            "1970-01-01",
+            "31.12.1969",
+            "2027-09-25",
+            "2027-09-26",
+            "0000-01-01",
+            "9999-12-31",
+            "01.01.28", // 1928, before the window
+        ],
+    );
+    assert_eq!(got, vec![d(1970, 1, 1), d(2027, 9, 25)]);
+    assert_eq!(errors, vec![2, 4, 5, 6, 7]);
+}
+
+// ── Description sanitising ─────────────────────────────────────────────────
+
+#[test]
+fn description_drops_control_and_bidi_characters() {
+    let csv = "02.06.2026;\"Shop\u{0}\u{7}\u{202E}FHC\u{202C}\u{2066}x\u{2069}\tEnd\";-1.00\n\
+               02.06.2026;\u{202E}\u{1b};-1.00\n";
+    let parsed = parse_csv(csv.as_bytes(), &no_header()).expect("parse ok");
+    assert_eq!(parsed.rows.len(), 1);
+    assert_eq!(parsed.rows[0].description, "ShopFHCx End");
+    assert_eq!(parsed.errors.len(), 1, "nothing left = empty description");
+    assert_eq!(parsed.errors[0].row, 2);
+}
+
+// ── Dedupe normalisation ───────────────────────────────────────────────────
+
+fn hash_of(csv: &str, mapping: &CsvMapping) -> String {
+    let parsed = parse_csv(csv.as_bytes(), mapping).expect("parse ok");
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_eq!(parsed.rows.len(), 1);
+    parsed.rows[0].content_hash.clone()
+}
+
+#[test]
+fn equivalent_rows_share_a_content_hash() {
+    let m = no_header();
+    let base = hash_of("01.06.2026;Kiosk Am Platz;-1234.5\n", &m);
+    for variant in [
+        "01.06.2026;Kiosk Am Platz;-1'234.50\n",
+        "01.06.2026;Kiosk Am Platz;-1\u{2019}234.50\n",
+        "2026-06-01;Kiosk Am Platz;-1234.50\n",
+        "1.6.26;Kiosk Am Platz;-1234.50\n",
+        "01.06.2026;  KIOSK   am\tplatz ;-1234.50\n",
+        "01.06.2026;\"Kiosk\nAm Platz\";-1234.50\n",
+    ] {
+        assert_eq!(hash_of(variant, &m), base, "{variant:?}");
+    }
+    let debit_credit = CsvMapping {
+        amount: AmountColumns::DebitCredit {
+            debit: 2,
+            credit: 3,
+        },
+        ..m
+    };
+    assert_eq!(
+        hash_of("01.06.2026;Kiosk Am Platz;1'234.50;\n", &debit_credit),
+        base,
+        "signed and debit/credit mappings agree"
+    );
+    assert_ne!(
+        hash_of("01.06.2026;Kiosk Am Platz;-1234.55\n", &m),
+        base,
+        "a different amount is a different row"
+    );
 }

@@ -8,14 +8,19 @@
 //! **Hostile input.** The bytes are bounded before decoding ([`MAX_FILE_BYTES`],
 //! [`MAX_ROWS`], [`MAX_FIELD_BYTES`]); a malformed row becomes a [`RowError`]
 //! (row number + fixed reason, never an echo of the content) and the valid rows
-//! still import. Nothing here panics on garbage.
+//! still import. A quote left open at end of file is a file-level error: it
+//! would otherwise swallow every later record, and half-importing a file
+//! drops rows silently. Dates must fall in [`EARLIEST_DATE`] ..= one year
+//! after today. Control and bidi-override characters are stripped from the
+//! booking text before it becomes a shop name. Nothing here panics on garbage.
 //!
 //! **Money.** Amounts go through [`Money::parse_chf`] — integer arithmetic only,
 //! apostrophe (`'` / `’`) thousands groups, at most two decimals. No float at
 //! any step.
 //!
 //! **Dedupe.** Each row's slug is `import:<sha256>` of its normalised content
-//! (date, centimes, currency, whitespace-collapsed lowercase description) plus
+//! (date, centimes, currency, whitespace-collapsed lowercase description —
+//! no Unicode normalisation, so NFC and NFD spellings differ) plus
 //! its occurrence index among identical rows of the same file. The slug is the
 //! port's idempotency key, so an already-stored slug is skipped (never
 //! replaced — that would discard user edits). Re-importing a file, or one that
@@ -24,9 +29,9 @@
 //!
 //! [`Source::Imported`]: phosk_model::Source
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
@@ -43,6 +48,12 @@ pub const MAX_ROWS: usize = 20_000;
 pub const MAX_FIELD_BYTES: usize = 1_024;
 /// Most fields a record may have.
 const MAX_FIELDS: usize = 64;
+/// Earliest accepted booking date (1970-01-01); the latest is one year after
+/// today. Anything outside is a row error (a typo or hostile input).
+pub const EARLIEST_DATE: NaiveDate = match NaiveDate::from_ymd_opt(1970, 1, 1) {
+    Some(d) => d,
+    None => NaiveDate::MIN,
+};
 
 /// Which column(s) carry the amount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,9 +80,13 @@ pub enum AmountColumns {
 pub struct CsvMapping {
     /// Field delimiter: `b','` or `b';'`.
     pub delimiter: u8,
-    /// Whether the first record is a header (skipped, but counted as row 1).
+    /// Whether the first non-blank record is a header (skipped; leading blank
+    /// lines before it are allowed and still counted as rows). A preamble of
+    /// non-blank lines is not supported.
     pub has_header: bool,
-    /// Booking date: `dd.mm.yyyy`, `dd.mm.yy` (20yy) or ISO `yyyy-mm-dd`.
+    /// Booking date: `dd.mm.yyyy`, `dd.mm.yy` or ISO `yyyy-mm-dd`. A
+    /// two-digit year up to next year's (`yy <= today's yy + 1`) is 20yy,
+    /// above it 19yy.
     pub date: usize,
     /// Booking text; becomes the shop name.
     pub description: usize,
@@ -147,9 +162,23 @@ pub struct ImportReport {
 ///
 /// # Errors
 /// [`PhoskError::Invalid`] — for the whole file, nothing imported — if the
-/// mapping is unusable, the file exceeds [`MAX_FILE_BYTES`] / [`MAX_ROWS`], or
-/// it is not UTF-8. Every other problem is a per-row [`RowError`].
+/// mapping is unusable, the file exceeds [`MAX_FILE_BYTES`] / [`MAX_ROWS`], it
+/// is not UTF-8, or a quoted field is still open at end of file. Every other
+/// problem is a per-row [`RowError`].
 pub fn parse_csv(bytes: &[u8], mapping: &CsvMapping) -> Result<ParsedCsv, PhoskError> {
+    parse_csv_as_of(bytes, mapping, chrono::Utc::now().date_naive())
+}
+
+/// [`parse_csv`] with an explicit "today" (the two-digit-year pivot and the
+/// upper end of the date window depend on it).
+///
+/// # Errors
+/// As [`parse_csv`].
+pub fn parse_csv_as_of(
+    bytes: &[u8],
+    mapping: &CsvMapping,
+    today: NaiveDate,
+) -> Result<ParsedCsv, PhoskError> {
     validate_mapping(mapping)?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(PhoskError::Invalid(format!(
@@ -163,8 +192,9 @@ pub fn parse_csv(bytes: &[u8], mapping: &CsvMapping) -> Result<ParsedCsv, PhoskE
 
     let mut out = ParsedCsv::default();
     let mut seen: HashMap<String, u32> = HashMap::new();
+    let dates = DateRules::as_of(today);
     let skip = usize::from(mapping.has_header);
-    for record in records.into_iter().filter(|r| r.row > skip) {
+    for record in records.into_iter().skip(skip) {
         let fields = match record.fields {
             Ok(fields) => fields,
             Err(reason) => {
@@ -172,7 +202,7 @@ pub fn parse_csv(bytes: &[u8], mapping: &CsvMapping) -> Result<ParsedCsv, PhoskE
                 continue;
             }
         };
-        match parse_row(&fields, mapping) {
+        match parse_row(&fields, mapping, &dates) {
             Ok(Parsed::Spend {
                 date,
                 description,
@@ -220,6 +250,14 @@ pub async fn import_csv(
         return Err(PhoskError::Invalid("category is required".to_owned()));
     }
     let parsed = parse_csv(bytes, &options.mapping)?;
+    // One read of the stored slugs instead of a lookup per row (a per-row
+    // `receipt_by_slug` is a table scan on SurrealDB — O(n²) per import).
+    let mut stored: HashSet<String> = db
+        .all_receipts()
+        .await?
+        .into_iter()
+        .map(|r| r.slug)
+        .collect();
 
     let mut report = ImportReport {
         imported: 0,
@@ -229,18 +267,14 @@ pub async fn import_csv(
     };
     for row in parsed.rows {
         let slug = format!("import:{}", row.content_hash);
-        match db.receipt_by_slug(&slug).await {
-            Ok(_) => {
-                report.duplicates += 1;
-                continue;
-            }
-            Err(PhoskError::NotFound(_)) => {}
-            Err(other) => return Err(other),
+        if stored.contains(&slug) {
+            report.duplicates += 1;
+            continue;
         }
         db.insert_receipt(
             Receipt {
                 id: ReceiptId::new(),
-                slug,
+                slug: slug.clone(),
                 shop: row.description,
                 date: row.date,
                 category: category.to_owned(),
@@ -254,6 +288,7 @@ pub async fn import_csv(
             Vec::new(),
         )
         .await?;
+        stored.insert(slug);
         report.imported += 1;
     }
     tracing::debug!(
@@ -305,14 +340,38 @@ fn validate_mapping(m: &CsvMapping) -> Result<(), PhoskError> {
     Ok(())
 }
 
-fn parse_row(fields: &[String], m: &CsvMapping) -> Result<Parsed, &'static str> {
+/// The date rules as of one "today": two-digit-year pivot and window.
+struct DateRules {
+    /// Two-digit years up to this are 20yy, above it 19yy.
+    pivot: u32,
+    /// Latest accepted date (today + 1 year).
+    latest: NaiveDate,
+}
+
+impl DateRules {
+    fn as_of(today: NaiveDate) -> Self {
+        let latest = today
+            .checked_add_months(chrono::Months::new(12))
+            .unwrap_or(NaiveDate::MAX);
+        let next_year = u32::try_from(today.year() + 1).unwrap_or(0);
+        Self {
+            pivot: next_year % 100,
+            latest,
+        }
+    }
+}
+
+fn parse_row(fields: &[String], m: &CsvMapping, dates: &DateRules) -> Result<Parsed, &'static str> {
     if fields.iter().any(|f| f.len() > MAX_FIELD_BYTES) {
         return Err("a field is too long");
     }
     let get = |i: usize| fields.get(i).map(|s| s.trim()).ok_or("missing column");
 
-    let date = parse_date(get(m.date)?).ok_or("unrecognised date")?;
-    let description = get(m.description)?
+    let date = parse_date(get(m.date)?, dates.pivot).ok_or("unrecognised date")?;
+    if date < EARLIEST_DATE || date > dates.latest {
+        return Err("date out of range");
+    }
+    let description = strip_unsafe(get(m.description)?)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -346,6 +405,20 @@ fn parse_row(fields: &[String], m: &CsvMapping) -> Result<Parsed, &'static str> 
     }
 }
 
+/// Drop control characters (whitespace ones become a space, collapsed later)
+/// and the bidi embedding/override/isolate characters that can make a shop
+/// name display in a misleading order — the same set the chat panel strips.
+fn strip_unsafe(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+        .filter_map(|c| match c {
+            c if c.is_control() && c.is_whitespace() => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// A signed amount (`-1'234.50`).
 fn amount(s: &str) -> Result<Money, &'static str> {
     Money::parse_chf(s).map_err(|_| "unrecognised amount")
@@ -360,8 +433,8 @@ fn unsigned(s: &str) -> Result<Money, &'static str> {
     Ok(m)
 }
 
-/// `dd.mm.yyyy`, `dd.mm.yy` (read as 20yy) or `yyyy-mm-dd`.
-fn parse_date(s: &str) -> Option<NaiveDate> {
+/// `dd.mm.yyyy`, `dd.mm.yy` (20yy up to `pivot`, else 19yy) or `yyyy-mm-dd`.
+fn parse_date(s: &str, pivot: u32) -> Option<NaiveDate> {
     let num = |p: &str, lens: &[usize]| -> Option<u32> {
         if lens.contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()) {
             p.parse().ok()
@@ -376,7 +449,10 @@ fn parse_date(s: &str) -> Option<NaiveDate> {
             return None;
         };
         let year = match y.len() {
-            2 => 2000 + num(y, &[2])?,
+            2 => match num(y, &[2])? {
+                yy if yy <= pivot => 2000 + yy,
+                yy => 1900 + yy,
+            },
             _ => num(y, &[4])?,
         };
         (year, num(m, &[1, 2])?, num(d, &[1, 2])?)
@@ -445,7 +521,9 @@ fn read_records(text: &str, delim: char) -> Result<Vec<Record>, PhoskError> {
         loop {
             let Some(c) = chars.next() else {
                 if quoted {
-                    bad = Some("unterminated quoted field");
+                    return Err(PhoskError::Invalid(format!(
+                        "unterminated quoted field starting at row {row}"
+                    )));
                 }
                 break;
             };
