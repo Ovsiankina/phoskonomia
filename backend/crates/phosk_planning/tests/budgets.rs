@@ -17,14 +17,12 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED tests for the `phosk_planning::budgets` service slice (F3).
+//! Tests for the `phosk_planning::budgets` service slice (F3).
 //!
 //! These pin the budgets/categories/allocation contract against the deterministic
 //! Swiss seed (`phosk_db_memory::MemoryDb::seeded()`) at the spec clock
-//! `as_of = 2026-06-18` (day 18 of the 30-day June cycle). Every body in
-//! `phosk_planning::budgets` is `todo!()` today, so every test here MUST COMPILE
-//! and then FAIL at runtime (the `todo!()` panics). No production logic lives in
-//! the test crate.
+//! `as_of = 2026-06-18` (day 18 of the 30-day June cycle), against the
+//! implemented `phosk_planning::budgets` service.
 //!
 //! ## Ground truth (hand-computed from the seed)
 //!

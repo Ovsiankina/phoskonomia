@@ -17,12 +17,11 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for the `[preferences]` feature of `phosk_settings`.
+//! Integration tests for the `[preferences]` feature of `phosk_settings`.
 //!
 //! These drive the public service fns against the deterministic Swiss
 //! May/June-2026 seed in [`phosk_db_memory::MemoryDb`] and assert the EXACT
-//! values the seed pins. They are written before the implementation: every body
-//! is `todo!()`, so each test compiles and then PANICS at runtime (red).
+//! values the seed pins, against the implemented service.
 //!
 //! The seed (see `phosk_db_memory::seed::seed_preferences`) is the source of
 //! truth for the expected values:

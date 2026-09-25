@@ -283,8 +283,6 @@ pub(crate) async fn build_session() -> Result<Session, dioxus::prelude::ServerFn
     Ok(Session { stack })
 }
 
-// Foundation API consumed by page/data agents; unused until they land.
-#[allow(dead_code)]
 /// Swiss-currency formatter: apostrophe thousands, dot decimal, `−` for negatives
 /// (e.g. `CHF 1'234.50` renders `1’234.50`, `-12.5` renders `−12.50`).
 ///
@@ -336,7 +334,6 @@ pub fn chf(amount: Money, dp: usize) -> String {
 }
 
 /// `chf` with the default 2 decimal places (the common case).
-#[allow(dead_code)]
 #[must_use]
 pub fn chf2(amount: Money) -> String {
     chf(amount, 2)

@@ -264,7 +264,7 @@ pub fn DebtsPage() -> Element {
             "apr" => arr.sort_by(|a, b| b.apr.total_cmp(&a.apr).then(b.balance.cmp(&a.balance))),
             "name" => arr.sort_by(|a, b| a.name.cmp(&b.name)),
             "payoff" => arr.sort_by_key(|d| d.months_to_payoff),
-            _ => arr.sort_by(|a, b| b.balance.cmp(&a.balance)),
+            _ => arr.sort_by_key(|d| std::cmp::Reverse(d.balance)),
         }
         arr
     };
