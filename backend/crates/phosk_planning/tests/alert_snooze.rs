@@ -37,22 +37,31 @@ async fn listed(db: &MemoryDb, as_of: NaiveDate, slug: &str) -> bool {
 
 /// Groceries (`a2`'s target) spent and cap at `today`.
 async fn groceries(db: &MemoryDb) -> (i64, i64) {
+    envelope(db, "Groceries").await
+}
+
+/// One envelope's spent and cap at `today`.
+async fn envelope(db: &MemoryDb, name: &str) -> (i64, i64) {
     let cats = categories(db, today()).await.expect("categories");
     let g = cats
         .iter()
-        .find(|c| c.name == "Groceries")
-        .expect("Groceries envelope");
+        .find(|c| c.name == name)
+        .expect("seeded envelope");
     (g.spent.centimes(), g.budget.centimes())
 }
 
 async fn spend_groceries(db: &MemoryDb, slug: &str, centimes: i64) {
+    spend(db, slug, "Groceries", centimes).await;
+}
+
+async fn spend(db: &MemoryDb, slug: &str, category: &str, centimes: i64) {
     db.insert_receipt(
         Receipt {
             id: ReceiptId::new(),
             slug: slug.to_owned(),
             shop: "Test Market".to_owned(),
             date: today(),
-            category: "Groceries".to_owned(),
+            category: category.to_owned(),
             amount: Money::from_centimes(centimes),
             fixed: false,
             provenance: Provenance::user_entered(),
@@ -105,7 +114,7 @@ async fn a_worsening_condition_brings_the_alert_back_early() {
     let term = snooze_alert(&db, "a2", SnoozeUntil::NextCycle, today())
         .await
         .expect("snooze ok");
-    assert!(term.level < 2, "Groceries is not over budget when snoozed");
+    assert_eq!(term.level, 0, "no Groceries rule fires when snoozed");
     assert!(!listed(&db, today(), "a2").await);
 
     spend_groceries(&db, "t-over", cap - spent + 1).await;
@@ -144,7 +153,9 @@ async fn invalid_snoozes_are_rejected() {
     let res = snooze_alert(&db, "nope", SnoozeUntil::NextCycle, today()).await;
     assert!(matches!(res, Err(PhoskError::NotFound(_))), "{res:?}");
 
-    act_on_alert(&db, "a1", "dismiss").await.expect("dismiss");
+    act_on_alert(&db, "a1", "dismiss", today())
+        .await
+        .expect("dismiss");
     let res = snooze_alert(&db, "a1", SnoozeUntil::NextCycle, today()).await;
     assert!(matches!(res, Err(PhoskError::Invalid(_))), "{res:?}");
 
@@ -155,18 +166,79 @@ async fn invalid_snoozes_are_rejected() {
 }
 
 #[tokio::test]
+async fn an_at_risk_level_brings_a_quiet_alert_back_early() {
+    let db = seeded();
+    let (spent, cap) = groceries(&db).await;
+    let term = snooze_alert(&db, "a2", SnoozeUntil::NextCycle, today())
+        .await
+        .expect("snooze ok");
+    assert_eq!(term.level, 0, "no Groceries rule fires when snoozed");
+
+    // Just under the cap: the run-rate / 80 % rule fires, the over rule not.
+    spend_groceries(&db, "t-risk", cap - spent - 100).await;
+    assert!(listed(&db, today(), "a2").await, "at risk re-triggers");
+}
+
+#[tokio::test]
+async fn at_risk_holds_up_to_the_cap_and_re_triggers_past_it() {
+    let db = seeded();
+    let (spent, cap) = groceries(&db).await;
+    spend_groceries(&db, "t-risk", cap - spent - 100).await;
+    let term = snooze_alert(&db, "a2", SnoozeUntil::NextCycle, today())
+        .await
+        .expect("snooze ok");
+    assert_eq!(term.level, 1, "snoozed while at risk");
+
+    spend_groceries(&db, "t-more", 50).await;
+    assert!(!listed(&db, today(), "a2").await, "still at risk: held");
+
+    // `spent == cap` is not over budget (the rule is `spent > cap`).
+    spend_groceries(&db, "t-cap", 50).await;
+    assert_eq!(groceries(&db).await.0, cap, "precondition: spent == cap");
+    assert!(!listed(&db, today(), "a2").await, "at the cap: held");
+
+    spend_groceries(&db, "t-over", 1).await;
+    assert!(listed(&db, today(), "a2").await, "over budget re-triggers");
+}
+
+#[tokio::test]
+async fn snoozing_at_the_cap_records_at_risk_not_over() {
+    let db = seeded();
+    let (spent, cap) = groceries(&db).await;
+    spend_groceries(&db, "t-cap", cap - spent).await;
+    let term = snooze_alert(&db, "a2", SnoozeUntil::NextCycle, today())
+        .await
+        .expect("snooze ok");
+    assert_eq!(term.level, 1, "spent == cap is at risk, not over");
+}
+
+#[tokio::test]
 async fn the_snooze_action_snoozes_until_the_next_cycle() {
     let db = seeded();
-    act_on_alert(&db, "a3", "snooze").await.expect("snooze ok");
+    act_on_alert(&db, "a3", "snooze", today())
+        .await
+        .expect("snooze ok");
     let all = db.alerts().await.expect("alerts");
     let a3 = all.iter().find(|a| a.slug == "a3").expect("a3");
     assert_eq!(a3.status, "snoozed");
     let term = a3.snooze.expect("the action records a term");
-    let now = chrono::Utc::now().date_naive();
-    assert!(term.until > now, "ends in the future");
-    assert_eq!(
-        term.until.format("%d").to_string(),
-        "01",
-        "on a cycle start"
-    );
+    assert_eq!(term.until, naive(2026, 7, 1), "the cycle after as_of");
+    assert!(!listed(&db, naive(2026, 6, 30), "a3").await);
+    assert!(listed(&db, naive(2026, 7, 1), "a3").await);
+}
+
+#[tokio::test]
+async fn the_snooze_action_keeps_an_at_risk_alert_hidden_at_as_of() {
+    let db = seeded();
+    // a1 targets Going out; put it at risk (under the cap) on the demo day.
+    let (spent, cap) = envelope(&db, "Going out").await;
+    spend(&db, "t-risk", "Going out", cap - spent - 100).await;
+    act_on_alert(&db, "a1", "snooze", today())
+        .await
+        .expect("snooze ok");
+    let all = db.alerts().await.expect("alerts");
+    let a1 = all.iter().find(|a| a.slug == "a1").expect("a1");
+    let term = a1.snooze.expect("the action records a term");
+    assert_eq!(term.level, 1, "level measured at as_of");
+    assert!(!listed(&db, today(), "a1").await, "hidden at as_of");
 }

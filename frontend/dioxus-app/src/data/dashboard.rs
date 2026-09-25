@@ -349,7 +349,7 @@ pub(crate) async fn act_on_alert_with(
     id: &str,
     action: &str,
 ) -> Result<(), ServerFnError> {
-    phosk_planning::alerts::act_on_alert(db, id, action)
+    phosk_planning::alerts::act_on_alert(db, id, action, crate::data::today())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }

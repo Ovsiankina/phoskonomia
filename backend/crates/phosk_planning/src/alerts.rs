@@ -157,15 +157,20 @@ async fn category_spend_receipts(
 
 /// Act on a dashboard alert (`POST /alerts/{id}/{dismiss|snooze|apply}`).
 ///
+/// `as_of` is the caller's "today", the same day it reads [`alerts`] with:
+/// the SNOOZE action's term (the next cycle) and recorded level are measured
+/// against it, so the snooze compares like with like on the next read.
+///
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if no alert matches `alert`; returns
 /// [`PhoskError::Invalid`] for an unknown `action`; propagates any adapter
 /// [`PhoskError`].
-#[tracing::instrument(level = "debug", skip_all, fields(alert = %alert, action = %action))]
+#[tracing::instrument(level = "debug", skip_all, fields(alert = %alert, action = %action, as_of = %as_of))]
 pub async fn act_on_alert(
     db: &dyn DatabaseAdapter,
     alert: &str,
     action: &str,
+    as_of: NaiveDate,
 ) -> Result<(), PhoskError> {
     // Resolve the alert (by slug) to its typed id + target; NotFound if absent.
     let entity = db
@@ -177,12 +182,9 @@ pub async fn act_on_alert(
 
     match action {
         "dismiss" => db.update_alert_status(entity.id, "dismissed").await,
-        "snooze" => {
-            let today = chrono::Utc::now().date_naive();
-            snooze_alert(db, alert, SnoozeUntil::NextCycle, today)
-                .await
-                .map(|_| ())
-        }
+        "snooze" => snooze_alert(db, alert, SnoozeUntil::NextCycle, as_of)
+            .await
+            .map(|_| ()),
         "apply" => raise_targeted_cap(db, entity.target.as_deref()).await,
         other => Err(PhoskError::Invalid(format!("unknown alert action {other}"))),
     }
