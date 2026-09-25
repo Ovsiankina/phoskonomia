@@ -775,6 +775,74 @@ async fn correct_line_unit_price_negative_is_invalid() {
     );
 }
 
+/// A qty above `MAX_QTY` is rejected — the stored line is untouched.
+#[tokio::test]
+async fn correct_line_qty_above_max_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, before.id, "qty", "100000.5")
+        .await
+        .expect_err("a qty above MAX_QTY must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "qty above the cap → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A qty exactly at `MAX_QTY` is still accepted.
+#[tokio::test]
+async fn correct_line_qty_at_max_is_accepted() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    correct_line(&db, before.id, "qty", "100000")
+        .await
+        .expect("a qty exactly at MAX_QTY is accepted");
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert!((after.qty - phosk_ledger::line_items::MAX_QTY).abs() < f64::EPSILON);
+}
+
+/// A unit price above `MAX_UNIT_PRICE_CENTIMES` is rejected — the stored line
+/// is untouched.
+#[tokio::test]
+async fn correct_line_unit_price_above_max_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, before.id, "unit_price", "100000001")
+        .await
+        .expect_err("a unit price above the cap must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "unit price above the cap → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A unit price exactly at `MAX_UNIT_PRICE_CENTIMES` is still accepted.
+#[tokio::test]
+async fn correct_line_unit_price_at_max_is_accepted() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    correct_line(&db, before.id, "unit_price", "100000000")
+        .await
+        .expect("a unit price exactly at the cap is accepted");
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        after.unit_price.centimes(),
+        phosk_ledger::line_items::MAX_UNIT_PRICE_CENTIMES
+    );
+}
+
 /// The write path is callable behind the `&dyn DatabaseAdapter` PORT (ADR-010).
 #[tokio::test]
 async fn correct_line_works_through_the_port_trait_object() {

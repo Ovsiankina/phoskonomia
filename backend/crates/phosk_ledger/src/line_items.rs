@@ -160,10 +160,12 @@ pub const MAX_UNIT_PRICE_CENTIMES: i64 = 100_000_000;
 /// flips its provenance to `UserModified`). Write path.
 ///
 /// # Errors
-/// - [`PhoskError::Invalid`] for an unknown field, a blank or over-long
-///   name/category, a qty that is not finite and positive, or a negative
-///   unit price — matching the shape [`crate::transactions::create_transaction`]
-///   already refuses on manual entry. Nothing is written when validation
+/// - [`PhoskError::Invalid`] for an unknown field; a blank or over-long
+///   name/category, or one containing control characters; a qty that is not
+///   finite and positive or is above [`MAX_QTY`]; or a unit price that is
+///   negative or above [`MAX_UNIT_PRICE_CENTIMES`] — matching the shape
+///   [`crate::transactions::create_transaction`] already refuses on manual
+///   entry, plus the caps the UI enforces. Nothing is written when validation
 ///   fails: the stored line, its provenance and the audit log are untouched.
 /// - [`PhoskError::NotFound`] if no receipt holds `line`, or a `signal_id`
 ///   names a signal slug that does not exist.
