@@ -312,6 +312,83 @@ async fn edit_applies_only_the_supplied_fields_and_stamps_user_modified() {
 }
 
 #[tokio::test]
+async fn edit_with_no_fields_set_leaves_the_record_and_provenance_untouched() {
+    let db = db();
+    let before = db.subscription_by_slug("netflix").await.expect("seeded");
+    assert_eq!(
+        before.provenance,
+        phosk_model::Provenance::user_entered(),
+        "netflix starts user-entered, not yet edited"
+    );
+
+    edit_subscription(&db, "netflix", SubscriptionEdit::default())
+        .await
+        .expect("a no-op edit is not an error");
+
+    let after = db
+        .subscription_by_slug("netflix")
+        .await
+        .expect("still there");
+    assert_eq!(
+        after, before,
+        "an all-None edit changes nothing, provenance included"
+    );
+}
+
+#[tokio::test]
+async fn edit_setting_fields_to_their_current_values_leaves_provenance_untouched() {
+    let db = db();
+    let before = db.subscription_by_slug("netflix").await.expect("seeded");
+    assert_eq!(before.provenance, phosk_model::Provenance::user_entered());
+
+    edit_subscription(
+        &db,
+        "netflix",
+        SubscriptionEdit {
+            amount: Some(before.amount),
+            note: Some(before.note.clone()),
+            category: Some(before.category.clone()),
+            ..SubscriptionEdit::default()
+        },
+    )
+    .await
+    .expect("re-supplying the current values is not an error");
+
+    let after = db
+        .subscription_by_slug("netflix")
+        .await
+        .expect("still there");
+    assert_eq!(
+        after, before,
+        "an edit that resolves to the current values must not launder into \
+         a user decision: provenance stays user-entered, not user-modified"
+    );
+}
+
+/// A no-op edit must succeed even when the STORED record already fails
+/// today's validation rules (e.g. grandfathered before a rule tightened):
+/// nothing is written either way, so there is nothing to reject.
+#[tokio::test]
+async fn edit_no_op_on_a_record_that_already_fails_validation_is_ok() {
+    let db = db();
+    let mut invalid = db.subscription_by_slug("netflix").await.expect("seeded");
+    invalid.category = String::new();
+    db.upsert_subscription(invalid.clone())
+        .await
+        .expect("stored directly, bypassing validate");
+
+    edit_subscription(&db, "netflix", SubscriptionEdit::default())
+        .await
+        .expect("a no-op edit must not be rejected by validation");
+
+    let after = db
+        .subscription_by_slug("netflix")
+        .await
+        .expect("still there");
+    assert_eq!(after, invalid, "nothing changed");
+}
+
+#[tokio::test]
 async fn edit_keeps_the_slug_stable_when_the_name_changes() {
     let db = db();
     edit_subscription(

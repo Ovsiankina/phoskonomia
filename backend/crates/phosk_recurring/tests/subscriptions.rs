@@ -555,6 +555,67 @@ async fn detail_marks_user_subscriptions_as_non_candidate() {
 }
 
 #[tokio::test]
+async fn detail_candidate_flag_turns_off_once_a_candidate_is_dismissed() {
+    let db = db();
+    // icloud is the seeded open LLM candidate (source == LlmInferred, not paused).
+    let before = subscriptions::subscription_detail(&db, as_of(), "icloud")
+        .await
+        .expect("detail ok");
+    assert!(before.candidate, "icloud starts as an open candidate");
+
+    recurring_detect::dismiss_candidate(&db, "icloud")
+        .await
+        .expect("dismiss ok");
+
+    // Dismissal pauses the record without confirming it (source stays
+    // LlmInferred): the detail candidate flag must agree with the detector's
+    // own openness test and drop to false, not stay true because the source
+    // is still machine-inferred.
+    let after = subscriptions::subscription_detail(&db, as_of(), "icloud")
+        .await
+        .expect("detail ok");
+    assert!(
+        !after.candidate,
+        "a dismissed (paused) candidate is no longer an OPEN candidate"
+    );
+}
+
+#[tokio::test]
+async fn detail_candidate_flag_is_false_for_a_rule_generated_subscription() {
+    use phosk_adapter_db::DatabaseAdapter;
+    use phosk_id::SubscriptionId;
+    use phosk_model::{Provenance, Source};
+
+    let db = db();
+    let mut rule_generated = db
+        .subscription_by_slug("icloud")
+        .await
+        .expect("seeded icloud");
+    rule_generated.id = SubscriptionId::new();
+    rule_generated.slug = "rule-generated-sub".to_owned();
+    rule_generated.source = Source::RuleGenerated;
+    rule_generated.provenance = Provenance {
+        source: Source::RuleGenerated,
+        confidence: 1.0,
+    };
+    db.upsert_subscription(rule_generated)
+        .await
+        .expect("insert ok");
+
+    // `RuleGenerated` is not a detection candidate (only `LlmInferred` is), so
+    // the detail flag must agree with `recurring_detect::is_open_candidate`
+    // and stay false even though the old bug's `source_str(..) == "llm"` test
+    // also maps `RuleGenerated` to the wire string `"llm"`.
+    let detail = subscriptions::subscription_detail(&db, as_of(), "rule-generated-sub")
+        .await
+        .expect("detail ok");
+    assert!(
+        !detail.candidate,
+        "a RuleGenerated record is not an AI recurring-detection candidate"
+    );
+}
+
+#[tokio::test]
 async fn detail_unknown_slug_is_not_found() {
     let db = db();
     let err = subscriptions::subscription_detail(&db, as_of(), "does-not-exist")

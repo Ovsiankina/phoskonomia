@@ -146,7 +146,9 @@ pub async fn create_subscription(
 /// Only the `Some` fields of `edit` change; the merged record is validated
 /// before anything is written, so a rejected edit leaves the store untouched.
 /// Every changed field is appended to the correction audit log and the record's
-/// provenance becomes [`Provenance::user_modified`].
+/// provenance becomes [`Provenance::user_modified`]. An edit that changes
+/// nothing (all-`None`, or fields set to their current values) writes
+/// nothing: no provenance rewrite, no audit event.
 ///
 /// # Errors
 /// [`PhoskError::NotFound`] if `slug` resolves to no subscription,
@@ -196,6 +198,20 @@ pub async fn edit_subscription(
     }
 
     let mut next = normalized(next);
+
+    let changes = changed_fields(&current, &next);
+    if changes.is_empty() {
+        // Nothing in the merged record differs from what is stored (an
+        // all-`None` edit, or one setting fields to their current values):
+        // write nothing, so a no-op edit cannot launder itself into a user
+        // decision (no provenance rewrite, no audit event). Checked before
+        // `validate` so a no-op on a record that fails today's rules (e.g.
+        // grandfathered before a validation rule tightened) still succeeds:
+        // nothing is written either way, so there is nothing to reject.
+        tracing::debug!("edit changed nothing; leaving the record untouched");
+        return Ok(());
+    }
+
     validate(&next)?;
     if next.name != current.name {
         // The slug is frozen at creation, but a rename must not collide with
@@ -208,9 +224,8 @@ pub async fn edit_subscription(
             )));
         }
     }
-    next.provenance = Provenance::user_modified();
 
-    let changes = changed_fields(&current, &next);
+    next.provenance = Provenance::user_modified();
     db.upsert_subscription(next).await?;
     for (field, old_value, new_value) in changes {
         db.record_correction(CorrectionEvent {

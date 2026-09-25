@@ -3,8 +3,10 @@
 //! Scans receipts for repeated same-shop / same-amount monthly charges and
 //! surfaces candidate subscriptions (`source == LlmInferred`, `status` set by
 //! the heuristic). Confirming a candidate flips it to `UserEntered` and persists
-//! it; dismissing drops it. The real LLM wiring is deferred — for now this is the
-//! rule-based pre-pass that feeds the AI panel.
+//! it; dismissing pauses it (see [`is_open_candidate`]) — it stops surfacing but
+//! is not deleted, and [`crate::lifecycle::resume_subscription`] un-dismisses it.
+//! The real LLM wiring is deferred — for now this is the rule-based pre-pass
+//! that feeds the AI panel.
 
 use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;
@@ -16,7 +18,13 @@ use serde::{Deserialize, Serialize};
 /// A subscription is an OPEN recurring candidate when it was machine-inferred
 /// (`Source::LlmInferred`) and has not yet been dismissed (`status == "paused"`)
 /// or confirmed (which flips its source to `UserEntered`).
-fn is_open_candidate(sub: &Subscription) -> bool {
+///
+/// `RuleGenerated` records are excluded: they are not detection candidates, so
+/// they never show up in [`detect`]'s feed and are never open here either.
+/// "Paused" doubles as "dismissed" for a candidate — [`dismiss_candidate`]
+/// pauses it and [`crate::lifecycle::resume_subscription`] un-dismisses it by
+/// re-deriving the status.
+pub(crate) fn is_open_candidate(sub: &Subscription) -> bool {
     sub.source == Source::LlmInferred && sub.status != "paused"
 }
 

@@ -328,7 +328,8 @@ pub struct SubscriptionDetailDto {
     pub recent: Vec<SubChargeDto>,
     /// AI guidance.
     pub guidance: SubGuidanceDto,
-    /// `true` for an AI candidate (CONFIRM/DISMISS instead of cancel).
+    /// `true` for an OPEN AI candidate, not yet dismissed or confirmed
+    /// (CONFIRM/DISMISS instead of cancel).
     pub candidate: bool,
 }
 
@@ -597,7 +598,10 @@ pub async fn subscription_detail(
         },
     };
 
-    let candidate = source_str(sub.source) == "llm";
+    // Reuses the detector's own openness test so this flag and the
+    // detection feed (`recurring_detect::detect`) can never disagree about
+    // which records are still-open candidates.
+    let candidate = crate::recurring_detect::is_open_candidate(&sub);
 
     Ok(SubscriptionDetailDto {
         subscription: dto,
