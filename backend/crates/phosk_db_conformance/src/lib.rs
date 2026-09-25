@@ -26,13 +26,14 @@
 //!
 //! ## Deliberately not asserted
 //!
-//! - Order of rows that share a date, or have none (line items): the port says
-//!   "stored order" / "oldest→newest", but the `SurrealDB` adapter keeps no
-//!   insertion sequence for most tables, so same-day rows (budget history,
-//!   charges, debt payments) and a receipt's lines can come back in any order
-//!   there. Ordering checks use distinct dates. Chat messages are the
-//!   exception: both adapters return them in append order, and the
-//!   `phosk_adapter_db::contract` suite checks that for same-day lines.
+//! - Order of rows that share a date: the port says "stored order" /
+//!   "oldest→newest", but the `SurrealDB` adapter keeps no insertion sequence
+//!   for most tables, so same-day rows (budget history, charges, debt
+//!   payments) can come back in any order there. Ordering checks use distinct
+//!   dates. Chat messages and a receipt's line items are the exception: both
+//!   adapters return them in insertion order (checked by
+//!   `phosk_adapter_db::contract` for same-day chat lines and by
+//!   [`ledger::line_items_keep_insertion_order`] here).
 //! - Recording the same charge, payment, message or suggestion id twice:
 //!   `phosk_db_memory` appends a duplicate, `phosk_db_surreal` overwrites. The
 //!   port does not say which is right.
@@ -73,6 +74,7 @@ macro_rules! database_adapter_conformance {
             ledger::receipts_between_filters_inclusively,
             ledger::receipt_lookups_report_not_found,
             ledger::update_line_item_replaces_the_stored_line,
+            ledger::line_items_keep_insertion_order,
             ledger::record_correction_accepts_events,
             ids::category_ids_round_trip_as_typed_ids,
             ids::receipt_ids_round_trip_as_typed_ids,

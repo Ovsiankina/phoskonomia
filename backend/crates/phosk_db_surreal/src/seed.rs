@@ -81,7 +81,9 @@ pub(crate) async fn load(store: &Store) -> Result<(), PhoskError> {
         store.put(Bucket::Receipt, &r.id.to_string(), r).await?;
     }
     for l in &lines {
-        store.put(Bucket::LineItem, &l.id.to_string(), l).await?;
+        store
+            .put_in_sequence(Bucket::LineItem, &l.id.to_string(), l)
+            .await?;
     }
 
     // ── Signals ─────────────────────────────────────────────────────────────
