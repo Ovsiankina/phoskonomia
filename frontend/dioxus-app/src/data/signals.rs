@@ -107,7 +107,7 @@ pub async fn get_signals() -> Result<Vec<SignalDto>, ServerFnError> {
         let session = crate::data::build_session().await?;
         let sigs = phosk_ledger::signals::list_signals(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(sigs.into_iter().map(map_signal).collect())
     }
     #[cfg(not(feature = "server-deps"))]
@@ -126,7 +126,7 @@ pub async fn get_signal_candidates() -> Result<Vec<SignalDto>, ServerFnError> {
         let session = crate::data::build_session().await?;
         let sigs = phosk_ledger::signals::signal_candidates(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(sigs.into_iter().map(map_signal).collect())
     }
     #[cfg(not(feature = "server-deps"))]
@@ -145,7 +145,7 @@ pub async fn get_movers() -> Result<MoversDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let m = phosk_ledger::signals::movers(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(MoversDto {
             riser: map_signal(m.riser),
             faller: map_signal(m.faller),
@@ -168,7 +168,7 @@ pub async fn get_signal(id: String) -> Result<SignalDetailDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let d = phosk_ledger::signals::signal_detail(session.db(), crate::data::today(), &id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(SignalDetailDto {
             signal: map_signal(d.signal),
             all_time_spend: d.all_time_spend,
@@ -217,7 +217,7 @@ pub(crate) async fn track_signal_with(
 ) -> Result<(), ServerFnError> {
     phosk_ledger::signals::track_signal(db, id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .map_err(crate::data::server_err)
 }
 
 /// Dismiss a candidate item-signal (`POST /signals/{id}/dismiss`).
@@ -245,7 +245,7 @@ pub(crate) async fn dismiss_signal_with(
 ) -> Result<(), ServerFnError> {
     phosk_ledger::signals::dismiss_signal(db, id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .map_err(crate::data::server_err)
 }
 
 // ── mappers (service DTO → wire DTO) ───────────────────────────────────────────

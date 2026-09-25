@@ -158,7 +158,7 @@ pub async fn get_categories() -> Result<Vec<CategoryDto>, ServerFnError> {
         let session = crate::data::build_session().await?;
         let cats = phosk_planning::budgets::categories(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(cats.into_iter().map(map_category).collect())
     }
     #[cfg(not(feature = "server-deps"))]
@@ -177,7 +177,7 @@ pub async fn get_budget_totals() -> Result<BudgetTotalsDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let t = phosk_planning::budgets::budget_totals(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(BudgetTotalsDto {
             budget: t.budget,
             allocated: t.allocated,
@@ -205,7 +205,7 @@ pub async fn get_allocation() -> Result<AllocationDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let a = phosk_planning::budgets::allocation(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(AllocationDto {
             segments: a
                 .segments
@@ -239,7 +239,7 @@ pub async fn get_category_detail(name: String) -> Result<CategoryDetailDto, Serv
         let session = crate::data::build_session().await?;
         let d = phosk_planning::budgets::category_detail(session.db(), crate::data::today(), &name)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(CategoryDetailDto {
             projected_spend: d.projected_spend,
             hist_avg: d.hist_avg,
@@ -268,7 +268,7 @@ pub async fn get_category_transactions(name: String) -> Result<Vec<CategoryTxnDt
             &name,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(crate::data::server_err)?;
         Ok(rows
             .into_iter()
             .map(|r| CategoryTxnDto {

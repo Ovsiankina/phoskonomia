@@ -177,7 +177,7 @@ pub async fn list_transactions(filter: TxnFilter) -> Result<TransactionListDto, 
             svc_filter,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(crate::data::server_err)?;
         Ok(TransactionListDto {
             transactions: list.transactions.into_iter().map(map_txn).collect(),
             summary: TxnSummaryDto {
@@ -207,7 +207,7 @@ pub async fn get_transaction_lines(id: String) -> Result<TxnLinesDto, ServerFnEr
         let session = crate::data::build_session().await?;
         let l = phosk_ledger::line_items::transaction_lines(session.db(), &id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(TxnLinesDto {
             lines: l.lines.into_iter().map(map_line).collect(),
             sigs: l.sigs,
@@ -231,7 +231,7 @@ pub async fn get_transaction(id: String) -> Result<TxnDetailDto, ServerFnError> 
         let session = crate::data::build_session().await?;
         let d = phosk_ledger::transactions::transaction_detail(session.db(), &id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(TxnDetailDto {
             id: d.id,
             avg_confidence: d.avg_confidence,

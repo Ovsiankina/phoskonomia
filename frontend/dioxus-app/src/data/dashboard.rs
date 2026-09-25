@@ -70,7 +70,7 @@ pub async fn get_totals() -> Result<TotalsDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let t = phosk_insights::dashboard_totals(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         // `phosk_insights::TotalsDto` serializes money as CHF float; we want exact
         // centimes on this wire, so re-shape from its public Money fields.
         Ok(TotalsDto {
@@ -132,7 +132,7 @@ pub async fn get_spend_series() -> Result<SpendSeriesDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let s = phosk_insights::spend_series(session.db(), crate::data::today(), true)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(SpendSeriesDto {
             daily: s.daily,
             cumulative: s.cumulative,
@@ -183,7 +183,7 @@ pub async fn get_top_shops() -> Result<TopShopsDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let s = phosk_insights::top_shops(session.db(), crate::data::today(), 8)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(TopShopsDto {
             shops: s
                 .shops
@@ -246,7 +246,7 @@ pub async fn get_recurring() -> Result<RecurringListDto, ServerFnError> {
         let s =
             phosk_recurring::subscriptions::recurring_summary(session.db(), crate::data::today())
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .map_err(crate::data::server_err)?;
         Ok(RecurringListDto {
             recurring: s
                 .recurring
@@ -300,7 +300,7 @@ pub async fn get_alerts() -> Result<Vec<AlertDto>, ServerFnError> {
         let session = crate::data::build_session().await?;
         let alerts = phosk_planning::alerts::alerts(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(alerts
             .into_iter()
             .map(|a| AlertDto {
@@ -351,7 +351,7 @@ pub(crate) async fn act_on_alert_with(
 ) -> Result<(), ServerFnError> {
     phosk_planning::alerts::act_on_alert(db, id, action)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .map_err(crate::data::server_err)
 }
 
 /// `GET /insights/dashboard` — the GEMMA4 one-liner + estimated saving.
@@ -378,7 +378,7 @@ pub async fn get_insight() -> Result<InsightDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let i = phosk_ai::ai_features::dashboard_insight(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(InsightDto {
             model: i.model,
             text: i.text,
