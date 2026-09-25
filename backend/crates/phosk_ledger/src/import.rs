@@ -107,7 +107,8 @@ pub struct ImportOptions {
     pub category: String,
 }
 
-/// One rejected record: its 1-based record number (header = row 1) and why.
+/// One rejected record: its 1-based record number in the file (every physical
+/// record counts, including a header and any blank lines before it) and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RowError {
@@ -250,8 +251,9 @@ pub async fn import_csv(
         return Err(PhoskError::Invalid("category is required".to_owned()));
     }
     let parsed = parse_csv(bytes, &options.mapping)?;
-    // One read of the stored slugs instead of a lookup per row (a per-row
-    // `receipt_by_slug` is a table scan on SurrealDB — O(n²) per import).
+    // One read of the stored slugs instead of a `receipt_by_slug` lookup per
+    // row. On SurrealDB `insert_receipt` itself still scans its tables per
+    // call, so an import stays O(rows × stored rows) there.
     let mut stored: HashSet<String> = db
         .all_receipts()
         .await?
