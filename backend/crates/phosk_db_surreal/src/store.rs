@@ -13,7 +13,7 @@
 //! failure maps to a [`PhoskError`] (no panic, ADR §0).
 //!
 //! A table scan has no defined order, so buckets whose port contract is ordered
-//! (chat messages) are written with [`Store::put_in_sequence`], which adds an
+//! (chat messages, budget history) are written with [`Store::put_in_sequence`], which adds an
 //! insertion `seq` next to `doc`, and read with
 //! [`Store::list_in_insertion_order`].
 
