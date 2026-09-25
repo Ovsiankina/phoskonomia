@@ -218,18 +218,18 @@ async fn pending_lists_open_suggestions_grouped_per_receipt() {
 }
 
 #[tokio::test]
-async fn bulk_approve_applies_only_that_receipts_open_suggestions() {
+async fn bulk_approve_applies_only_that_receipts_open_suggestion() {
     let db = empty_db();
-    let (a1, a2, b) = (proposal("rcpt:m"), proposal("rcpt:m"), proposal("rcpt:n"));
-    for p in [&a1, &a2, &b] {
+    let (a, b) = (proposal("rcpt:m"), proposal("rcpt:n"));
+    for p in [&a, &b] {
         enqueue(&db, p).await;
     }
     let outs = approve_receipt(&db, "rcpt:m").await.expect("bulk");
-    assert_eq!(outs.len(), 2);
-    assert_eq!(status(&db, a1.suggestion_id).await, "accepted");
-    assert_eq!(status(&db, a2.suggestion_id).await, "accepted");
+    assert_eq!(outs.len(), 1);
+    assert!(outs[0].applied);
+    assert_eq!(status(&db, a.suggestion_id).await, "accepted");
     assert_eq!(status(&db, b.suggestion_id).await, "open");
-    assert_eq!(ledger_len(&db).await, 1, "same slug books one receipt");
+    assert_eq!(ledger_len(&db).await, 1);
     assert!(db.receipt_by_slug("rcpt:n").await.is_err());
 
     let again = approve_receipt(&db, "rcpt:m").await.expect("bulk again");
@@ -239,6 +239,132 @@ async fn bulk_approve_applies_only_that_receipts_open_suggestions() {
         matches!(unknown, Err(PhoskError::NotFound(_))),
         "{unknown:?}"
     );
+}
+
+/// Two open proposals for one receipt would book only the last while marking
+/// both applied — a false audit trail. Both entry points refuse instead.
+#[tokio::test]
+async fn conflicting_open_proposals_for_one_receipt_are_refused() {
+    let db = empty_db();
+    let (a1, a2) = (proposal("rcpt:m"), proposal("rcpt:m"));
+    for p in [&a1, &a2] {
+        enqueue(&db, p).await;
+    }
+    let res = approve_receipt(&db, "rcpt:m").await;
+    assert!(matches!(res, Err(PhoskError::Invalid(_))), "{res:?}");
+    let res = approve_suggestion(&db, a1.suggestion_id).await;
+    assert!(matches!(res, Err(PhoskError::Invalid(_))), "{res:?}");
+    assert_eq!(ledger_len(&db).await, 0);
+    assert_eq!(status(&db, a1.suggestion_id).await, "open");
+    assert_eq!(status(&db, a2.suggestion_id).await, "open");
+
+    // Rejecting one resolves the conflict.
+    reject_suggestion(&db, a1.suggestion_id)
+        .await
+        .expect("reject");
+    let outs = approve_receipt(&db, "rcpt:m").await.expect("bulk");
+    assert_eq!(outs.len(), 1);
+    assert_eq!(outs[0].suggestion_id, a2.suggestion_id);
+}
+
+#[tokio::test]
+async fn bulk_approve_applies_nothing_when_one_open_proposal_is_invalid() {
+    let db = empty_db();
+    let (good, mut bad) = (proposal("rcpt:m"), proposal("rcpt:m"));
+    enqueue(&db, &good).await;
+    enqueue(&db, &bad).await;
+    bad.receipt.amount = Money::from_centimes(1);
+    db.stage_receipt_proposal(bad.clone())
+        .await
+        .expect("restage");
+    let res = approve_receipt(&db, "rcpt:m").await;
+    assert!(matches!(res, Err(PhoskError::Invalid(_))), "{res:?}");
+    assert_eq!(ledger_len(&db).await, 0);
+    assert_eq!(status(&db, good.suggestion_id).await, "open");
+    assert_eq!(status(&db, bad.suggestion_id).await, "open");
+}
+
+/// Once a receipt is booked (and possibly user-corrected), no proposal ever
+/// re-inserts it: a later proposal for the slug, or a re-approval after the
+/// status write failed, is accepted with `applied == false`.
+#[tokio::test]
+async fn an_already_booked_receipt_is_never_overwritten() {
+    let db = empty_db();
+    let first = proposal("rcpt:k");
+    enqueue(&db, &first).await;
+    approve_suggestion(&db, first.suggestion_id)
+        .await
+        .expect("approve");
+    let booked = db.receipt_by_slug("rcpt:k").await.expect("booked");
+
+    // Re-approve after `insert_receipt` succeeded but the status write failed.
+    db.update_suggestion_status(first.suggestion_id, "open")
+        .await
+        .expect("reopen");
+    let out = approve_suggestion(&db, first.suggestion_id)
+        .await
+        .expect("re-approve");
+    assert!(!out.applied);
+    assert_eq!(status(&db, first.suggestion_id).await, "accepted");
+
+    // A second, different proposal for the same slug.
+    let mut second = proposal("rcpt:k");
+    second.line_items.truncate(1);
+    second.receipt.amount = second.line_items[0].line_total;
+    enqueue(&db, &second).await;
+    let outs = approve_receipt(&db, "rcpt:k").await.expect("bulk");
+    assert_eq!(outs.len(), 1);
+    assert!(!outs[0].applied, "booked receipt is never replaced");
+    assert_eq!(status(&db, second.suggestion_id).await, "accepted");
+
+    assert_eq!(db.receipt_by_slug("rcpt:k").await.expect("still"), booked);
+    assert_eq!(db.line_items(booked.id).await.expect("lines").len(), 3);
+    assert_eq!(ledger_len(&db).await, 1);
+}
+
+/// The `rcpt:` prefix guard: a proposal whose slug and target both name a
+/// seeded receipt cannot replace it.
+#[tokio::test]
+async fn a_proposal_can_never_target_a_seeded_receipt() {
+    let db = MemoryDb::seeded().expect("seed");
+    let seeded = db.receipt_by_slug("t1").await.expect("t1 seeded");
+    let seeded_lines = db.line_items(seeded.id).await.expect("lines");
+    let p = proposal("t1");
+    enqueue(&db, &p).await;
+    let res = approve_suggestion(&db, p.suggestion_id).await;
+    assert!(matches!(res, Err(PhoskError::Invalid(_))), "{res:?}");
+    assert_eq!(db.receipt_by_slug("t1").await.expect("t1"), seeded);
+    assert_eq!(db.line_items(seeded.id).await.expect("lines"), seeded_lines);
+}
+
+/// Model-supplied ids and ledger flags are not trusted: ids are re-minted (so
+/// they cannot collide with a stored row) and `fixed` / `signal_id` dropped.
+#[tokio::test]
+async fn model_supplied_ids_and_flags_are_not_trusted() {
+    let db = MemoryDb::seeded().expect("seed");
+    let seeded = db.receipt_by_slug("t1").await.expect("t1 seeded");
+    let seeded_lines = db.line_items(seeded.id).await.expect("lines");
+    let mut p = proposal("rcpt:ids");
+    p.receipt.id = seeded.id;
+    p.receipt.fixed = true;
+    for l in &mut p.line_items {
+        l.receipt_id = seeded.id;
+    }
+    p.line_items[0].id = seeded_lines[0].id;
+    p.line_items[0].signal_id = Some(phosk_id::SignalId::new());
+    enqueue(&db, &p).await;
+    approve_suggestion(&db, p.suggestion_id)
+        .await
+        .expect("approve");
+
+    let r = db.receipt_by_slug("rcpt:ids").await.expect("booked");
+    assert_ne!(r.id, seeded.id);
+    assert!(!r.fixed);
+    let lines = db.line_items(r.id).await.expect("lines");
+    assert_eq!(lines.len(), 3);
+    assert!(lines.iter().all(|l| l.id != seeded_lines[0].id));
+    assert!(lines.iter().all(|l| l.signal_id.is_none()));
+    assert_eq!(db.line_items(seeded.id).await.expect("lines"), seeded_lines);
 }
 
 #[tokio::test]
