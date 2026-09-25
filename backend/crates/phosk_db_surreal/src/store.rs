@@ -13,8 +13,9 @@
 //! failure maps to a [`PhoskError`] (no panic, ADR §0).
 //!
 //! A table scan has no defined order, so buckets whose port contract is ordered
-//! (chat messages, budget history) are written with [`Store::put_in_sequence`], which adds an
-//! insertion `seq` next to `doc`, and read with
+//! (chat messages, budget history, a receipt's line items) are written with
+//! [`Store::put_in_sequence`], which adds an insertion `seq` next to `doc`,
+//! edited in place with [`Store::put_keeping_sequence`], and read with
 //! [`Store::list_in_insertion_order`].
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -234,8 +235,8 @@ impl Store {
     /// adapter replaces in place the same way).
     ///
     /// Used for buckets whose port contract is ordered (chat messages, budget
-    /// history): record keys are random UUIDs and a table scan has no defined
-    /// order.
+    /// history, line items): record keys are random UUIDs and a table scan has
+    /// no defined order.
     pub(crate) async fn put_in_sequence<T: Serialize + Sync>(
         &self,
         bucket: Bucket,
@@ -256,6 +257,31 @@ impl Store {
             .map_err(|e| Self::map_err("put-seq", &e))?
             .check()
             .map_err(|e| Self::map_err("put-seq-check", &e))?;
+        Ok(())
+    }
+
+    /// Replace the `doc` of the record at `bucket:key`, keeping any sequence
+    /// number already stored on it, so an in-place edit does not move the
+    /// record in [`Store::list_in_insertion_order`]. Creates the record (with
+    /// no sequence number) if it is absent.
+    pub(crate) async fn put_keeping_sequence<T: Serialize + Sync>(
+        &self,
+        bucket: Bucket,
+        key: &str,
+        value: &T,
+    ) -> Result<(), PhoskError> {
+        let doc = serde_json::to_string(value)
+            .map_err(|e| PhoskError::Invalid(format!("serialize {}: {e}", bucket.table())))?;
+        let sql = "UPSERT type::thing($tb, $id) SET doc = $doc RETURN NONE";
+        self.db
+            .query(sql)
+            .bind(("tb", bucket.table()))
+            .bind(("id", key.to_owned()))
+            .bind(("doc", doc))
+            .await
+            .map_err(|e| Self::map_err("put-keep-seq", &e))?
+            .check()
+            .map_err(|e| Self::map_err("put-keep-seq-check", &e))?;
         Ok(())
     }
 

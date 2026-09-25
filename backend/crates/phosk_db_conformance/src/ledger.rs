@@ -71,9 +71,12 @@ pub async fn insert_receipt_same_slug_replaces_in_place(db: &dyn DatabaseAdapter
     ensure_not_found(db.receipt(second_id).await, "receipt(re-import id)")?;
 
     let lines = db.line_items(first_id).await?;
-    let mut names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
-    names.sort_unstable();
-    ensure_eq(&names, &vec!["New A", "New B"], "line set replaced")?;
+    let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
+    ensure_eq(
+        &names,
+        &vec!["New A", "New B"],
+        "line set replaced, in order",
+    )?;
     let rebound = lines.iter().all(|l| l.receipt_id == first_id);
     ensure(rebound, "new lines rebound to the stored id")?;
     let orphans = db.line_items(second_id).await?;
@@ -261,6 +264,34 @@ pub async fn update_line_item_replaces_the_stored_line(db: &dyn DatabaseAdapter)
 
     let ghost = line(id, "Ghost", 100);
     ensure_not_found(db.update_line_item(ghost).await, "update_line_item")
+}
+
+/// A receipt's lines read back in the order they were written, and editing a
+/// line in the middle keeps it in its original position.
+pub async fn line_items_keep_insertion_order(db: &dyn DatabaseAdapter) -> Outcome {
+    let id = ReceiptId::new();
+    let names = [
+        "Milk", "Bread", "Eggs", "Apples", "Cheese", "Coffee", "Rice", "Tea", "Jam", "Salt",
+    ];
+    let lines: Vec<LineItem> = names.iter().map(|n| line(id, n, 200)).collect();
+    let r = receipt(id, "conf-order", date(2027, 1, 10)?, 2_000);
+    db.insert_receipt(r, lines.clone()).await?;
+    ensure_eq(
+        &db.line_items(id).await?,
+        &lines,
+        "lines in insertion order",
+    )?;
+
+    let mut want = lines;
+    let middle = want.get_mut(4).ok_or("fixture has a middle line")?;
+    "Gruyere".clone_into(&mut middle.name);
+    middle.provenance = Provenance::user_modified();
+    db.update_line_item(middle.clone()).await?;
+    ensure_eq(
+        &db.line_items(id).await?,
+        &want,
+        "order after editing a line",
+    )
 }
 
 /// The audit log accepts events (it has no read path on the port) and is

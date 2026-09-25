@@ -29,9 +29,10 @@
 //!
 //! A table scan comes back in record-key order, not insertion order, so reads
 //! the port documents as oldest→newest sort on the entity's date after
-//! filtering. Rows that share a date keep scan order. Chat messages are the
-//! exception: they are stamped with an insertion sequence (see [`store`]) and
-//! read back in append order, same-day lines included.
+//! filtering. Rows that share a date keep scan order. Chat messages, budget
+//! changes and a receipt's line items are the exception: they are stamped with
+//! an insertion sequence (see [`store`]) and read back in insertion order,
+//! same-day lines included; an in-place edit keeps its position.
 //!
 //! ## No panics (ADR §0)
 //!
@@ -126,10 +127,11 @@ impl SurrealDb {
             .map_err(|e| PhoskError::Invalid(format!("surreal use ns/db: {e}")))?;
         let store = Store::new(db);
         migrate::run(&store).await?;
-        // Chat lines and budget changes written from now on must sort after
-        // the stored ones.
+        // Chat lines, budget changes and receipt lines written from now on
+        // must sort after the stored ones.
         store.resume_sequence(Bucket::Message).await?;
         store.resume_sequence(Bucket::BudgetChange).await?;
+        store.resume_sequence(Bucket::LineItem).await?;
         Ok(Self { store })
     }
 
@@ -265,7 +267,12 @@ impl DatabaseAdapter for SurrealDb {
     }
 
     async fn line_items(&self, receipt: ReceiptId) -> Result<Vec<LineItem>, PhoskError> {
-        let all: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        // Lines written before sequencing (no `seq`) have no recorded order;
+        // they come first, by id, so the result is at least deterministic.
+        let all: Vec<LineItem> = self
+            .store
+            .list_in_insertion_order(Bucket::LineItem, |l: &LineItem| l.id.to_string())
+            .await?;
         Ok(all
             .into_iter()
             .filter(|l| l.receipt_id == receipt)
@@ -306,7 +313,7 @@ impl DatabaseAdapter for SurrealDb {
         for mut line in lines {
             line.receipt_id = stable_id;
             self.store
-                .put(Bucket::LineItem, &line.id.to_string(), &line)
+                .put_in_sequence(Bucket::LineItem, &line.id.to_string(), &line)
                 .await?;
         }
 
@@ -362,7 +369,10 @@ impl DatabaseAdapter for SurrealDb {
         {
             return Err(PhoskError::NotFound(format!("line item {}", line.id)));
         }
-        self.store.put(Bucket::LineItem, &key, &line).await
+        // In place: the line keeps its position on the receipt.
+        self.store
+            .put_keeping_sequence(Bucket::LineItem, &key, &line)
+            .await
     }
 
     async fn record_correction(&self, ev: CorrectionEvent) -> Result<(), PhoskError> {
@@ -495,7 +505,7 @@ impl DatabaseAdapter for SurrealDb {
         for mut l in lines.into_iter().filter(|l| l.category == from) {
             l.category = to.to_owned();
             self.store
-                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .put_keeping_sequence(Bucket::LineItem, &l.id.to_string(), &l)
                 .await?;
         }
         let subs: Vec<Subscription> = self.store.list(Bucket::Subscription).await?;
@@ -574,7 +584,7 @@ impl DatabaseAdapter for SurrealDb {
         for mut l in lines.into_iter().filter(|l| l.category == from) {
             l.category = into.to_owned();
             self.store
-                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .put_keeping_sequence(Bucket::LineItem, &l.id.to_string(), &l)
                 .await?;
             moved = moved.saturating_add(1);
         }
@@ -647,7 +657,7 @@ impl DatabaseAdapter for SurrealDb {
             l.category = new.name.clone();
             l.provenance = Provenance::user_modified();
             self.store
-                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .put_keeping_sequence(Bucket::LineItem, &l.id.to_string(), &l)
                 .await?;
             moved = moved.saturating_add(1);
         }
@@ -1209,6 +1219,41 @@ mod tests {
             .map(|m| m.text)
             .collect();
         assert_eq!(texts, ["older legacy", "newer legacy", "sequenced"]);
+    }
+
+    /// Line items stored before sequencing (no `seq`) still load, ahead of
+    /// sequenced lines of the same receipt and ordered among themselves by id.
+    #[tokio::test]
+    async fn unsequenced_line_items_load_first() {
+        let db = SurrealDb::memory().await.expect("mem engine");
+        let receipt_id = ReceiptId::new();
+        let line = |name: &str| LineItem {
+            id: LineItemId::new(),
+            receipt_id,
+            name: name.to_owned(),
+            qty: 1.0,
+            unit_price: Money::from_centimes(100),
+            line_total: Money::from_centimes(100),
+            category: "Groceries".to_owned(),
+            signal_id: None,
+            provenance: Provenance::user_modified(),
+        };
+        let mut legacy = vec![line("legacy one"), line("legacy two")];
+        legacy.sort_by_key(|l| l.id.to_string());
+        for l in legacy.iter().rev() {
+            db.store
+                .put(Bucket::LineItem, &l.id.to_string(), l)
+                .await
+                .expect("legacy write");
+        }
+        let fresh = line("sequenced");
+        db.store
+            .put_in_sequence(Bucket::LineItem, &fresh.id.to_string(), &fresh)
+            .await
+            .expect("sequenced write");
+        let mut want = legacy;
+        want.push(fresh);
+        assert_eq!(db.line_items(receipt_id).await.expect("lines"), want);
     }
 
     /// A tiny random suffix so concurrent test runs use distinct store dirs
