@@ -32,6 +32,9 @@
 //! 6. **Stage + enqueue.** The [`ReceiptProposal`] payload is staged (off
 //!    ledger) and a single per-receipt [`AiSuggestion`] (`kind == "receipt"`,
 //!    `status == "open"`) summarising it is appended to the approval queue.
+//!    Model text is normalised first (control chars stripped, clamped, an
+//!    illegible name → a zero-confidence `?`) and the proposal is checked with
+//!    `phosk_ai::validate_proposal`; what cannot be approved is never staged.
 //!    Only `phosk_ai::approve_suggestion` / `approve_receipt` apply it.
 //!
 //! ## Idempotency (ADR-010)
@@ -160,13 +163,16 @@ pub async fn intake_receipt(
     // ── Step 6: STAGE the payload + ENQUEUE one per-receipt proposal — never
     // auto-write. Staged first, so an open suggestion always has its payload;
     // only `phosk_ai::approve_*` ever applies it to the ledger. ──
+    // Schema-validated BEFORE anything is persisted (§1.5), with the approval
+    // service's own rules: what cannot be approved is never staged.
     let suggestion = build_suggestion(&receipt, &line_items, low_confidence_lines);
-    db.stage_receipt_proposal(ReceiptProposal {
+    let proposal = ReceiptProposal {
         suggestion_id: suggestion.id,
         receipt: receipt.clone(),
         line_items: line_items.clone(),
-    })
-    .await?;
+    };
+    phosk_ai::validate_proposal(&proposal, &slug)?;
+    db.stage_receipt_proposal(proposal).await?;
     let suggestion_id = db.enqueue_suggestion(suggestion).await?;
 
     Ok(IntakeOutcome {
@@ -425,19 +431,18 @@ fn extraction_prompt(ocr_text: &str) -> String {
 /// access is still defensive (a missing required field ⇒ `PhoskError::Invalid`,
 /// never a panic).
 fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted, PhoskError> {
-    let shop = out
-        .get("shop")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| PhoskError::Invalid("model omitted `shop`".to_owned()))?
-        .trim()
-        .to_owned();
-    let category = out
-        .get("category")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Uncategorised")
-        .to_owned();
+    let shop = clean_text(
+        out.get("shop")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| PhoskError::Invalid("model omitted `shop`".to_owned()))?,
+        "Unknown shop",
+    );
+    let category = clean_text(
+        out.get("category")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        "Uncategorised",
+    );
 
     let raw_lines = out
         .get("lineItems")
@@ -446,12 +451,12 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
 
     let mut lines = Vec::with_capacity(raw_lines.len());
     for (idx, item) in raw_lines.iter().enumerate() {
-        let name = item
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| PhoskError::Invalid(format!("line {idx}: missing `name`")))?
-            .trim()
-            .to_owned();
+        let name = clean_text(
+            item.get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| PhoskError::Invalid(format!("line {idx}: missing `name`")))?,
+            "",
+        );
         let qty = item
             .get("qty")
             .and_then(serde_json::Value::as_f64)
@@ -464,18 +469,24 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
             .ok_or_else(|| {
                 PhoskError::Invalid(format!("line {idx}: invalid `unitPriceCentimes`"))
             })?;
-        let line_category = item
-            .get("category")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(category.as_str())
-            .to_owned();
+        let line_category = clean_text(
+            item.get("category")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+            &category,
+        );
         let confidence = item
             .get("confidence")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0)
             .clamp(0.0, 1.0);
+        // An illegible (empty) name is flagged, never dropped: a `?`
+        // placeholder at zero confidence, for the human to fill in.
+        let (name, confidence) = if name.is_empty() {
+            (ILLEGIBLE.to_owned(), 0.0)
+        } else {
+            (name, confidence)
+        };
         lines.push(ParsedLine {
             name,
             qty,
@@ -487,14 +498,31 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
 
     Ok(Extracted {
         ocr,
-        shop: if shop.is_empty() {
-            "Unknown shop".to_owned()
-        } else {
-            shop
-        },
+        shop,
         category,
         lines,
     })
+}
+
+/// Placeholder name of a line the model could not read.
+const ILLEGIBLE: &str = "?";
+
+/// Normalise hostile model text before it is persisted: control characters
+/// stripped, trimmed, clamped to [`phosk_ai::ai_approval::MAX_TEXT_CHARS`];
+/// `fallback` when nothing is left.
+fn clean_text(raw: &str, fallback: &str) -> String {
+    let kept: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let clamped: String = kept
+        .trim()
+        .chars()
+        .take(phosk_ai::ai_approval::MAX_TEXT_CHARS)
+        .collect();
+    let clamped = clamped.trim_end();
+    if clamped.is_empty() {
+        fallback.to_owned()
+    } else {
+        clamped.to_owned()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -636,16 +664,15 @@ fn build_suggestion(receipt: &Receipt, lines: &[LineItem], low_conf: usize) -> A
 
 /// Idempotency lookup: if a suggestion for this receipt `slug` is already
 /// enqueued, return a deduplicated [`IntakeOutcome`] without doing any work. Keys
-/// on the suggestion's `target == slug`.
+/// on the suggestion's `target == slug`. A `dismissed` (rejected) suggestion
+/// does not count: re-submitting a rejected photo runs intake again.
 async fn find_enqueued(
     db: &dyn DatabaseAdapter,
     slug: &str,
 ) -> Result<Option<IntakeOutcome>, PhoskError> {
-    let prior = db
-        .ai_suggestions()
-        .await?
-        .into_iter()
-        .find(|s| s.kind == "receipt" && s.target.as_deref() == Some(slug));
+    let prior = db.ai_suggestions().await?.into_iter().find(|s| {
+        s.kind == "receipt" && s.status != "dismissed" && s.target.as_deref() == Some(slug)
+    });
     let Some(s) = prior else { return Ok(None) };
     // No re-store / re-OCR / re-model: the prior proposal stands. The receipt and
     // lines are not reconstructed (that needs the photo + model again); the
