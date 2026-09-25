@@ -511,6 +511,10 @@ pub struct EditedTxnDto {
     /// The stored total after the edit, exact centimes.
     #[serde(with = "phosk_model::money_centimes")]
     pub amount: Money,
+    /// The stored date's display label after the edit (`date_label`), so a
+    /// caller never has to re-derive or guess it — including when the edit
+    /// left the date untouched.
+    pub date: String,
     /// The field names that actually changed (empty for a no-op edit).
     pub changed: Vec<String>,
 }
@@ -606,12 +610,13 @@ pub async fn edit_transaction(
         return Ok(EditedTxnDto {
             id: receipt.slug,
             amount: receipt.amount,
+            date: date_label(receipt.date),
             changed: Vec::new(),
         });
     }
 
     receipt.provenance = Provenance::user_modified();
-    let (id, amount) = (receipt.slug.clone(), receipt.amount);
+    let (id, amount, date) = (receipt.slug.clone(), receipt.amount, receipt.date);
     let changed: Vec<String> = audit.iter().map(|c| c.field.clone()).collect();
     db.insert_receipt(receipt, lines).await?;
     for event in audit {
@@ -622,6 +627,7 @@ pub async fn edit_transaction(
     Ok(EditedTxnDto {
         id,
         amount,
+        date: date_label(date),
         changed,
     })
 }
