@@ -7,8 +7,8 @@
 //! until a human calls [`approve_suggestion`] / [`approve_receipt`] here, which
 //! re-validates the (hostile) payload and applies it via `insert_receipt` —
 //! model provenance (`Ocr` / `LlmInferred`) is kept, never relabelled as
-//! user-entered; model-supplied ids and ledger flags are not trusted (ids are
-//! re-minted, `fixed` / `signal_id` dropped).
+//! user-entered; staged ids and ledger flags are not trusted (ids are derived
+//! from the suggestion id, `fixed` / `signal_id` dropped).
 //!
 //! **Idempotency.** An `accepted` suggestion is never re-applied, and a
 //! receipt already booked under the slug is never re-inserted (so a booked,
@@ -16,6 +16,15 @@
 //! is recorded with `applied == false`. At most one proposal per receipt may
 //! be open at approval time; conflicting proposals are refused, so the audit
 //! trail never marks an unbooked proposal as applied.
+//!
+//! The booked-slug check and the write are not atomic (the port has no
+//! transaction), so two concurrent approvals of one proposal (a double-click)
+//! can both write. That is safe because the written rows are a pure function
+//! of the proposal: the receipt and line ids are derived from the suggestion id
+//! (SHA-256, domain-separated), so the second `insert_receipt` overwrites the
+//! first row-for-row (same receipt, projection and line keys) instead of
+//! booking a duplicate. Deriving (rather than re-using the staged ids) also
+//! keeps a tampered payload from aiming its ids at an unrelated stored row.
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -25,12 +34,15 @@ use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{LineItemId, ReceiptId, SuggestionId};
 use phosk_model::{AiSuggestion, LineItem, Provenance, Receipt, ReceiptProposal, Source};
+use sha2::{Digest, Sha256};
+use uuid::{Builder, Uuid};
 
 /// Suggestion kind whose payload is a staged [`ReceiptProposal`].
 pub const RECEIPT_KIND: &str = "receipt";
 /// Slug prefix of every pipeline-proposed receipt (`"rcpt:<sha256>"`). A
-/// proposal may only ever write under it, and its ids are re-minted on apply,
-/// so approving can never replace a manual/seeded receipt (by slug or by id).
+/// proposal may only ever write under it, and its ids are derived from the
+/// suggestion id on apply, so approving can never replace a manual/seeded
+/// receipt (by slug or by id).
 pub const PROPOSAL_SLUG_PREFIX: &str = "rcpt:";
 /// Max characters of any proposed text field (shop, category, line name).
 pub const MAX_TEXT_CHARS: usize = 200;
@@ -73,7 +85,8 @@ pub struct ApprovalOutcome {
     pub suggestion_id: SuggestionId,
     /// The ledger receipt slug the proposal is booked under.
     pub receipt_slug: String,
-    /// `false` when the suggestion was already accepted (nothing written).
+    /// `false` when nothing was written to the ledger: the suggestion was
+    /// already accepted, or a receipt was already booked under the slug.
     pub applied: bool,
 }
 
@@ -304,8 +317,8 @@ fn single_open(open: &[AiSuggestion], slug: &str) -> Result<(), PhoskError> {
 
 /// Book a validated proposal (provenance intact), then accept it. Returns
 /// whether the ledger was written: a receipt already booked under the slug is
-/// never re-inserted. Model-supplied ids are re-minted so they cannot collide
-/// with stored rows, and ledger-only flags (`fixed`, `signal_id`) are dropped.
+/// never re-inserted. Ids are derived from the suggestion id (see the module
+/// doc) and ledger-only flags (`fixed`, `signal_id`) are dropped.
 async fn apply(db: &dyn DatabaseAdapter, p: ReceiptProposal) -> Result<bool, PhoskError> {
     let id = p.suggestion_id;
     let applied = match db.receipt_by_slug(&p.receipt.slug).await {
@@ -322,7 +335,8 @@ async fn apply(db: &dyn DatabaseAdapter, p: ReceiptProposal) -> Result<bool, Pho
 }
 
 fn sanitised(p: ReceiptProposal) -> (Receipt, Vec<LineItem>) {
-    let receipt_id = ReceiptId::new();
+    let sid = p.suggestion_id;
+    let receipt_id = ReceiptId::from_uuid(derived_id(sid, "receipt", 0));
     let receipt = Receipt {
         id: receipt_id,
         fixed: false,
@@ -332,14 +346,34 @@ fn sanitised(p: ReceiptProposal) -> (Receipt, Vec<LineItem>) {
     let lines = p
         .line_items
         .into_iter()
-        .map(|l| LineItem {
-            id: LineItemId::new(),
+        .zip(0_u64..)
+        .map(|(l, i)| LineItem {
+            id: LineItemId::from_uuid(derived_id(sid, "line", i)),
             receipt_id,
             signal_id: None,
             ..l
         })
         .collect();
     (receipt, lines)
+}
+
+/// A stable id for the `index`-th `what` row booked by approving suggestion
+/// `sid`: the first 16 bytes of a domain-separated SHA-256, stamped as a v4
+/// (random-format) UUID. Same inputs → same id; an unrelated stored row can
+/// only be hit by a SHA-256 collision.
+fn derived_id(sid: SuggestionId, what: &str, index: u64) -> Uuid {
+    let digest = Sha256::new()
+        .chain_update(b"phoskonomia/ai_approval/v1\0")
+        .chain_update(what.as_bytes())
+        .chain_update(b"\0")
+        .chain_update(sid.as_uuid().as_bytes())
+        .chain_update(index.to_le_bytes())
+        .finalize();
+    let mut bytes = [0_u8; 16];
+    for (b, d) in bytes.iter_mut().zip(digest) {
+        *b = d;
+    }
+    Builder::from_random_bytes(bytes).into_uuid()
 }
 
 const fn outcome(
@@ -358,11 +392,32 @@ fn invalid<T>(why: &str) -> Result<T, PhoskError> {
     Err(PhoskError::Invalid(format!("receipt proposal: {why}")))
 }
 
+/// Characters a proposed text may not contain: control characters (Cc), plus
+/// the invisible format characters that can make a reviewer read something
+/// other than what is booked — bidi embeddings / overrides / isolates
+/// (U+202A–U+202E, U+2066–U+2069) and zero-width characters (U+200B–U+200D,
+/// U+2060, U+FEFF). ZWJ (U+200D) is included too: receipt text has no use for
+/// emoji sequences, and it can hide a join between look-alike words.
+/// The intake pipeline strips these; approval refuses them.
+pub fn is_unsafe_text_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{200B}'..='\u{200D}'
+                | '\u{2060}'
+                | '\u{FEFF}'
+        )
+}
+
 fn bounded_text(s: &str, what: &str) -> Result<(), PhoskError> {
-    if s.trim().is_empty() || s.chars().count() > MAX_TEXT_CHARS || s.chars().any(char::is_control)
+    if s.trim().is_empty()
+        || s.chars().count() > MAX_TEXT_CHARS
+        || s.chars().any(is_unsafe_text_char)
     {
         return invalid(&format!(
-            "{what} is empty, too long or has control characters"
+            "{what} is empty, too long or has control / invisible format characters"
         ));
     }
     Ok(())

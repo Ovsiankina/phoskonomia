@@ -551,8 +551,9 @@ pub trait DatabaseAdapter: Send + Sync {
     /// — this method, plus [`Self::stage_receipt_proposal`] for a receipt
     /// suggestion's payload: the receipt-intake pipeline and the AI write-tools
     /// build a candidate suggestion (always `status == "open"`) and enqueue it
-    /// here for human approval — they never mutate domain state directly. Idempotency is the caller's concern (the
-    /// pipeline keys off a content hash); this method appends what it is given.
+    /// here for human approval — they never mutate domain state directly.
+    /// Idempotency is the caller's concern (the pipeline keys off a content
+    /// hash); this method appends what it is given.
     ///
     /// # Errors
     /// [`PhoskError`] if the store rejects the write.

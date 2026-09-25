@@ -35,6 +35,11 @@ serde = { workspace = true }
 # out). The AI write-tools build their schemas + read the model's structured
 # answer here. (Also the in-process #[server] wire form for the AI DTOs.)
 serde_json = { workspace = true }
+# sha2 + uuid: the approval service derives the booked receipt / line ids from
+# the suggestion id (domain-separated SHA-256 → UUID), so re-applying one
+# proposal always writes the same rows (ADR-008 ids, ADR-010 idempotency).
+sha2 = { workspace = true }
+uuid = { workspace = true }
 # chrono: NaiveDate is the `as_of` parameter of the dashboard-insight service.
 chrono = { workspace = true }
 # tracing (debug-only): instrument the read-model composition. release_max_level_off

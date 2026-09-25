@@ -67,6 +67,7 @@ macro_rules! database_adapter_conformance {
             ledger::insert_receipt_appends_and_reads_back,
             ledger::insert_receipt_binds_lines_to_the_receipt,
             ledger::insert_receipt_same_slug_replaces_in_place,
+            ledger::insert_receipt_same_rows_twice_is_one_booking,
             ledger::insert_receipt_projects_a_dashboard_transaction,
             ledger::insert_receipt_same_slug_replaces_the_projection,
             ledger::receipts_between_filters_inclusively,
