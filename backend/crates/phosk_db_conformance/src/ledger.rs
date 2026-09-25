@@ -235,6 +235,34 @@ pub async fn update_line_item_replaces_the_stored_line(db: &dyn DatabaseAdapter)
     ensure_not_found(db.update_line_item(ghost).await, "update_line_item")
 }
 
+/// A receipt's lines read back in the order they were written, and editing a
+/// line in the middle keeps it in its original position.
+pub async fn line_items_keep_insertion_order(db: &dyn DatabaseAdapter) -> Outcome {
+    let id = ReceiptId::new();
+    let names = [
+        "Milk", "Bread", "Eggs", "Apples", "Cheese", "Coffee", "Rice", "Tea", "Jam", "Salt",
+    ];
+    let lines: Vec<LineItem> = names.iter().map(|n| line(id, n, 200)).collect();
+    let r = receipt(id, "conf-order", date(2027, 1, 10)?, 2_000);
+    db.insert_receipt(r, lines.clone()).await?;
+    ensure_eq(
+        &db.line_items(id).await?,
+        &lines,
+        "lines in insertion order",
+    )?;
+
+    let mut want = lines;
+    let middle = want.get_mut(4).ok_or("fixture has a middle line")?;
+    "Gruyere".clone_into(&mut middle.name);
+    middle.provenance = Provenance::user_modified();
+    db.update_line_item(middle.clone()).await?;
+    ensure_eq(
+        &db.line_items(id).await?,
+        &want,
+        "order after editing a line",
+    )
+}
+
 /// The audit log accepts events (it has no read path on the port) and is
 /// separate from the entity: recording an event does not apply the edit.
 pub async fn record_correction_accepts_events(db: &dyn DatabaseAdapter) -> Outcome {
