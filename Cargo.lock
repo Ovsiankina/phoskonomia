@@ -5679,6 +5679,7 @@ dependencies = [
  "phosk_adapter_db",
  "phosk_core",
  "phosk_db_memory",
+ "phosk_id",
  "phosk_model",
  "serde",
  "serde_json",
