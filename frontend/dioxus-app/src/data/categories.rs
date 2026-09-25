@@ -5,7 +5,7 @@
 //!
 //! A category's colour is an Oscillocore **token name** (`"indigo-neon"`), never
 //! a raw hex or free text: the wire value is checked server-side against
-//! [`COLOUR_TOKENS`], and the page renders it as `var(--<token>)`. The coral
+//! `COLOUR_TOKENS`, and the page renders it as `var(--<token>)`. The coral
 //! family is left out on purpose — coral is the view's single signal moment.
 //!
 //! `CategoryCap` has no colour field, so the token is stored as the preference
@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 
 /// The colour tokens a category may carry, in picker order. Every entry is a
 /// custom property in `colors_and_type.css` (without the leading `--`).
+/// Server-only: the page gets the list through [`CategoriesDto::palette`].
+#[cfg(feature = "server-deps")]
 pub const COLOUR_TOKENS: &[&str] = &[
     "indigo",
     "indigo-2",
@@ -49,7 +51,7 @@ pub struct CategoryRowDto {
     pub slug: String,
     /// Display glyph.
     pub glyph: String,
-    /// Colour token from [`COLOUR_TOKENS`].
+    /// Colour token from `COLOUR_TOKENS`.
     pub colour: String,
     /// Whether this is a fixed (non-discretionary) envelope.
     pub fixed: bool,
@@ -63,7 +65,7 @@ pub struct CategoryRowDto {
 pub struct CategoriesDto {
     /// Every category, by name.
     pub rows: Vec<CategoryRowDto>,
-    /// The colour tokens the picker offers ([`COLOUR_TOKENS`]).
+    /// The colour tokens the picker offers (the server's allow-list).
     pub palette: Vec<String>,
 }
 
@@ -83,6 +85,7 @@ pub struct MergePreviewDto {
 }
 
 /// Page-safe messages the data layer itself produces.
+#[cfg(feature = "server-deps")]
 mod msg {
     pub(super) const BAD_COLOUR: &str = "pick a colour from the palette";
     pub(super) const UNKNOWN: &str = "this category no longer exists";
