@@ -41,6 +41,7 @@
 use dioxus::prelude::*;
 use phosk_core::money::Money;
 
+use crate::components::edit_transaction::TxnActions;
 use crate::components::new_transaction::NewTransactionForm;
 use crate::components::prims::{Dot, ScannerBg};
 use crate::components::shell::{AiPanel, Sig, SigOcc, SignalPanel, TopBar};
@@ -907,6 +908,10 @@ fn ReceiptItem(
 /// Lines are reviewable here too. A saved correction tells the page
 /// (`on_changed`), which bumps [`LinesRev`]: the lines and the detail (average
 /// confidence) refetch here, and so do the accordion rows open underneath.
+///
+/// EDIT / DELETE of the whole transaction ([`TxnActions`]) sit under the
+/// meta row: `on_edited` hands the page the patched row, `on_deleted` lets it
+/// close this overlay.
 #[component]
 fn ReceiptScreen(
     t: TransactionDto,
@@ -914,6 +919,8 @@ fn ReceiptScreen(
     on_close: EventHandler<()>,
     on_select_sig: EventHandler<String>,
     on_changed: EventHandler<()>,
+    on_edited: EventHandler<TransactionDto>,
+    on_deleted: EventHandler<()>,
 ) -> Element {
     let id = t.id.clone();
     let id2 = t.id.clone();
@@ -1051,6 +1058,13 @@ fn ReceiptScreen(
                                 span { class: "v", style: "font-size:13px", "{t.category}" }
                             }
                             span { class: "badge", "{badge_str}" }
+                        }
+                        TxnActions {
+                            key: "{t.id}",
+                            t: t.clone(),
+                            itemised: has_lines || t.item_count > 0,
+                            on_edited,
+                            on_deleted,
                         }
                         div { class: "conf-sum",
                             span { "READING CONFIDENCE" }
@@ -1199,6 +1213,25 @@ pub fn TransactionsPage() -> Element {
             q: q(),
         };
         list_transactions(filter)
+    });
+
+    // An open detail follows the refetched list (after an EDIT the list has
+    // the server's own row, e.g. the new date label). A row that left the
+    // filtered list keeps the snapshot `on_edited` patched in.
+    use_effect(move || {
+        let fresh = txns
+            .read()
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|l| {
+                let open = detail.peek().as_ref().map(|t| t.id.clone())?;
+                l.transactions.iter().find(|t| t.id == open).cloned()
+            });
+        if let Some(row) = fresh {
+            if detail.peek().as_ref() != Some(&row) {
+                detail.set(Some(row));
+            }
+        }
     });
 
     // ---- read resources into local snapshots ----
@@ -1420,6 +1453,18 @@ pub fn TransactionsPage() -> Element {
                         drawer_sig.set(true);
                     },
                     on_changed: move |()| {
+                        txns.restart();
+                        lines_rev += 1;
+                    },
+                    on_edited: move |row: TransactionDto| {
+                        detail.set(Some(row));
+                        txns.restart();
+                        lines_rev += 1;
+                    },
+                    on_deleted: move |()| {
+                        if let Some(gone) = detail.take() {
+                            open_ids.write().retain(|id| *id != gone.id);
+                        }
                         txns.restart();
                         lines_rev += 1;
                     },

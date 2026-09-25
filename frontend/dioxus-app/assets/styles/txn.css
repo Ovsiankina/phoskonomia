@@ -260,3 +260,7 @@ body.no-sparks .spill svg { display: none; }
 .ntx-line { margin-top: var(--s-3); }
 .ntx-rm { justify-content: flex-end; }
 .ntx-hint { margin: var(--s-2) 0 0; font-family: var(--font-body); font-size: var(--t-xs); color: var(--ink-3); }
+
+/* T37 — EDIT / DELETE of a whole transaction in the receipt detail */
+.txa { justify-content: flex-start; }
+.txa-edit, .txa-del { margin-top: var(--s-3); }
