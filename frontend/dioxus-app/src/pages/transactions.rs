@@ -926,6 +926,15 @@ fn ReceiptScreen(
     let id2 = t.id.clone();
     let receipt_id = t.id.clone();
     let mut editing = use_signal(|| Option::<usize>::None);
+    // Guards against the T11 write race between an EDIT/DELETE save here and a
+    // line correction below: `edit_transaction` re-inserts the line list it
+    // read earlier, so a line fix landing mid-save would be silently reverted.
+    // `txn_open` blocks a line pick while the EDIT/DELETE panel is open;
+    // `txn_busy` blocks this screen's own close (backdrop and ✕) while a
+    // save/delete is in flight, so it can't be dropped with no refresh to
+    // show for it.
+    let mut txn_open = use_signal(|| false);
+    let mut txn_busy = use_signal(|| false);
     let rev = try_use_context::<LinesRev>();
     let lines_res = use_resource(move || {
         track_lines_rev(rev);
@@ -993,7 +1002,11 @@ fn ReceiptScreen(
     let sigs_word = if sigs_count > 1 { "signals" } else { "signal" };
 
     rsx! {
-        div { class: "rscreen-back", onclick: move |_| on_close.call(()),
+        div {
+            class: "rscreen-back",
+            onclick: move |_| if !txn_busy() {
+                on_close.call(());
+            },
             div {
                 class: "rscreen",
                 onclick: move |e: Event<MouseData>| e.stop_propagation(),
@@ -1006,7 +1019,9 @@ fn ReceiptScreen(
                     span {
                         class: "x",
                         title: "Close",
-                        onclick: move |_| on_close.call(()),
+                        onclick: move |_| if !txn_busy() {
+                            on_close.call(());
+                        },
                         "✕"
                     }
                 }
@@ -1063,6 +1078,9 @@ fn ReceiptScreen(
                             key: "{t.id}",
                             t: t.clone(),
                             itemised: has_lines || t.item_count > 0,
+                            line_editing: editing().is_some(),
+                            on_open_change: move |open| txn_open.set(open),
+                            on_busy_change: move |busy| txn_busy.set(busy),
                             on_edited,
                             on_deleted,
                         }
@@ -1110,6 +1128,9 @@ fn ReceiptScreen(
                                     index: i,
                                     editing: editing() == Some(i),
                                     on_pick: move |pick: usize| {
+                                        if txn_open() {
+                                            return;
+                                        }
                                         let next = if editing() == Some(pick) { None } else { Some(pick) };
                                         editing.set(next);
                                     },

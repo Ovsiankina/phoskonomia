@@ -31,13 +31,24 @@ enum Mode {
 }
 
 /// The EDIT / DELETE bar and its panels. `itemised` hides the total field.
-/// `on_edited` gets the detail row patched with the saved values (the page
-/// also refetches the list); `on_deleted` fires after a delete (the page
-/// closes the detail and refetches).
+/// `line_editing` disables EDIT/DELETE while a line correction is open below
+/// (T11's `edit_transaction` re-reads the line list before writing it back, so
+/// a concurrent line save here would silently revert it). `on_open_change`
+/// reports whenever a panel opens or closes, so the page can disable line
+/// correction while this is open (the same race, the other direction) and
+/// `on_busy_change` while a request is in flight, so the page can keep the
+/// whole detail open until it settles (closing it early would drop the
+/// pending EDIT/DELETE with no refresh to show for it). `on_edited` gets the
+/// detail row patched with the saved values (the page also refetches the
+/// list); `on_deleted` fires after a delete (the page closes the detail and
+/// refetches).
 #[component]
 pub fn TxnActions(
     t: TransactionDto,
     itemised: bool,
+    #[props(default = false)] line_editing: bool,
+    #[props(default)] on_open_change: EventHandler<bool>,
+    #[props(default)] on_busy_change: EventHandler<bool>,
     on_edited: EventHandler<TransactionDto>,
     on_deleted: EventHandler<()>,
 ) -> Element {
@@ -45,8 +56,13 @@ pub fn TxnActions(
     let mut form = use_signal(EditTxnForm::default);
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut cats_ready = use_signal(|| false);
 
     let busy = pending();
+    let mut set_pending = move |value: bool| {
+        pending.set(value);
+        on_busy_change.call(value);
+    };
     let t_open = t.clone();
     let open_edit = move |_| {
         form.set(EditTxnForm {
@@ -57,20 +73,27 @@ pub fn TxnActions(
             ..EditTxnForm::default()
         });
         error.set(None);
+        cats_ready.set(false);
         mode.set(Mode::Edit);
+        on_open_change.call(true);
     };
     let open_delete = move |_| {
         error.set(None);
         mode.set(Mode::ConfirmDelete);
+        on_open_change.call(true);
     };
     let close = move |_| {
+        if pending() {
+            return;
+        }
         error.set(None);
         mode.set(Mode::Idle);
+        on_open_change.call(false);
     };
 
     let t_save = t.clone();
     let save = move |_| {
-        if pending() {
+        if pending() || !cats_ready() {
             return;
         }
         let mut entry = form.read().clone();
@@ -78,19 +101,21 @@ pub fn TxnActions(
             entry.total.clear();
         }
         let base = t_save.clone();
-        pending.set(true);
+        set_pending(true);
         error.set(None);
         spawn(async move {
             let res = edit_transaction(entry.clone()).await;
-            pending.set(false);
+            set_pending(false);
             match res {
                 Ok(saved) => {
                     mode.set(Mode::Idle);
+                    on_open_change.call(false);
                     on_edited.call(TransactionDto {
                         shop: entry.shop.trim().to_owned(),
                         category: entry.category.trim().to_owned(),
                         fixed: entry.fixed,
                         amount: saved.amount,
+                        date: saved.date,
                         ..base
                     });
                 }
@@ -108,13 +133,18 @@ pub fn TxnActions(
             return;
         }
         let id = del_id.clone();
-        pending.set(true);
+        set_pending(true);
         error.set(None);
         spawn(async move {
             let res = delete_transaction(id).await;
-            pending.set(false);
+            set_pending(false);
             match res {
                 Ok(()) => on_deleted.call(()),
+                // A 404 means the record is already gone (deleted elsewhere,
+                // or this is a retry after a dropped response): treat it the
+                // same as a successful delete rather than leaving the detail
+                // open on a record that no longer exists.
+                Err(ServerFnError::ServerError { code: 404, .. }) => on_deleted.call(()),
                 Err(err) => error.set(Some(txn_action_error_text(
                     &err,
                     "Could not reach the server, nothing was deleted.",
@@ -134,15 +164,15 @@ pub fn TxnActions(
         match mode() {
             Mode::Idle => rsx! {
                 div { class: "lfix-acts txa",
-                    button { class: "gbtn", onclick: open_edit, "EDIT" }
-                    button { class: "gbtn", onclick: open_delete, "DELETE" }
+                    button { class: "gbtn", disabled: line_editing, onclick: open_edit, "EDIT" }
+                    button { class: "gbtn", disabled: line_editing, onclick: open_delete, "DELETE" }
                 }
             },
             Mode::Edit => rsx! {
-                EditPanel { form, itemised, busy }
+                EditPanel { form, itemised, busy, ready: cats_ready }
                 ActionState { busy, error: error(), what: "EDIT", failed: "NOT SAVED", doing: "Saving the changes…" }
                 div { class: "lfix-acts",
-                    button { class: "gbtn p", disabled: busy, onclick: save, "SAVE" }
+                    button { class: "gbtn p", disabled: busy || !cats_ready(), onclick: save, "SAVE" }
                     button { class: "gbtn", disabled: busy, onclick: close, "CANCEL" }
                 }
             },
@@ -171,8 +201,15 @@ pub fn TxnActions(
 }
 
 /// The EDIT fields. The category choices are the real category list.
+/// `ready` tells the parent's SAVE button once the list has loaded, so a save
+/// can't fire against a form the category `<select>` was never rendered for.
 #[component]
-fn EditPanel(form: Signal<EditTxnForm>, itemised: bool, busy: bool) -> Element {
+fn EditPanel(
+    form: Signal<EditTxnForm>,
+    itemised: bool,
+    busy: bool,
+    mut ready: Signal<bool>,
+) -> Element {
     let cats = use_resource(get_categories);
     let mut form = form;
     let f = form.read().clone();
@@ -181,6 +218,9 @@ fn EditPanel(form: Signal<EditTxnForm>, itemised: bool, busy: bool) -> Element {
         _ => None,
     };
     let cats_failed = matches!(&*cats.read(), Some(Err(_)));
+    use_effect(move || {
+        ready.set(matches!(&*cats.read(), Some(Ok(_))));
+    });
     let Some(mut names) = names else {
         return rsx! {
             Awaiting {
