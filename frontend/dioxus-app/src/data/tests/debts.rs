@@ -18,10 +18,16 @@ async fn list_debts_serves_the_four_balances() {
     assert_eq!(card.balance, money(340_000));
     assert!((card.apr - 0.129).abs() < f64::EPSILON);
 
+    assert!(
+        debts.iter().all(|d| d.actions.pay),
+        "every seeded debt is owed"
+    );
+
     let backend = svc::list_debts(&fresh_db(), today())
         .await
         .expect("backend");
-    assert_maps(&debts, &backend);
+    // `actions` is wire-only: the server's verdict on what the page may offer.
+    assert_maps_except(&debts, &backend, "actions");
 }
 
 #[tokio::test]

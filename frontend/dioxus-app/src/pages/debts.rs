@@ -22,9 +22,11 @@
 //!   * `useGet(...)` → `use_resource(move || server_fn())`; the on-demand selected
 //!     debt detail/payments → `use_resource` over the `sel` signal (refetch on
 //!     change), exactly like the dashboard's signal detail.
-//!   * the dead REST mutations (PAY EXTRA / REFINANCE / ADJUST PLAN / REMIND /
-//!     SETTLE) have no F3 server fn yet, so those buttons render (faithful DOM)
-//!     but are inert — the action plumbing lands with the mutation server fns.
+//!   * writes (T39): debt create / edit / delete / instalment / extra payment
+//!     go through `data::debt_actions`; the forms live in `pages::debt_forms`,
+//!     each in its own page-level signal, and every success refetches the
+//!     reads it feeds. REFINANCE / ADJUST PLAN still render inert (no UI for
+//!     T17's plan changes yet), as do the IOU card actions (REMIND / SETTLE).
 //!   * SVG charts (`PayoffTrajectory`, `DecayLine`, `NetBeam`) are hand-written
 //!     inline here, faithful to the JSX (Debts owns these page-specific charts;
 //!     they are not shared F2 primitives). `Spark` (the card balance trace) IS a
@@ -41,10 +43,14 @@ use crate::components::shell::{AiPanel, TopBar};
 use crate::components::states::Awaiting;
 use crate::data::chf;
 use crate::data::cycle::{get_cycle, CycleDto};
+use crate::data::debt_actions::{delete_debt, pay_debt, pay_debt_extra, DebtForm};
 use crate::data::debts::{
     get_debt, get_debt_payments, get_debt_stats, get_iou_stats, get_trajectory, list_debts,
     list_personal_ious, DebtDetailDto, DebtDto, DebtPaymentDto, DebtStatsDto, IouStatsDto,
     PersonalIouDto, TrajectoryDto,
+};
+use crate::pages::debt_forms::{
+    debt_draft, new_debt_draft, submit, DebtFormPanel, DeleteConfirm, Panel, PayDraft, PayField,
 };
 
 // ── pure presentation helpers (faithful to the JSX) ─────────────────────────
@@ -153,6 +159,11 @@ pub fn DebtsPage() -> Element {
     let iou_show = use_signal(|| DEFAULT_IOU_SHOW);
     let insp_dock = use_signal(|| DEFAULT_INSP_DOCK);
 
+    // ---- write panels (T39): one signal each, so no save closes another ----
+    let mut debt_edit = use_signal(Panel::<DebtForm>::default);
+    let debt_pay = use_signal(Panel::<PayDraft>::default);
+    let debt_row = use_signal(Panel::<bool>::default);
+
     // Responsive dock vs drawer: narrow (<1280px) drawers the inspector.
     let narrow = use_signal(|| false);
     use_effect(move || {
@@ -173,8 +184,8 @@ pub fn DebtsPage() -> Element {
 
     // ---- backend data loads (was: useGet) ----
     let cycle = use_resource(get_cycle);
-    let debts = use_resource(list_debts);
-    let stats = use_resource(get_debt_stats);
+    let mut debts = use_resource(list_debts);
+    let mut stats = use_resource(get_debt_stats);
     let ious = use_resource(list_personal_ious);
     let iou_stats = use_resource(get_iou_stats);
 
@@ -184,23 +195,51 @@ pub fn DebtsPage() -> Element {
         "none" => "none".to_string(),
         _ => "avalanche".to_string(),
     };
-    let traj = {
+    let mut traj = {
         let s = traj_strategy.clone();
         use_resource(move || get_trajectory(s.clone()))
     };
 
     // selected debt detail + payments — fetched on demand (refetch when sel changes).
-    let detail = use_resource(move || async move {
+    let mut detail = use_resource(move || async move {
         match sel() {
             Some(id) => Some(get_debt(id).await),
             None => None,
         }
     });
-    let payments = use_resource(move || async move {
+    let mut payments = use_resource(move || async move {
         match sel() {
             Some(id) => Some(get_debt_payments(id).await),
             None => None,
         }
+    });
+
+    // A write landed: refetch every read it feeds. `restart` keeps the previous
+    // value until the new one arrives, so nothing unmounts meanwhile.
+    let refresh_debts = use_callback(move |()| {
+        debts.restart();
+        stats.restart();
+        traj.restart();
+        detail.restart();
+        payments.restart();
+    });
+    let on_debt_deleted = use_callback(move |()| {
+        sel.set(None);
+        drawer.set(false);
+        refresh_debts.call(());
+    });
+    let pay_debt_cb = use_callback(move |(id, d): (String, PayDraft)| {
+        let action = async move {
+            if d.extra {
+                pay_debt_extra(id, d.amount).await
+            } else {
+                pay_debt(id, d.amount).await
+            }
+        };
+        submit(debt_pay, action, refresh_debts);
+    });
+    let delete_debt_cb = use_callback(move |id: String| {
+        submit(debt_row, delete_debt(id), on_debt_deleted);
     });
 
     // ---- read resources into owned snapshots (clone out of the borrow) ----
@@ -525,7 +564,14 @@ pub fn DebtsPage() -> Element {
                                     }
                                     "▌ BAR = PAID OFF · CLICK TO INSPECT"
                                 }
+                                button {
+                                    class: "gbtn dx-add",
+                                    r#type: "button",
+                                    onclick: move |_| debt_edit.write().open("", new_debt_draft()),
+                                    "+ NEW DEBT"
+                                }
                             }
+                            DebtFormPanel { panel: debt_edit, on_saved: refresh_debts }
 
                             if debts_ready {
                                 for (i , (label , items)) in groups.iter().enumerate() {
@@ -635,6 +681,14 @@ pub fn DebtsPage() -> Element {
                         cycle: c.clone(),
                         variant: None,
                         on_close: move |()| sel.set(None),
+                        on_edit: move |d: DebtDto| {
+                            drawer.set(false);
+                            debt_edit.write().open(&d.id, debt_draft(&d));
+                        },
+                        debt_pay,
+                        debt_row,
+                        on_pay: pay_debt_cb,
+                        on_delete: delete_debt_cb,
                     }
                 }
             }
@@ -652,6 +706,14 @@ pub fn DebtsPage() -> Element {
                             cycle: c.clone(),
                             variant: Some("drawer".to_string()),
                             on_close: move |()| drawer.set(false),
+                            on_edit: move |d: DebtDto| {
+                                drawer.set(false);
+                                debt_edit.write().open(&d.id, debt_draft(&d));
+                            },
+                            debt_pay,
+                            debt_row,
+                            on_pay: pay_debt_cb,
+                            on_delete: delete_debt_cb,
                         }
                     }
                 }
@@ -1313,6 +1375,11 @@ fn DebtInspector(
     cycle: CycleDto,
     variant: Option<String>,
     on_close: EventHandler<()>,
+    on_edit: EventHandler<DebtDto>,
+    debt_pay: Signal<Panel<PayDraft>>,
+    debt_row: Signal<Panel<bool>>,
+    on_pay: Callback<(String, PayDraft), ()>,
+    on_delete: Callback<String>,
 ) -> Element {
     let panel_cls = match &variant {
         Some(v) => format!("sig-panel debt-insp {v}"),
@@ -1395,6 +1462,13 @@ fn DebtInspector(
         d.since.clone()
     };
     let recent: Vec<DebtPaymentDto> = payments.iter().take(4).cloned().collect();
+    let (pay_id, extra_id, edit_d) = (d.id.clone(), d.id.clone(), d.clone());
+    let instalment = crate::data::budgets::cap_input_text(d.monthly);
+    let pay_label = if debt_pay.read().draft.extra {
+        "Extra payment · CHF".to_string()
+    } else {
+        "Instalment · CHF".to_string()
+    };
 
     rsx! {
         aside { class: "{panel_cls}",
@@ -1454,12 +1528,32 @@ fn DebtInspector(
             }
 
             div { class: "insp-acts",
-                button { class: "gbtn p", "PAY EXTRA" }
+                if d.actions.pay {
+                    button {
+                        class: "gbtn p",
+                        r#type: "button",
+                        onclick: move |_| debt_pay.write().open(&pay_id, PayDraft { amount: instalment.clone(), extra: false }),
+                        "PAY INSTALMENT"
+                    }
+                    button {
+                        class: "gbtn",
+                        r#type: "button",
+                        onclick: move |_| debt_pay.write().open(&extra_id, PayDraft { amount: String::new(), extra: true }),
+                        "PAY EXTRA"
+                    }
+                } else {
+                    span { class: "dx-note", "PAID OFF · NO PAYMENT DUE" }
+                }
                 if refinance {
                     button { class: if d.status == "high" { "gbtn coral" } else { "gbtn" }, "REFINANCE" }
                 } else {
                     button { class: "gbtn", "ADJUST PLAN" }
                 }
+            }
+            PayField { panel: debt_pay, target: d.id.clone(), label: pay_label, on_pay }
+            div { class: "insp-acts",
+                button { class: "gbtn", r#type: "button", onclick: move |_| on_edit.call(edit_d.clone()), "EDIT" }
+                DeleteConfirm { panel: debt_row, target: d.id.clone(), on_confirm: on_delete }
             }
 
             div { class: "sig-foot",

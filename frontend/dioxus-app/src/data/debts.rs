@@ -70,6 +70,16 @@ pub struct DebtDto {
     pub hist: Vec<f64>,
     /// Group bucket label (e.g. `"LEASES & LOANS"`).
     pub group_label: String,
+    /// What the page may offer for this debt (decided server-side).
+    pub actions: DebtActionsDto,
+}
+
+/// The write actions a debt row offers. Edit and delete are always offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebtActionsDto {
+    /// A scheduled or extra payment can be recorded (something is still owed).
+    pub pay: bool,
 }
 
 /// `GET /debts/stats` — the KPI band + strategy targets.
@@ -417,10 +427,15 @@ pub async fn get_iou_stats() -> Result<IouStatsDto, ServerFnError> {
 
 // ── mappers (service DTO → wire DTO) ───────────────────────────────────────────
 
-/// Map a `phosk_debts` open balance onto the wire [`DebtDto`].
+/// Map a `phosk_debts` open balance onto the wire [`DebtDto`]. A payment is
+/// offered only while something is owed: `debt_write` refuses any payment on
+/// a zero balance.
 #[cfg(feature = "server-deps")]
-fn map_debt(d: phosk_debts::debts::DebtDto) -> DebtDto {
+pub(crate) fn map_debt(d: phosk_debts::debts::DebtDto) -> DebtDto {
     DebtDto {
+        actions: DebtActionsDto {
+            pay: d.balance > Money::ZERO,
+        },
         id: d.id,
         name: d.name,
         lender: d.lender,
