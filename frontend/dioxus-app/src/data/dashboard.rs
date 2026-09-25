@@ -347,9 +347,11 @@ pub async fn get_alerts() -> Result<Vec<AlertDto>, ServerFnError> {
 /// through (VIEW is handled client-side as a route push).
 ///
 /// # Errors
-/// [`ALERT_ACTION_FAILED`] on any rejection (unknown alert, a kind this alert
-/// doesn't offer, an adapter failure) or transport failure — the underlying
-/// [`phosk_core::error::PhoskError`] text never reaches the client.
+/// [`ALERT_ACTION_FAILED`] on any rejection by the planning service (unknown
+/// or dismissed alert, a kind this alert doesn't offer, an adapter failure):
+/// that [`phosk_core::error::PhoskError`] text is not sent. A failure to build
+/// the session, or a transport failure, carries its own message; the page
+/// shows [`ALERT_ACTION_FAILED`] for every error either way.
 #[server]
 pub async fn act_on_alert(id: String, action: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "server-deps")]
@@ -457,101 +459,5 @@ pub(crate) mod opt_money_vec_centimes {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Money>>, D::Error> {
         let raw = Option::<Vec<i64>>::deserialize(d)?;
         Ok(raw.map(|v| v.into_iter().map(Money::from_centimes).collect()))
-    }
-}
-
-/// `act_on_alert_with` against a fresh seeded store (F1): each seeded button's
-/// `kind` succeeds, and every rejection — an unknown alert, an unknown kind, a
-/// kind this alert doesn't offer, or the button label sent instead of its
-/// kind — comes back as the one fixed [`ALERT_ACTION_FAILED`] message.
-#[cfg(all(test, feature = "server-deps"))]
-mod act_on_alert_tests {
-    use std::future::Future;
-    use std::pin::pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    use dioxus::prelude::ServerFnError;
-    use phosk_db_memory::MemoryDb;
-
-    use super::{act_on_alert_with, ALERT_ACTION_FAILED};
-
-    /// Minimal std-only executor. The memory adapter never waits on I/O, so a
-    /// thread-park waker is enough and the tests need no async runtime.
-    fn block_on<F: Future>(fut: F) -> F::Output {
-        struct Unpark(std::thread::Thread);
-        impl Wake for Unpark {
-            fn wake(self: Arc<Self>) {
-                self.0.unpark();
-            }
-        }
-        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-        let mut cx = Context::from_waker(&waker);
-        let mut fut = pin!(fut);
-        loop {
-            match fut.as_mut().poll(&mut cx) {
-                Poll::Ready(out) => return out,
-                Poll::Pending => std::thread::park(),
-            }
-        }
-    }
-
-    /// A fresh seeded store per test: never the process-global stack.
-    fn fresh_db() -> MemoryDb {
-        MemoryDb::seeded().expect("seeded memory db")
-    }
-
-    fn act(db: &MemoryDb, id: &str, action: &str) -> Result<(), ServerFnError> {
-        block_on(act_on_alert_with(db, id, action))
-    }
-
-    /// The message a rejected call would show on the page.
-    fn rejection(result: Result<(), ServerFnError>) -> String {
-        match result.expect_err("the call should be rejected") {
-            ServerFnError::ServerError { message, .. } => message,
-            other => panic!("expected a ServerError, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn each_seeded_buttons_kind_succeeds() {
-        for (id, kind) in [
-            ("a1", "dismiss"),
-            ("a1", "apply"),
-            ("a2", "dismiss"),
-            ("a3", "dismiss"),
-            ("a3", "snooze"),
-        ] {
-            let db = fresh_db();
-            act(&db, id, kind).unwrap_or_else(|e| panic!("{id} {kind}: {e:?}"));
-        }
-    }
-
-    #[test]
-    fn an_unknown_kind_returns_the_fixed_message() {
-        let db = fresh_db();
-        assert_eq!(rejection(act(&db, "a1", "frobnicate")), ALERT_ACTION_FAILED);
-    }
-
-    #[test]
-    fn a_kind_the_alert_does_not_offer_returns_the_fixed_message() {
-        let db = fresh_db();
-        // a2 (Groceries) has no RAISE CAP / "apply" button.
-        assert_eq!(rejection(act(&db, "a2", "apply")), ALERT_ACTION_FAILED);
-    }
-
-    #[test]
-    fn the_button_label_sent_instead_of_its_kind_returns_the_fixed_message() {
-        let db = fresh_db();
-        assert_eq!(rejection(act(&db, "a1", "DISMISS")), ALERT_ACTION_FAILED);
-    }
-
-    #[test]
-    fn an_unknown_alert_returns_the_fixed_message() {
-        let db = fresh_db();
-        assert_eq!(
-            rejection(act(&db, "does-not-exist", "dismiss")),
-            ALERT_ACTION_FAILED
-        );
     }
 }

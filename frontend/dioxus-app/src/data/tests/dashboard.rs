@@ -157,3 +157,27 @@ async fn act_on_alert_rejects_bad_input_without_side_effects() {
     assert_eq!(msg, ALERT_ACTION_FAILED);
     assert_eq!(active_ids(&db).await, ["a1", "a2", "a3"]);
 }
+
+#[tokio::test]
+async fn each_seeded_buttons_kind_succeeds() {
+    for (id, kind) in [
+        ("a1", "dismiss"),
+        ("a1", "apply"),
+        ("a2", "dismiss"),
+        ("a3", "dismiss"),
+        ("a3", "snooze"),
+    ] {
+        let db = fresh_db();
+        act_on_alert_with(&db, id, kind)
+            .await
+            .unwrap_or_else(|e| panic!("{id} {kind}: {e:?}"));
+    }
+}
+
+#[tokio::test]
+async fn the_button_label_sent_instead_of_its_kind_is_rejected() {
+    let db = fresh_db();
+    let msg = server_error(act_on_alert_with(&db, "a1", "DISMISS").await);
+    assert_eq!(msg, ALERT_ACTION_FAILED);
+    assert_eq!(active_ids(&db).await, ["a1", "a2", "a3"]);
+}
