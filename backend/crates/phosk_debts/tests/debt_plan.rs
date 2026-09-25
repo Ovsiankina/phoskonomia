@@ -321,7 +321,308 @@ async fn adjust_plan_audits_each_change_and_stamps_user_modified() {
         vec![("monthly", "35000", "70000"), ("term", "12", "5")]
     );
     assert!(log.iter().all(|e| e.entity_id == stored.id.to_string()));
-    assert!(log.iter().all(|e| e.at == as_of()));
+}
+
+/// The audit timestamp is the wall clock, like every other audit writer — the
+/// effective date only feeds the elapsed-month count, so it cannot back- or
+/// forward-date a correction.
+#[tokio::test]
+async fn corrections_are_stamped_with_the_wall_clock_not_the_effective_date() {
+    let db = db();
+    let today_before = chrono::Utc::now().date_naive();
+    debt_plan::adjust_plan(
+        &db,
+        "tax",
+        date(2026, 4, 1),
+        PlanAdjust {
+            monthly: Some(Money::from_centimes(70_000)),
+            ..PlanAdjust::default()
+        },
+    )
+    .await
+    .expect("adjust");
+    let today_after = chrono::Utc::now().date_naive();
+
+    let log = db.corrections().expect("audit log");
+    assert!(!log.is_empty());
+    assert!(
+        log.iter()
+            .all(|e| (today_before..=today_after).contains(&e.at)),
+        "stamped today, not with the effective date"
+    );
+}
+
+#[tokio::test]
+async fn an_effective_date_before_the_debt_opened_or_far_ahead_is_rejected() {
+    let db = db_with_bike().await;
+    let before = db.debt_by_slug("bike-loan").await.expect("stored");
+    let far_ahead = chrono::Utc::now().date_naive() + chrono::Days::new(2 * 366);
+    for (what, on) in [
+        ("before since", date(2025, 12, 31)),
+        ("epoch", date(1970, 1, 1)),
+        ("far future", far_ahead),
+    ] {
+        let err = debt_plan::adjust_plan(
+            &db,
+            "bike-loan",
+            on,
+            PlanAdjust {
+                remaining_term: Some(12),
+                ..PlanAdjust::default()
+            },
+        )
+        .await
+        .expect_err(what);
+        assert_invalid(err, what);
+        let err = debt_plan::refinance(&db, "bike-loan", on, refi(0.03))
+            .await
+            .expect_err(what);
+        assert_invalid(err, what);
+    }
+    assert_eq!(db.debt_by_slug("bike-loan").await.expect("stored"), before);
+    assert!(db.corrections().expect("audit log").is_empty());
+}
+
+#[tokio::test]
+async fn restating_the_current_instalment_writes_nothing() {
+    let db = db_with_bike().await;
+    let before = db.debt_by_slug("bike-loan").await.expect("stored");
+
+    // The bike's 20 000 c clears in 27 months; 5 have elapsed, so re-deriving
+    // would turn the stored 30-month term into 32. Restating is not a change.
+    debt_plan::adjust_plan(
+        &db,
+        "bike-loan",
+        as_of(),
+        PlanAdjust {
+            monthly: Some(before.monthly),
+            ..PlanAdjust::default()
+        },
+    )
+    .await
+    .expect("a restatement is fine");
+
+    assert_eq!(db.debt_by_slug("bike-loan").await.expect("stored"), before);
+    assert!(db.corrections().expect("audit log").is_empty());
+}
+
+#[tokio::test]
+async fn refinancing_at_the_same_rate_writes_nothing() {
+    let db = db_with_bike().await;
+    let before = db.debt_by_slug("bike-loan").await.expect("stored");
+
+    debt_plan::refinance(&db, "bike-loan", as_of(), refi(before.apr))
+        .await
+        .expect("same rate");
+    debt_plan::refinance(
+        &db,
+        "bike-loan",
+        as_of(),
+        Refinance {
+            apr: before.apr,
+            monthly: Some(before.monthly),
+            ..Refinance::default()
+        },
+    )
+    .await
+    .expect("same rate, same instalment");
+
+    assert_eq!(db.debt_by_slug("bike-loan").await.expect("stored"), before);
+    assert!(db.corrections().expect("audit log").is_empty());
+}
+
+/// "n instalments clear the debt" must hold for the payments the write path
+/// actually records (interest rounded to the centime each month), not only for
+/// the float projection: here the plain rounded-up annuity (85 264 c) leaves
+/// one centime after six recorded instalments.
+#[tokio::test]
+async fn the_derived_annuity_clears_the_debt_through_recorded_payments() {
+    let db = db();
+    debt_write::create_debt(
+        &db,
+        NewDebt {
+            name: "Car".to_owned(),
+            apr: 0.079,
+            monthly: Money::from_centimes(10_000),
+            term: 0,
+            ..bike_loan()
+        },
+    )
+    .await
+    .expect("create");
+    debt_plan::adjust_plan(
+        &db,
+        "car",
+        as_of(),
+        PlanAdjust {
+            remaining_term: Some(6),
+            ..PlanAdjust::default()
+        },
+    )
+    .await
+    .expect("adjust");
+    let monthly = db.debt_by_slug("car").await.expect("stored").monthly;
+    assert_eq!(monthly.centimes(), 85_265);
+
+    let mut left = Money::from_centimes(1);
+    for month in 1..=6_u32 {
+        let debt = db.debt_by_slug("car").await.expect("stored");
+        // round(balance · 0.079 / 12) in integers: what `record_payment`
+        // accrues, so the final instalment is capped at the payoff amount.
+        let b = debt.balance.centimes();
+        let payoff = b + (b * 79 + 6_000) / 12_000;
+        let amount = monthly.centimes().min(payoff);
+        left = debt_write::record_payment(
+            &db,
+            "car",
+            NewDebtPayment {
+                date: date(2026, 6 + month, 1),
+                amount: Money::from_centimes(amount),
+            },
+        )
+        .await
+        .expect("pay");
+        if left.centimes() == 0 {
+            break;
+        }
+    }
+    assert_eq!(left.centimes(), 0, "six instalments clear it");
+}
+
+#[tokio::test]
+async fn refinancing_a_debt_without_an_instalment_asks_for_a_plan() {
+    let db = db();
+    debt_write::create_debt(
+        &db,
+        NewDebt {
+            name: "Overdraft".to_owned(),
+            monthly: Money::ZERO,
+            term: 0,
+            ..bike_loan()
+        },
+    )
+    .await
+    .expect("create");
+    let err = debt_plan::refinance(&db, "overdraft", as_of(), refi(0.03))
+        .await
+        .expect_err("no plan");
+    match err {
+        PhoskError::Invalid(msg) => assert!(
+            msg.contains("plan") && !msg.contains("got 0"),
+            "names the missing plan: {msg}"
+        ),
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_term_counts_the_real_payoff_not_the_requested_months() {
+    let db = db();
+    debt_write::create_debt(
+        &db,
+        NewDebt {
+            name: "Tiny".to_owned(),
+            balance: Money::from_centimes(100),
+            orig: Money::from_centimes(100),
+            monthly: Money::from_centimes(10),
+            apr: 0.0,
+            ..bike_loan()
+        },
+    )
+    .await
+    .expect("create");
+    debt_plan::adjust_plan(
+        &db,
+        "tiny",
+        as_of(),
+        PlanAdjust {
+            remaining_term: Some(30),
+            ..PlanAdjust::default()
+        },
+    )
+    .await
+    .expect("adjust");
+    let d = read(&db, "tiny").await;
+    // ceil(100 / 30) = 4 c a month clears 100 c in 25 months, not 30.
+    assert_eq!(d.monthly.centimes(), 4);
+    assert_eq!(d.months_to_payoff, 25);
+    assert_eq!(d.term, 5 + 25);
+}
+
+#[tokio::test]
+async fn whole_months_elapsed_count_a_month_end_opening_date() {
+    let db = db();
+    debt_write::create_debt(
+        &db,
+        NewDebt {
+            name: "Month end".to_owned(),
+            since: date(2026, 1, 31),
+            ..bike_loan()
+        },
+    )
+    .await
+    .expect("create");
+    // 31 JAN → 28 FEB → 31 MAR → 30 APR: three whole months by 30 APR.
+    debt_plan::adjust_plan(
+        &db,
+        "month-end",
+        date(2026, 4, 30),
+        PlanAdjust {
+            remaining_term: Some(12),
+            ..PlanAdjust::default()
+        },
+    )
+    .await
+    .expect("adjust");
+    let stored = db.debt_by_slug("month-end").await.expect("stored");
+    assert_eq!(stored.term, 3 + 12);
+}
+
+#[tokio::test]
+async fn a_late_payment_day_lands_on_the_last_day_of_a_short_month() {
+    let db = db_with_bike().await;
+    debt_plan::adjust_plan(
+        &db,
+        "bike-loan",
+        as_of(),
+        PlanAdjust {
+            day: Some(31),
+            ..PlanAdjust::default()
+        },
+    )
+    .await
+    .expect("adjust day");
+    assert_eq!(read(&db, "bike-loan").await.next_label, "30 JUN");
+
+    let label_on = |list: Vec<debts::DebtDto>| find(&list, "bike-loan").next_label.clone();
+    let feb = debts::list_debts(&db, date(2026, 2, 10))
+        .await
+        .expect("list");
+    assert_eq!(label_on(feb), "28 FEB");
+
+    debt_plan::adjust_plan(
+        &db,
+        "bike-loan",
+        as_of(),
+        PlanAdjust {
+            day: Some(29),
+            ..PlanAdjust::default()
+        },
+    )
+    .await
+    .expect("adjust day");
+    let leap = debts::list_debts(&db, date(2028, 2, 10))
+        .await
+        .expect("list");
+    assert_eq!(label_on(leap), "29 FEB");
+    let common = debts::list_debts(&db, date(2027, 2, 10))
+        .await
+        .expect("list");
+    assert_eq!(label_on(common), "28 FEB");
+    let jul = debts::list_debts(&db, date(2026, 7, 1))
+        .await
+        .expect("list");
+    assert_eq!(label_on(jul), "29 JUL");
 }
 
 #[tokio::test]
