@@ -8,8 +8,8 @@ use phosk_model::Subscription;
 
 use super::support::{fresh_db, money, today};
 use crate::data::subscriptions::{
-    available_actions, can_record_charge, create_subscription_with, delete_subscription_with,
-    edit_subscription_with, record_subscription_charge_with, run_subscription_action_with,
+    create_subscription_with, delete_subscription_with, edit_subscription_with,
+    get_subscription_with, record_subscription_charge_with, run_subscription_action_with,
     SubAction, SubscriptionForm,
 };
 
@@ -100,6 +100,27 @@ async fn create_rejects_bad_input_without_writing() {
         assert!(!msg.is_empty(), "{f:?} needs a reason");
         assert!(!msg.contains("12,90"), "the raw input is never echoed");
     }
+    for (amount, want) in [
+        ("1000000.01", "cannot exceed one million"),
+        ("-5", "above zero"),
+        ("-0", "above zero"),
+        ("0", "above zero"),
+    ] {
+        let f = SubscriptionForm {
+            amount: amount.into(),
+            ..form("Pricey")
+        };
+        let msg = rejected(create_subscription_with(&db, today(), f).await);
+        assert!(msg.contains(want), "{amount}: {msg}");
+    }
+    let max = SubscriptionForm {
+        amount: "1000000".into(),
+        ..form("Cap")
+    };
+    let id = create_subscription_with(&db, today(), max)
+        .await
+        .expect("CHF 1'000'000 is the inclusive cap");
+    delete_subscription_with(&db, &id).await.expect("deleted");
     let dup = rejected(create_subscription_with(&db, today(), form("Netflix")).await);
     assert!(dup.contains("already exists"), "{dup}");
     assert_eq!(count(&db).await, before, "nothing was written");
@@ -160,6 +181,25 @@ async fn edit_rejects_bad_input_and_name_clashes() {
     let gone = rejected(edit_subscription_with(&db, "nope", form("Nope")).await);
     assert!(gone.contains("no longer exists"), "{gone}");
     assert_eq!(stored(&db, "netflix").await, before, "nothing changed");
+}
+
+#[tokio::test]
+async fn edit_accepts_a_rename_the_backend_accepts() {
+    let db = fresh_db();
+    let unchanged = SubscriptionForm {
+        amount: "21.90".into(),
+        ..form("Netflix")
+    };
+    edit_subscription_with(&db, "netflix", unchanged)
+        .await
+        .expect("keeping the name is no clash");
+    edit_subscription_with(&db, "netflix", form("网飞"))
+        .await
+        .expect("the slug is frozen, so a non-ASCII name is fine");
+    let sub = stored(&db, "netflix").await;
+    assert_eq!((sub.name.as_str(), sub.slug.as_str()), ("网飞", "netflix"));
+    let blank = rejected(edit_subscription_with(&db, "netflix", form("  ")).await);
+    assert!(blank.contains("name"), "{blank}");
 }
 
 #[tokio::test]
@@ -257,30 +297,83 @@ async fn record_charge_rejects_bad_input() {
     let id = create_subscription_with(&db, today(), form("Cloud Box"))
         .await
         .expect("created");
-    for (amount, date) in [
-        ("abc", ""),
-        ("0", ""),
-        ("5", "18.06.2026"),
-        ("5", "2026-06-19"),
-        ("5", "2026-01-01"),
+    for (amount, date, want) in [
+        ("abc", "", ""),
+        ("0", "", "above zero"),
+        ("-0", "", "above zero"),
+        ("-5", "", "above zero"),
+        ("1000000.01", "", "cannot exceed one million"),
+        ("5", "18.06.2026", "YYYY-MM-DD"),
+        ("5", "2026-06-19", "in the future"),
+        ("5", "2026-01-01", "tracking start"),
     ] {
         let msg = rejected(record_subscription_charge_with(&db, today(), &id, amount, date).await);
-        assert!(!msg.is_empty(), "{amount} / {date}");
+        assert!(
+            !msg.is_empty() && msg.contains(want),
+            "{amount} / {date}: {msg}"
+        );
     }
+    run_subscription_action_with(&db, today(), &id, SubAction::Pause)
+        .await
+        .expect("paused");
+    let paused = rejected(record_subscription_charge_with(&db, today(), &id, "5", "").await);
+    assert!(paused.contains("not available"), "{paused}");
     let sub = stored(&db, &id).await;
     let charges = db.subscription_charges(sub.id).await.expect("charges");
     assert!(charges.is_empty(), "nothing was recorded");
 }
 
-#[test]
-fn actions_follow_the_derived_status() {
+/// Every seeded charge: the inspector payload offers an action (and RECORD
+/// CHARGE) exactly when running it on a fresh store is then accepted.
+#[tokio::test]
+async fn offered_actions_are_exactly_the_accepted_ones() {
     use SubAction::{Cancel, MarkPaid, Pause, Resume};
-    assert_eq!(available_actions("due"), [MarkPaid, Pause, Cancel]);
-    assert_eq!(available_actions("ok"), [Pause, Cancel]);
-    assert_eq!(available_actions("soon"), [Pause, Cancel]);
-    assert_eq!(available_actions("watch"), [Pause, Cancel]);
-    assert_eq!(available_actions("paused"), [Resume, Cancel]);
-    assert!(available_actions("cancelled").is_empty());
-    assert!(can_record_charge("ok") && can_record_charge("due"));
-    assert!(!can_record_charge("paused") && !can_record_charge("cancelled"));
+    let db = fresh_db();
+    let ids: Vec<String> = db
+        .subscriptions()
+        .await
+        .expect("subscriptions")
+        .into_iter()
+        .map(|s| s.slug)
+        .collect();
+    let mut mark_paid_offered = false;
+    for id in &ids {
+        let detail = get_subscription_with(&db, today(), id)
+            .await
+            .expect("detail");
+        for action in [MarkPaid, Pause, Resume, Cancel] {
+            let accepted = run_subscription_action_with(&fresh_db(), today(), id, action)
+                .await
+                .is_ok();
+            assert_eq!(
+                detail.actions.contains(&action),
+                accepted,
+                "{id} {action:?}: offered ⇔ accepted"
+            );
+        }
+        mark_paid_offered |= detail.actions.contains(&MarkPaid);
+        let recorded = record_subscription_charge_with(&fresh_db(), today(), id, "5", "")
+            .await
+            .is_ok();
+        assert_eq!(detail.can_record_charge, recorded, "{id} record charge");
+    }
+    assert!(mark_paid_offered, "the seed has unsettled cycles");
+
+    // Paused and cancelled charges offer only what the backend still accepts.
+    run_subscription_action_with(&db, today(), "netflix", Pause)
+        .await
+        .expect("paused");
+    let paused = get_subscription_with(&db, today(), "netflix")
+        .await
+        .expect("detail");
+    assert_eq!(paused.actions, [Resume, Cancel]);
+    assert!(!paused.can_record_charge);
+    run_subscription_action_with(&db, today(), "netflix", Cancel)
+        .await
+        .expect("cancelled");
+    let cancelled = get_subscription_with(&db, today(), "netflix")
+        .await
+        .expect("detail");
+    assert!(cancelled.actions.is_empty());
+    assert!(!cancelled.can_record_charge);
 }

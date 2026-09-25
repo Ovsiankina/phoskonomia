@@ -30,9 +30,9 @@
 //!     them; only a click confirms.
 //!   * NEW / EDIT / DELETE (with a confirm step) and the lifecycle actions
 //!     (MARK PAID / PAUSE / RESUME / CANCEL / RECORD CHARGE) go through the
-//!     write-path server fns; the inspector offers only the actions valid for
-//!     the stored status (`available_actions`). One write at a time; every
-//!     write re-reads the list, roll-ups, sweep and inspector.
+//!     write-path server fns; the inspector offers only the actions the
+//!     backend reports it accepts (`SubscriptionDetailDto::actions`). One write
+//!     at a time; every write re-reads the list, roll-ups, sweep and inspector.
 //!   * DETECT / SNOOZE have no server fn yet, so those buttons render
 //!     faithfully but are inert.
 
@@ -44,14 +44,13 @@ use crate::components::shell::{AiPanel, ChatMsg, FeedItem, TopBar};
 use crate::components::states::Awaiting;
 use crate::data::ai::get_ai_panel;
 use crate::data::subscriptions::{
-    available_actions, can_record_charge, create_subscription, delete_subscription,
-    edit_subscription, record_subscription_charge, run_subscription_action, SubAction,
-    SubscriptionForm,
-};
-use crate::data::subscriptions::{
     confirm_recurring_candidate, dismiss_recurring_candidate, get_billing_sweep, get_subscription,
     get_subscription_stats, list_recurring_candidates, list_subscriptions, BillingSweepDto,
     ImpulseDto, RecurringCandidateDto, SubFilter, SubscriptionDetailDto, SubscriptionDto,
+};
+use crate::data::subscriptions::{
+    create_subscription, delete_subscription, edit_subscription, record_subscription_charge,
+    run_subscription_action, SubAction, SubscriptionForm,
 };
 use crate::data::{chf, chf2, cycle::get_cycle, cycle::CycleDto};
 
@@ -855,8 +854,8 @@ fn SubInspector(
     } else {
         s.since.clone()
     };
-    let actions = available_actions(&s.status);
-    let can_charge = can_record_charge(&s.status);
+    let actions = d.actions;
+    let can_charge = d.can_record_charge;
     let deleting = confirm_del().as_deref() == Some(s.id.as_str());
     let charge_v = charge().filter(|c| c.id == s.id);
     let edit_form = form_from_sub(&s);
@@ -1081,6 +1080,14 @@ enum SubWrite {
     Charge(ChargeDraft),
 }
 
+impl SubWrite {
+    /// `true` for a write from the create / edit form (its errors show there);
+    /// every other write comes from the inspector.
+    const fn is_form_write(&self) -> bool {
+        matches!(self, Self::Create(_) | Self::Edit(..))
+    }
+}
+
 /// The RECORD CHARGE draft: CHF text + `YYYY-MM-DD` date (empty = today).
 #[derive(Debug, Clone, PartialEq)]
 struct ChargeDraft {
@@ -1104,7 +1111,12 @@ fn form_from_sub(s: &SubscriptionDto) -> SubscriptionForm {
         } else {
             s.day.to_string()
         },
-        month: s.month.clone(),
+        // A monthly charge has no month; YEARLY must start on a real one.
+        month: if s.month.is_empty() {
+            "JAN".to_string()
+        } else {
+            s.month.clone()
+        },
         category: s.category.clone(),
         glyph: s.glyph.clone(),
         note: s.note.clone(),
@@ -1547,7 +1559,8 @@ pub fn SubscriptionsPage() -> Element {
 
     // ---- write path: create / edit / delete / lifecycle ----
     let mut write_pending = use_signal(|| false);
-    let mut write_error = use_signal(|| Option::<String>::None);
+    // The last failed write's message, and whether it came from the form.
+    let mut write_error = use_signal(|| Option::<(bool, String)>::None);
     // `(edit target, initial form)` of the open form; target `None` creates.
     let mut form = use_signal(|| Option::<(Option<String>, SubscriptionForm)>::None);
     let mut confirm_del = use_signal(|| Option::<String>::None);
@@ -1565,7 +1578,10 @@ pub fn SubscriptionsPage() -> Element {
         let mut sweep = sweep;
         let mut detail = detail;
         spawn(async move {
-            let deleted = matches!(w, SubWrite::Delete(_));
+            let from_form = w.is_form_write();
+            // Only the UI state belonging to the write that succeeded closes:
+            // a PAUSE never discards a half-typed create/edit form.
+            let done = w.clone();
             let result = match w {
                 SubWrite::Create(f) => create_subscription(f).await.map(Some),
                 SubWrite::Edit(id, f) => edit_subscription(id, f).await.map(|()| None),
@@ -1575,19 +1591,25 @@ pub fn SubscriptionsPage() -> Element {
                     .await
                     .map(|()| None),
             };
-            match result {
-                Ok(created) => {
+            match (result, done) {
+                (Ok(created), SubWrite::Create(_)) => {
                     form.set(None);
-                    confirm_del.set(None);
-                    charge.set(None);
-                    if deleted {
-                        sel.set(None);
-                    }
-                    if let Some(id) = created {
-                        sel.set(Some(id));
-                    }
+                    sel.set(created);
                 }
-                Err(e) => write_error.set(Some(candidate_error_text(&e))),
+                (Ok(_), SubWrite::Edit(..)) => form.set(None),
+                (Ok(_), SubWrite::Charge(_)) => charge.set(None),
+                (Ok(_), SubWrite::Delete(id)) => {
+                    confirm_del.set(None);
+                    if form.peek().as_ref().and_then(|(t, _)| t.as_deref()) == Some(id.as_str()) {
+                        form.set(None);
+                    }
+                    if charge.peek().as_ref().map(|c| c.id.as_str()) == Some(id.as_str()) {
+                        charge.set(None);
+                    }
+                    sel.set(None);
+                }
+                (Ok(_), SubWrite::Action(..)) => {}
+                (Err(e), _) => write_error.set(Some((from_form, candidate_error_text(&e)))),
             }
             // Whatever the outcome, re-read everything derived from the store.
             list.restart();
@@ -1601,8 +1623,12 @@ pub fn SubscriptionsPage() -> Element {
     let list_refreshing = *list.state().read() == UseResourceState::Pending;
     let write_busy = write_pending() || list_refreshing;
     let form_v = form();
-    let form_error = write_error().filter(|_| form_v.is_some());
-    let insp_error = write_error().filter(|_| form_v.is_none());
+    let form_error = write_error()
+        .filter(|(from_form, _)| *from_form && form_v.is_some())
+        .map(|(_, msg)| msg);
+    let insp_error = write_error()
+        .filter(|(from_form, _)| !*from_form)
+        .map(|(_, msg)| msg);
 
     let cand_refreshing = *candidates.state().read() == UseResourceState::Pending;
     let cand_list: Option<Vec<RecurringCandidateDto>> = candidates

@@ -173,7 +173,7 @@ body.hl-auto [data-src="llm"] .sub:hover { box-shadow: inset 2.5px 0 0 var(--ind
 
 /* ---- subscription create / edit / record-charge forms — tokens only ---- */
 .sub-form { --legend-bg: var(--bg); margin-bottom: var(--s-5); padding: var(--s-5) var(--s-4) var(--s-3);
-  background: var(--glass-fill); }
+  background: var(--bg-raise); }
 .sub-form-grid { display: grid; gap: var(--s-2) var(--s-3);
   grid-template-columns: repeat(auto-fit, minmax(calc(var(--grid-unit) * 3), 1fr)); }
 .sub-f { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
