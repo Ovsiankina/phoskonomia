@@ -18,6 +18,7 @@
 //!
 //! * [`cycle`]        — shared current-cycle window (`CycleDto`); every page top-bar uses it.
 //! * [`ai`]           — shared assistant (feed/status read, live chat) for the left `AiPanel`.
+//! * [`approvals`]    — the AI approval queue: pending receipt proposals, approve / reject / bulk.
 //! * [`signals`]      — shared item-signal vocabulary (`SignalDto`, candidates, movers).
 //! * [`dashboard`]    — the composed dashboard read (REAL backend via `phosk_insights`).
 //! * [`transactions`] — receipt list, lines, receipt detail.
@@ -50,6 +51,7 @@ use phosk_core::money::Money;
 
 pub mod ai;
 pub mod analytics;
+pub mod approvals;
 pub mod budgets;
 pub mod csv_export;
 pub mod cycle;
