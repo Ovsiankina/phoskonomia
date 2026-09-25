@@ -18,6 +18,7 @@ pub mod analytics;
 pub mod budgets;
 pub mod config;
 pub mod dashboard;
+mod debt_forms;
 pub mod debts;
 pub mod subscriptions;
 pub mod transactions;

@@ -70,6 +70,16 @@ pub struct DebtDto {
     pub hist: Vec<f64>,
     /// Group bucket label (e.g. `"LEASES & LOANS"`).
     pub group_label: String,
+    /// What the page may offer for this debt (decided server-side).
+    pub actions: DebtActionsDto,
+}
+
+/// The write actions a debt row offers. Edit and delete are always offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebtActionsDto {
+    /// A scheduled or extra payment can be recorded (something is still owed).
+    pub pay: bool,
 }
 
 /// `GET /debts/stats` — the KPI band + strategy targets.
@@ -198,6 +208,18 @@ pub struct PersonalIouDto {
     pub since: String,
     /// Fraction repaid, 0–1.
     pub repaid_pct: f64,
+    /// What the page may offer for this IOU (decided server-side).
+    pub actions: IouActionsDto,
+}
+
+/// The write actions an IOU card offers. Edit and delete are always offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IouActionsDto {
+    /// A partial payment can be recorded (something is still outstanding).
+    pub pay: bool,
+    /// The IOU can be settled (it is not settled yet).
+    pub settle: bool,
 }
 
 /// `GET /personal-ious/stats` — the net-position beam figures.
@@ -369,20 +391,7 @@ pub async fn list_personal_ious() -> Result<Vec<PersonalIouDto>, ServerFnError> 
         let ious = phosk_debts::personal_ious::list_personal_ious(session.db())
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
-        Ok(ious
-            .into_iter()
-            .map(|p| PersonalIouDto {
-                id: p.id,
-                dir: p.dir,
-                person: p.person,
-                initials: p.initials,
-                amount: p.amount,
-                of: p.of,
-                reason: p.reason,
-                since: p.since,
-                repaid_pct: p.repaid_pct,
-            })
-            .collect())
+        Ok(ious.into_iter().map(map_iou).collect())
     }
     #[cfg(not(feature = "server-deps"))]
     {
@@ -417,10 +426,15 @@ pub async fn get_iou_stats() -> Result<IouStatsDto, ServerFnError> {
 
 // ── mappers (service DTO → wire DTO) ───────────────────────────────────────────
 
-/// Map a `phosk_debts` open balance onto the wire [`DebtDto`].
+/// Map a `phosk_debts` open balance onto the wire [`DebtDto`]. A payment is
+/// offered only while something is owed: `debt_write` refuses any payment on
+/// a zero balance.
 #[cfg(feature = "server-deps")]
-fn map_debt(d: phosk_debts::debts::DebtDto) -> DebtDto {
+pub(crate) fn map_debt(d: phosk_debts::debts::DebtDto) -> DebtDto {
     DebtDto {
+        actions: DebtActionsDto {
+            pay: d.balance > Money::ZERO,
+        },
         id: d.id,
         name: d.name,
         lender: d.lender,
@@ -444,5 +458,28 @@ fn map_debt(d: phosk_debts::debts::DebtDto) -> DebtDto {
         note: d.note,
         hist: d.hist,
         group_label: d.group_label,
+    }
+}
+
+/// Map a `phosk_debts` personal IOU onto the wire [`PersonalIouDto`]. Paying
+/// and settling are offered only while something is outstanding: a payment on
+/// a settled IOU is refused and settling it again changes nothing.
+#[cfg(feature = "server-deps")]
+pub(crate) fn map_iou(p: phosk_debts::personal_ious::PersonalIouDto) -> PersonalIouDto {
+    let open = p.amount > Money::ZERO;
+    PersonalIouDto {
+        id: p.id,
+        dir: p.dir,
+        person: p.person,
+        initials: p.initials,
+        amount: p.amount,
+        of: p.of,
+        reason: p.reason,
+        since: p.since,
+        repaid_pct: p.repaid_pct,
+        actions: IouActionsDto {
+            pay: open,
+            settle: open,
+        },
     }
 }

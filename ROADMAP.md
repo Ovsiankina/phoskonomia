@@ -42,7 +42,7 @@ test) + input validation + `Provenance` + errors via `PhoskError`. No UI.
 - [x] **T15** — `phosk_recurring`: lifecycle — pause, resume, cancel, mark-paid, record charge; derived status stays correct (needs: T14)
 - [x] **T16** — `phosk_debts`: debt create / edit / delete, record payment, extra payment; amortisation outputs stay correct (needs: T04)
 - [x] **T17** — `phosk_debts`: plan adjust (monthly/day/term) and refinance (needs: T16)
-- [ ] **T18** — `phosk_debts`: personal IOUs — create / edit / delete, record partial payment, settle (needs: T04)
+- [x] **T18** — `phosk_debts`: personal IOUs — create / edit / delete, record partial payment, settle (needs: T04)
 - [ ] **T19** — `phosk_planning`: set global monthly budget + savings target, with budget-history entry; alert snooze with re-trigger (needs: T04)
 - [ ] **T20** — `phosk_ai`: **approval service** — list pending suggestions, approve (applies the receipt proposal to the ledger via `insert_receipt`, idempotent, provenance preserved), reject, bulk-approve per receipt. This is the ONLY path from a model proposal to the ledger. (needs: T10)
 - [ ] **T21** — `phosk_daemon`: compose the real `phosk_pipeline_receipt` ingest behind the existing seam; keep `NullIngest` for tests; selection by env (needs: T20)
@@ -63,7 +63,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 - [ ] **T36** — "NEW transaction" form (needs: T10)
 - [ ] **T37** — Edit / delete transaction from the detail view, with confirm step (needs: T11, T36)
 - [ ] **T38** — Subscriptions create / edit / lifecycle actions (needs: T15)
-- [ ] **T39** — Debts + personal IOUs create / edit / payments (needs: T17, T18)
+- [ ] **T39** — Debts + personal IOUs create / edit / payments (needs: T17, T18) — partial: plan / APR edits (T17 adjust-plan / refinance UI) not done
 - [ ] **T40** — `/categories` route: list, create, rename, merge; token-seeded colour picker (no raw hex input) (needs: T13)
 - [ ] **T41** — `/receipt` route: photo upload → `intake_receipt` → per-line review screen (needs: T20)
 - [ ] **T42** — Approval queue UI: pending AI proposals, approve / reject / bulk-approve (needs: T20)

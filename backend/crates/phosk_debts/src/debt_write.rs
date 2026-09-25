@@ -54,8 +54,9 @@ const MIN_DAY: u32 = 1;
 const MAX_DAY: u32 = 31;
 
 /// The debt kinds the read model knows how to group and label
-/// (`Debt::kind`'s documented domain).
-const KINDS: [&str; 6] = ["LEASE", "LOAN", "CARD", "TAX", "BNPL", "MEDICAL"];
+/// (`Debt::kind`'s documented domain). Public so a UI's hand-kept copy (the
+/// WASM client cannot depend on this crate) can be tested against it.
+pub const KINDS: [&str; 6] = ["LEASE", "LOAN", "CARD", "TAX", "BNPL", "MEDICAL"];
 
 /// The status keys [`crate::debts`] maps to a human label.
 const STATUSES: [&str; 4] = ["high", "due", "watch", "ok"];
