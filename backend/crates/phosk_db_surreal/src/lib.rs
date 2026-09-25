@@ -67,7 +67,8 @@ use phosk_id::{
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
     CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription, Transaction,
+    Provenance, Receipt, ReceiptProposal, Signal, SignalOccurrence, Source, Subscription,
+    Transaction,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -912,6 +913,20 @@ impl DatabaseAdapter for SurrealDb {
             .ok_or_else(|| PhoskError::NotFound(format!("suggestion {id}")))?;
         s.status = status.to_owned();
         self.store.put(Bucket::AiSuggestion, &key, &s).await
+    }
+
+    async fn stage_receipt_proposal(&self, p: ReceiptProposal) -> Result<(), PhoskError> {
+        let key = p.suggestion_id.to_string();
+        self.store.put(Bucket::ReceiptProposal, &key, &p).await
+    }
+
+    async fn receipt_proposal(
+        &self,
+        id: SuggestionId,
+    ) -> Result<Option<ReceiptProposal>, PhoskError> {
+        self.store
+            .get(Bucket::ReceiptProposal, &id.to_string())
+            .await
     }
 }
 

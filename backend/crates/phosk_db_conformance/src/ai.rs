@@ -2,10 +2,10 @@
 
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::money::Money;
-use phosk_id::{ChatId, FeedItemId, MessageId, SuggestionId};
-use phosk_model::{AiSuggestion, Chat, Message};
+use phosk_id::{ChatId, FeedItemId, MessageId, ReceiptId, SuggestionId};
+use phosk_model::{AiSuggestion, Chat, Message, ReceiptProposal};
 
-use crate::support::{Failure, Outcome, date, ensure, ensure_eq, ensure_not_found};
+use crate::support::{Failure, Outcome, date, ensure, ensure_eq, ensure_not_found, line, receipt};
 
 /// The seeded (latest) chat.
 async fn seeded_chat(db: &dyn DatabaseAdapter) -> Result<Chat, Failure> {
@@ -141,4 +141,58 @@ pub async fn update_suggestion_status_changes_only_the_target(db: &dyn DatabaseA
     ensure(kept, "other suggestions untouched")?;
     let unknown = db.update_suggestion_status(SuggestionId::new(), "dismissed");
     ensure_not_found(unknown.await, "update_suggestion_status(unknown)")
+}
+
+/// A staged receipt proposal reads back verbatim by its suggestion id,
+/// re-staging replaces it, an unknown id has none — and staging never touches
+/// the ledger (no receipt, no dashboard transaction).
+pub async fn stage_receipt_proposal_round_trips_off_ledger(db: &dyn DatabaseAdapter) -> Outcome {
+    let receipts_before = db.all_receipts().await?;
+    let (from, to) = (date(2027, 3, 1)?, date(2027, 3, 31)?);
+    let txs_before = db.transactions_between(from, to).await?;
+
+    let rid = ReceiptId::new();
+    let r = receipt(rid, "rcpt:conformance", date(2027, 3, 5)?, 700);
+    let p = ReceiptProposal {
+        suggestion_id: SuggestionId::new(),
+        receipt: r.clone(),
+        line_items: vec![line(rid, "Apples", 300), line(rid, "Bread", 400)],
+    };
+    db.stage_receipt_proposal(p.clone()).await?;
+    ensure_eq(
+        &db.receipt_proposal(p.suggestion_id).await?,
+        &Some(p.clone()),
+        "staged proposal reads back verbatim",
+    )?;
+
+    let replaced = ReceiptProposal {
+        line_items: vec![line(rid, "Apples", 700)],
+        ..p.clone()
+    };
+    db.stage_receipt_proposal(replaced.clone()).await?;
+    ensure_eq(
+        &db.receipt_proposal(p.suggestion_id).await?,
+        &Some(replaced),
+        "re-staging replaces the payload",
+    )?;
+    ensure_eq(
+        &db.receipt_proposal(SuggestionId::new()).await?,
+        &None,
+        "unknown suggestion has no proposal",
+    )?;
+
+    ensure_eq(
+        &db.all_receipts().await?,
+        &receipts_before,
+        "staging leaves the receipts untouched",
+    )?;
+    ensure_eq(
+        &db.transactions_between(from, to).await?,
+        &txs_before,
+        "staging projects no transaction",
+    )?;
+    ensure_not_found(
+        db.receipt_by_slug(&r.slug).await,
+        "staged receipt is not in the ledger",
+    )
 }

@@ -18,7 +18,7 @@ use phosk_core::error::PhoskError;
 use crate::store::{Bucket, Store};
 
 /// The current schema version. Bump when the migration body changes.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Define every table and stamp the schema version. Idempotent.
 ///

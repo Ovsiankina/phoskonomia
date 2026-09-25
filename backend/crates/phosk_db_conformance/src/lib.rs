@@ -106,6 +106,7 @@ macro_rules! database_adapter_conformance {
             ai::clear_chat_empties_only_that_chat,
             ai::enqueue_suggestion_appends_it,
             ai::update_suggestion_status_changes_only_the_target,
+            ai::stage_receipt_proposal_round_trips_off_ledger,
         );
     };
     (@each $factory:expr; $($module:ident :: $check:ident),+ $(,)?) => {

@@ -36,7 +36,7 @@ use phosk_id::{
 use phosk_model::{
     AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
     CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Receipt, Signal, SignalOccurrence, Subscription, Transaction,
+    Receipt, ReceiptProposal, Signal, SignalOccurrence, Subscription, Transaction,
 };
 
 /// The single fat database port (ADR-000): one async, object-safe trait covering
@@ -566,6 +566,24 @@ pub trait DatabaseAdapter: Send + Sync {
         id: SuggestionId,
         status: &str,
     ) -> Result<(), PhoskError>;
+
+    /// Stage the payload of a `kind == "receipt"` suggestion, keyed by its
+    /// `suggestion_id`. Staging is NOT a ledger write: the receipt only reaches
+    /// the ledger when the approval service applies it. Re-staging the same
+    /// suggestion id replaces the stored payload.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store rejects the write.
+    async fn stage_receipt_proposal(&self, p: ReceiptProposal) -> Result<(), PhoskError>;
+
+    /// The staged [`ReceiptProposal`] of a suggestion, or `None` if none was staged.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store fails to answer.
+    async fn receipt_proposal(
+        &self,
+        id: SuggestionId,
+    ) -> Result<Option<ReceiptProposal>, PhoskError>;
 }
 
 #[cfg(test)]
@@ -811,6 +829,15 @@ mod tests {
             _status: &str,
         ) -> Result<(), PhoskError> {
             Ok(())
+        }
+        async fn stage_receipt_proposal(&self, _p: ReceiptProposal) -> Result<(), PhoskError> {
+            Ok(())
+        }
+        async fn receipt_proposal(
+            &self,
+            _id: SuggestionId,
+        ) -> Result<Option<ReceiptProposal>, PhoskError> {
+            Ok(None)
         }
     }
 
