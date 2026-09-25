@@ -17,7 +17,7 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for `phosk_insights::exports` — the CSV export
+//! Integration tests for `phosk_insights::exports` — the CSV export
 //! read-model (feature F3, exports slice).
 //!
 //! These tests pin the **stable contract** the `exports` skeleton commits to: a
@@ -34,9 +34,9 @@
 //!   - budget: the 8 category caps;
 //!   - subscriptions: the 6 subs.
 //!
-//! All service bodies are `todo!()`, so these tests MUST compile and then FAIL at
-//! runtime (the green phase makes them pass). No production logic lives here; the
-//! tests use `expect("msg")` (never bare `unwrap()`), per the conventions.
+//! All service bodies are implemented, so these tests exercise the real export
+//! paths end to end. Tests use `expect("msg")` (never bare `unwrap()`), per the
+//! conventions.
 
 use chrono::NaiveDate;
 
@@ -492,9 +492,10 @@ fn split_rfc4180(row: &str) -> Vec<String> {
 
 /// Text cells are user- or OCR-supplied (a shop name read off a photo, a
 /// subscription typed by hand), so they are hostile input for whatever
-/// spreadsheet opens the file. A text cell that starts with `=`, `+`, `-`, `@`
-/// or a tab would be evaluated as a formula (CSV/formula injection), so the
-/// export prefixes it with a `'` and the spreadsheet keeps it as plain text.
+/// spreadsheet opens the file. A text cell that starts with `=`, `+`, `-`, `@`,
+/// a tab, or a carriage return would be evaluated as a formula (CSV/formula
+/// injection), so the export prefixes it with a `'` and the spreadsheet keeps
+/// it as plain text.
 /// The same characters later in a cell are left alone, and so are the seeded
 /// names.
 #[tokio::test]

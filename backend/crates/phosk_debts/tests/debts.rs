@@ -17,12 +17,12 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for `phosk_debts` (F3): institutional debts + personal IOUs.
+//! Integration tests for `phosk_debts` (F3): institutional debts + personal IOUs.
 //!
 //! These drive every service through `&dyn DatabaseAdapter` against the
 //! deterministic Swiss seed (`MemoryDb::seeded()`) at `as_of = 2026-06-18`, and
 //! pin EXACT centime values + derived fields per the build-contract amortization
-//! engine (§5.4). They MUST fail at runtime: every service body is `todo!()`.
+//! engine (§5.4), against the implemented services.
 //!
 //! Derived-field math (build-contract §5.4):
 //! - `monthlyRate = apr/12`; `annualInterest = round(balance_centimes * apr)`.

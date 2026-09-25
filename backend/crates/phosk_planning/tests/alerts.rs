@@ -17,14 +17,14 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for `phosk_planning::alerts` (F3 — alerts slice).
+//! Integration tests for `phosk_planning::alerts` (F3 — alerts slice).
 //!
 //! These pin the `alerts` / `act_on_alert` service contract against the
 //! deterministic Swiss seed (`MemoryDb::seeded()`) at the spec "today"
 //! 2026-06-18 and against synthetic `MemoryDb`s for the rule-engine edge cases.
 //!
-//! Every body in `phosk_planning::alerts` is `todo!()`, so these MUST compile
-//! and then panic (red) at runtime. No production logic lives here.
+//! The `phosk_planning::alerts` service is implemented, so these tests drive
+//! the real `alerts` / `act_on_alert` paths end to end.
 //!
 //! Source of truth for the expected shapes/values:
 //! - `frontend/dioxus-app/src/data/dashboard.rs` (the `AlertDto` wire struct +

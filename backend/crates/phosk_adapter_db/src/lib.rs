@@ -620,8 +620,8 @@ mod tests {
 
     /// A minimal stand-in adapter proving the trait is object-safe and that an
     /// `Arc<dyn DatabaseAdapter>` can be built from it and driven. This is *not*
-    /// the real in-memory adapter (that is `phosk_db_memory`, a later stage) —
-    /// it returns fixed, trivial answers just to exercise the contract shape.
+    /// the real in-memory adapter (that is `phosk_db_memory`) — it returns
+    /// fixed, trivial answers just to exercise the contract shape.
     struct DummyAdapter;
 
     #[async_trait]

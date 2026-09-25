@@ -1,13 +1,12 @@
-//! RED integration tests for `phosk_ai` (ai_spine + ai_features).
+//! Integration tests for `phosk_ai` (ai_spine + ai_features).
 //!
 //! These tests pin the AI panel read-model (feed + chat + status), the chat
 //! spine (send/clear), the feed-dismiss write, and the dashboard insight against
 //! the deterministic Swiss seed in `phosk_db_memory::MemoryDb::seeded()` at the
 //! demo clock `as_of = 2026-06-18`.
 //!
-//! Every body in `phosk_ai` is `todo!()`, so each `#[tokio::test]` is expected to
-//! COMPILE and then PANIC at runtime (RED). They become GREEN once the services
-//! compose the DTOs from the PORT.
+//! Each `#[tokio::test]` drives the implemented service, which composes the
+//! DTOs from the PORT and is asserted against the seed.
 //!
 //! Spec sources (field shapes & expected values):
 //!   - frontend/dioxus-app/src/data/ai.rs        (AiFeedItemDto/AiChatMsgDto/AiStatusDto/AiPanelDto)

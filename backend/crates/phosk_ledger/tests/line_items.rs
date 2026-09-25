@@ -17,13 +17,12 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED tests for `phosk_ledger::line_items` — the receipt-line read model
+//! Tests for `phosk_ledger::line_items` — the receipt-line read model
 //! (`transaction_lines`), the backend-derived `line_total` helper, and the
 //! line-correction write path (`correct_line`).
 //!
-//! These are written against the SKELETON (bodies are `todo!()`), so every test
-//! here is expected to COMPILE and then FAIL at runtime. No production logic is
-//! written; the values asserted are the contract the green phase must satisfy.
+//! These drive the implemented read model and write path, asserting the exact
+//! contract values below against the seed.
 //!
 //! Ground truth is the deterministic Swiss seed in `phosk_db_memory`
 //! (`seed::seed_receipts_and_lines`), pinned at `as_of = 2026-06-18`:

@@ -17,16 +17,16 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for `phosk_recurring::subscriptions` (+ the dashboard
-//! recurring panel and the AI recurring-detection skeleton).
+//! Integration tests for `phosk_recurring::subscriptions` (+ the dashboard
+//! recurring panel and the AI recurring-detection service).
 //!
 //! These pin the service layer against the deterministic Swiss seed
 //! ([`phosk_db_memory::MemoryDb::seeded`]) and the wire DTO shapes mirrored from
 //! `frontend/dioxus-app/src/data/subscriptions.rs` /
 //! `frontend/dioxus-app/src/data/dashboard.rs`.
 //!
-//! They are deliberately RED: every service body is `todo!()`, so each test
-//! COMPILES and then panics at runtime. No production logic lives here.
+//! Every service is implemented, so each test drives the real paths end to end
+//! against the seed.
 //!
 //! ## The cycle anchor
 //!
