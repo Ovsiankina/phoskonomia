@@ -597,7 +597,10 @@ pub async fn subscription_detail(
         },
     };
 
-    let candidate = source_str(sub.source) == "llm";
+    // Reuses the detector's own openness test so this flag and the
+    // detection feed (`recurring_detect::detect`) can never disagree about
+    // which records are still-open candidates.
+    let candidate = crate::recurring_detect::is_open_candidate(&sub);
 
     Ok(SubscriptionDetailDto {
         subscription: dto,

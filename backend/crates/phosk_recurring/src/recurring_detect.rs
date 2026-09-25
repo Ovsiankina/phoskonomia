@@ -16,7 +16,13 @@ use serde::{Deserialize, Serialize};
 /// A subscription is an OPEN recurring candidate when it was machine-inferred
 /// (`Source::LlmInferred`) and has not yet been dismissed (`status == "paused"`)
 /// or confirmed (which flips its source to `UserEntered`).
-fn is_open_candidate(sub: &Subscription) -> bool {
+///
+/// `RuleGenerated` records are excluded: they are not detection candidates, so
+/// they never show up in [`detect`]'s feed and are never open here either.
+/// "Paused" doubles as "dismissed" for a candidate — [`dismiss_candidate`]
+/// pauses it and [`crate::lifecycle::resume_subscription`] un-dismisses it by
+/// re-deriving the status.
+pub(crate) fn is_open_candidate(sub: &Subscription) -> bool {
     sub.source == Source::LlmInferred && sub.status != "paused"
 }
 

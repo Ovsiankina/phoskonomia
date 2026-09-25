@@ -312,6 +312,60 @@ async fn edit_applies_only_the_supplied_fields_and_stamps_user_modified() {
 }
 
 #[tokio::test]
+async fn edit_with_no_fields_set_leaves_the_record_and_provenance_untouched() {
+    let db = db();
+    let before = db.subscription_by_slug("netflix").await.expect("seeded");
+    assert_eq!(
+        before.provenance,
+        phosk_model::Provenance::user_entered(),
+        "netflix starts user-entered, not yet edited"
+    );
+
+    edit_subscription(&db, "netflix", SubscriptionEdit::default())
+        .await
+        .expect("a no-op edit is not an error");
+
+    let after = db
+        .subscription_by_slug("netflix")
+        .await
+        .expect("still there");
+    assert_eq!(
+        after, before,
+        "an all-None edit changes nothing, provenance included"
+    );
+}
+
+#[tokio::test]
+async fn edit_setting_fields_to_their_current_values_leaves_provenance_untouched() {
+    let db = db();
+    let before = db.subscription_by_slug("netflix").await.expect("seeded");
+    assert_eq!(before.provenance, phosk_model::Provenance::user_entered());
+
+    edit_subscription(
+        &db,
+        "netflix",
+        SubscriptionEdit {
+            amount: Some(before.amount),
+            note: Some(before.note.clone()),
+            category: Some(before.category.clone()),
+            ..SubscriptionEdit::default()
+        },
+    )
+    .await
+    .expect("re-supplying the current values is not an error");
+
+    let after = db
+        .subscription_by_slug("netflix")
+        .await
+        .expect("still there");
+    assert_eq!(
+        after, before,
+        "an edit that resolves to the current values must not launder into \
+         a user decision: provenance stays user-entered, not user-modified"
+    );
+}
+
+#[tokio::test]
 async fn edit_keeps_the_slug_stable_when_the_name_changes() {
     let db = db();
     edit_subscription(
