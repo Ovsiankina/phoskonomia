@@ -41,7 +41,7 @@ test) + input validation + `Provenance` + errors via `PhoskError`. No UI.
 - [x] **T14** — `phosk_recurring`: subscription create / edit / delete (needs: T04)
 - [x] **T15** — `phosk_recurring`: lifecycle — pause, resume, cancel, mark-paid, record charge; derived status stays correct (needs: T14)
 - [x] **T16** — `phosk_debts`: debt create / edit / delete, record payment, extra payment; amortisation outputs stay correct (needs: T04)
-- [ ] **T17** — `phosk_debts`: plan adjust (monthly/day/term) and refinance (needs: T16)
+- [x] **T17** — `phosk_debts`: plan adjust (monthly/day/term) and refinance (needs: T16)
 - [x] **T18** — `phosk_debts`: personal IOUs — create / edit / delete, record partial payment, settle (needs: T04)
 - [x] **T19** — `phosk_planning`: set global monthly budget + savings target, with budget-history entry; alert snooze with re-trigger (needs: T04)
 - [x] **T20** — `phosk_ai`: **approval service** — list pending suggestions, approve (applies the receipt proposal to the ledger via `insert_receipt`, idempotent, provenance preserved), reject, bulk-approve per receipt. This is the ONLY path from a model proposal to the ledger. (needs: T10)

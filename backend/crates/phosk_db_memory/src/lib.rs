@@ -194,6 +194,17 @@ impl MemoryDb {
 }
 
 impl MemoryDb {
+    /// A snapshot of the correction audit log, oldest first.
+    ///
+    /// Inspection helper for service tests (the audit log is write-only through
+    /// the PORT); not a port method.
+    ///
+    /// # Errors
+    /// [`PhoskError::Invalid`] if the store lock is poisoned.
+    pub fn corrections(&self) -> Result<Vec<CorrectionEvent>, PhoskError> {
+        Ok(lock(&self.corrections)?.clone())
+    }
+
     /// Whether any stored row still names `category` — the guard behind
     /// `delete_category` (receipts, their lines, subscriptions and signals).
     fn category_is_referenced(&self, category: &str) -> Result<bool, PhoskError> {

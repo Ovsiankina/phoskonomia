@@ -6,12 +6,14 @@
 //! right-dock inspector (balance decay series + payment history), and the
 //! personal-IOU net-position beam.
 //!
-//! Three feature modules; the read DTOs mirror the dioxus wire structs in
+//! Four feature modules; the read DTOs mirror the dioxus wire structs in
 //! `frontend/dioxus-app/src/data/debts.rs`:
 //!
 //! - [`debts`] — institutional debts: list, stats, trajectory, detail, payments.
 //! - [`debt_write`] — the debt write path: create / edit / delete, record a
 //!   scheduled instalment, record an extra (principal-only) payment.
+//! - [`debt_plan`] — plan changes: adjust the instalment / day / term,
+//!   refinance the outstanding balance.
 //! - [`personal_ious`] — personal IOUs: list + net-position stats.
 //! - [`iou_write`] — the personal-IOU write path: create · edit · delete ·
 //!   record payment · settle.
@@ -34,11 +36,13 @@
 //! [`DatabaseAdapter`]: phosk_adapter_db::DatabaseAdapter
 //! [`PhoskError`]: phosk_core::error::PhoskError
 
+pub mod debt_plan;
 pub mod debt_write;
 pub mod debts;
 pub mod iou_write;
 pub mod personal_ious;
 
+pub use debt_plan::{PlanAdjust, Refinance, adjust_plan, refinance};
 pub use debt_write::{DebtEdit, NewDebt, NewDebtPayment};
 pub use debt_write::{create_debt, delete_debt, edit_debt, extra_payment, record_payment};
 
