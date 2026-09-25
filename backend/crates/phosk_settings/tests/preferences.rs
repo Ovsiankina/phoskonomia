@@ -42,8 +42,8 @@ use phosk_db_memory::MemoryDb;
 use phosk_model::BudgetConfig;
 use phosk_settings::preferences::DEFAULT_MOMENTUM_BASELINE_CYCLES;
 use phosk_settings::{
-    PreferenceDto, SettingsSummaryDto, momentum_baseline_cycles, preferences, reset_preference,
-    set_preference, settings_summary,
+    CATEGORY_COLOUR_PREFIX, PreferenceDto, SettingsSummaryDto, momentum_baseline_cycles,
+    preferences, reset_preference, set_preference, settings_summary,
 };
 
 /// The five seeded keys, as `(key, value, surface, stored_on_device)`.
@@ -215,6 +215,23 @@ async fn settings_summary_changed_count_reacts_to_a_user_edit() {
         .expect("settings_summary should succeed");
     assert_eq!(summary.total_preferences, 5, "editing must not add a key");
     assert_eq!(summary.changed_count, 3, "currency becomes UserModified");
+}
+
+#[tokio::test]
+async fn settings_summary_ignores_category_colour_rows() {
+    let db = seeded_db();
+    // `/categories` keeps each category's colour token under this prefix; those
+    // rows are not /config settings and must not move either count.
+    let key = format!("{CATEGORY_COLOUR_PREFIX}groceries");
+    set_preference(&db, &key, "indigo")
+        .await
+        .expect("set_preference should succeed");
+
+    let summary = settings_summary(&db)
+        .await
+        .expect("settings_summary should succeed");
+    assert_eq!(summary.total_preferences, 5, "colour rows are not settings");
+    assert_eq!(summary.changed_count, 2, "colour rows are not user edits");
 }
 
 #[tokio::test]

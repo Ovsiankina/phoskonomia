@@ -155,6 +155,11 @@ pub struct SettingsSummaryDto {
     pub model: String,
 }
 
+/// Key prefix of the per-category colour tokens `/categories` stores through the
+/// preference port (`category_colour.<slug>`). Those rows are not `/config`
+/// settings, so [`settings_summary`] leaves them out of both counts.
+pub const CATEGORY_COLOUR_PREFIX: &str = "category_colour.";
+
 /// List every preference as a [`PreferenceDto`].
 ///
 /// # Errors
@@ -177,12 +182,14 @@ pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>,
 /// The `/config` header summary: preference counts + active engine/model labels.
 ///
 /// `changed_count` = preferences whose `provenance.source == UserModified`.
+/// Category colour rows ([`CATEGORY_COLOUR_PREFIX`]) count in neither.
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to answer.
 #[tracing::instrument(skip(db))]
 pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummaryDto, PhoskError> {
-    let prefs = db.preferences().await?;
+    let mut prefs = db.preferences().await?;
+    prefs.retain(|p| !p.key.starts_with(CATEGORY_COLOUR_PREFIX));
     let total_preferences = u32::try_from(prefs.len()).unwrap_or(u32::MAX);
     let changed_count = u32::try_from(
         prefs
