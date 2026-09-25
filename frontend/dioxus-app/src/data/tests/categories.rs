@@ -94,7 +94,7 @@ async fn create_refuses_anything_but_a_palette_token_and_writes_nothing() {
     for bad in ["#ff0000", "red", "var(--ok)", "--ok", "neon", "", "ok;x"] {
         let db = fresh_db();
         let before = db.category_caps().await.expect("caps").len();
-        let msg = server_error(create_category_with(&db, "Pets", "", bad).await);
+        let msg = server_error(create_category_with(&db, "Pets", "", bad).await, 500);
         assert_eq!(msg, "pick a colour from the palette", "input {bad:?}");
         assert_eq!(db.category_caps().await.expect("caps").len(), before);
     }
@@ -103,16 +103,22 @@ async fn create_refuses_anything_but_a_palette_token_and_writes_nothing() {
 #[tokio::test]
 async fn create_surfaces_the_ledger_validation_message() {
     let db = fresh_db();
-    let msg = server_error(create_category_with(&db, "groceries", "", "indigo-2").await);
+    let msg = server_error(
+        create_category_with(&db, "groceries", "", "indigo-2").await,
+        500,
+    );
     assert_eq!(msg, "category Groceries already exists");
-    let msg = server_error(create_category_with(&db, "   ", "", "indigo-2").await);
+    let msg = server_error(create_category_with(&db, "   ", "", "indigo-2").await, 500);
     assert_eq!(msg, "category name cannot be empty");
 }
 
 #[tokio::test]
 async fn set_colour_accepts_tokens_only_and_survives_a_rename() {
     let db = fresh_db();
-    let msg = server_error(set_category_colour_with(&db, "Transport", "#123456").await);
+    let msg = server_error(
+        set_category_colour_with(&db, "Transport", "#123456").await,
+        500,
+    );
     assert_eq!(msg, "pick a colour from the palette");
     assert_eq!(
         row(&list_categories_with(&db).await.expect("read"), "Transport").colour,
@@ -136,7 +142,7 @@ async fn set_colour_accepts_tokens_only_and_survives_a_rename() {
 #[tokio::test]
 async fn set_colour_on_an_unknown_category_is_not_found() {
     let db = fresh_db();
-    let msg = server_error(set_category_colour_with(&db, "Nope", "indigo").await);
+    let msg = server_error(set_category_colour_with(&db, "Nope", "indigo").await, 500);
     assert_eq!(msg, "this category no longer exists");
 }
 
@@ -159,7 +165,7 @@ async fn rename_carries_history_and_reports_clashes() {
         .expect("renamed");
     assert_eq!(row(&view, "Food").uses, uses);
 
-    let msg = server_error(rename_category_with(&db, "Food", "rent").await);
+    let msg = server_error(rename_category_with(&db, "Food", "rent").await, 500);
     assert_eq!(msg, "category Rent already exists");
 }
 
@@ -194,11 +200,11 @@ async fn merge_preview_counts_the_line_items_the_merge_repoints() {
 #[tokio::test]
 async fn merge_into_itself_or_an_unknown_category_is_refused_before_writing() {
     let db = fresh_db();
-    let msg = server_error(merge_preview_with(&db, "Rent", "rent").await);
+    let msg = server_error(merge_preview_with(&db, "Rent", "rent").await, 500);
     assert_eq!(msg, "category Rent cannot be merged into itself");
-    let msg = server_error(merge_preview_with(&db, "Rent", "Nope").await);
+    let msg = server_error(merge_preview_with(&db, "Rent", "Nope").await, 500);
     assert_eq!(msg, "this category no longer exists");
-    let msg = server_error(merge_categories_with(&db, "Rent", "Rent").await);
+    let msg = server_error(merge_categories_with(&db, "Rent", "Rent").await, 500);
     assert_eq!(msg, "category Rent cannot be merged into itself");
     assert!(db.category_cap_by_name("Rent").await.is_ok());
 }
@@ -212,7 +218,7 @@ async fn delete_removes_an_unused_category_and_refuses_a_used_one() {
     let view = delete_category_with(&db, "Pets").await.expect("deleted");
     assert!(view.rows.iter().all(|r| r.name != "Pets"));
 
-    let msg = server_error(delete_category_with(&db, "Groceries").await);
+    let msg = server_error(delete_category_with(&db, "Groceries").await, 500);
     assert!(
         msg.starts_with("category Groceries is still used by"),
         "{msg}"
@@ -222,11 +228,11 @@ async fn delete_removes_an_unused_category_and_refuses_a_used_one() {
 #[test]
 fn store_errors_never_leak_adapter_detail() {
     let engine = PhoskError::Invalid("surreal file engine at /some/path: boom".to_owned());
-    let msg = server_error::<()>(Err(store_error(engine)));
+    let msg = server_error::<()>(Err(store_error(engine)), 500);
     assert_eq!(msg, "could not save the change, try again");
     let overflow = PhoskError::Overflow("x".to_owned());
     assert_eq!(
-        server_error::<()>(Err(store_error(overflow))),
+        server_error::<()>(Err(store_error(overflow)), 500),
         "could not save the change, try again"
     );
 }
@@ -251,7 +257,7 @@ async fn a_colour_stored_before_the_palette_shrank_reads_as_the_default() {
         .expect("raw write");
     let view = list_categories_with(&db).await.expect("read");
     assert_eq!(row(&view, "Rent").colour, DEFAULT_COLOUR);
-    let msg = server_error(set_category_colour_with(&db, "Rent", "warn").await);
+    let msg = server_error(set_category_colour_with(&db, "Rent", "warn").await, 500);
     assert_eq!(msg, "pick a colour from the palette");
 }
 
