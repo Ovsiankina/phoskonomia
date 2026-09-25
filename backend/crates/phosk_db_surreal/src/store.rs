@@ -225,8 +225,8 @@ impl Store {
     /// return the bucket in the order its records were written.
     ///
     /// Used for buckets whose port contract is ordered (chat messages, line
-    /// items): record
-    /// keys are random UUIDs and a table scan has no defined order.
+    /// items): record keys are random UUIDs and a table scan has no defined
+    /// order.
     pub(crate) async fn put_in_sequence<T: Serialize + Sync>(
         &self,
         bucket: Bucket,

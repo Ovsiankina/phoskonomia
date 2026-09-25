@@ -71,9 +71,12 @@ pub async fn insert_receipt_same_slug_replaces_in_place(db: &dyn DatabaseAdapter
     ensure_not_found(db.receipt(second_id).await, "receipt(re-import id)")?;
 
     let lines = db.line_items(first_id).await?;
-    let mut names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
-    names.sort_unstable();
-    ensure_eq(&names, &vec!["New A", "New B"], "line set replaced")?;
+    let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
+    ensure_eq(
+        &names,
+        &vec!["New A", "New B"],
+        "line set replaced, in order",
+    )?;
     let rebound = lines.iter().all(|l| l.receipt_id == first_id);
     ensure(rebound, "new lines rebound to the stored id")?;
     let orphans = db.line_items(second_id).await?;

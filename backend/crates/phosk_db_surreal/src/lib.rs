@@ -29,9 +29,10 @@
 //!
 //! A table scan comes back in record-key order, not insertion order, so reads
 //! the port documents as oldest→newest sort on the entity's date after
-//! filtering. Rows that share a date keep scan order. Chat messages are the
-//! exception: they are stamped with an insertion sequence (see [`store`]) and
-//! read back in append order, same-day lines included.
+//! filtering. Rows that share a date keep scan order. Chat messages and a
+//! receipt's line items are the exception: both are stamped with an insertion
+//! sequence (see [`store`]) and read back in insertion order, same-day lines
+//! included; an in-place edit keeps its position.
 //!
 //! ## No panics (ADR §0)
 //!
