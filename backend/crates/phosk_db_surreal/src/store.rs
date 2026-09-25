@@ -101,7 +101,7 @@ impl Bucket {
     }
 
     /// Every bucket, for schema definition / migration.
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::Transaction,
         Self::Category,
         Self::BudgetConfig,
