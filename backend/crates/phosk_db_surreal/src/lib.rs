@@ -70,6 +70,8 @@ use phosk_model::{
     Provenance, Receipt, ReceiptProposal, Signal, SignalOccurrence, Source, Subscription,
     Transaction,
 };
+use std::sync::Arc;
+
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
 
@@ -84,9 +86,13 @@ use store::{Bucket, Store};
 /// Holds an owned [`Surreal<Db>`] connection to an embedded engine. Cheap to
 /// share behind `Arc<dyn DatabaseAdapter>`; the handle is internally
 /// reference-counted, so [`Clone`] yields another view of the same store.
+///
+/// A file-backed handle also holds the store's exclusive lockfile (see
+/// [`SurrealDb::file`]); it is released when the last clone is dropped.
 #[derive(Debug, Clone)]
 pub struct SurrealDb {
     store: Store,
+    _lock: Option<Arc<std::fs::File>>,
 }
 
 impl SurrealDb {
@@ -109,13 +115,54 @@ impl SurrealDb {
     /// Open a **file-backed** store (`kv-surrealkv`) at `path` — the prod path.
     /// The directory is created by the engine if absent. Runs the migration.
     ///
+    /// **Single process.** surrealkv serves reads from an in-memory index built
+    /// at open and takes no inter-process lock, so a second process opening the
+    /// same store would never see the first one's writes and both would append
+    /// to one commit log. This constructor therefore takes an exclusive lock on
+    /// `<path>.lock` (held until the last clone of the handle is dropped) and
+    /// refuses to open a store that is already open — e.g. the daemon in
+    /// `PHOSK_INGEST=pipeline` mode and the UI cannot share one data dir.
+    ///
     /// # Errors
-    /// [`PhoskError`] if the engine fails to open `path` or the migration fails.
+    /// [`PhoskError::Invalid`] if the store is already open (in this or another
+    /// process), the lockfile cannot be created, the engine fails to open
+    /// `path`, or the migration fails.
     pub async fn file(path: &str) -> Result<Self, PhoskError> {
+        let lock = Self::lock_store(path)?;
         let db = Surreal::new::<SurrealKv>(path)
             .await
             .map_err(|e| PhoskError::Invalid(format!("surreal file engine at {path}: {e}")))?;
-        Self::init(db).await
+        Ok(Self {
+            _lock: Some(Arc::new(lock)),
+            ..Self::init(db).await?
+        })
+    }
+
+    /// Create `<path>.lock` and take an exclusive, non-blocking lock on it.
+    fn lock_store(path: &str) -> Result<std::fs::File, PhoskError> {
+        let lock_path = format!("{path}.lock");
+        if let Some(parent) = std::path::Path::new(&lock_path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| PhoskError::Invalid(format!("create store dir: {e}")))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| PhoskError::Invalid(format!("open store lockfile: {e}")))?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => Err(PhoskError::Invalid(format!(
+                "surreal store at {path} is already open by another process or handle \
+                 (the UI and the pipeline daemon cannot share one data dir)"
+            ))),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(PhoskError::Invalid(format!("lock store: {e}")))
+            }
+        }
     }
 
     /// Select the namespace/database and run the versioned migration.
@@ -128,7 +175,7 @@ impl SurrealDb {
         migrate::run(&store).await?;
         // Chat lines written from now on must sort after the stored ones.
         store.resume_sequence(Bucket::Message).await?;
-        Ok(Self { store })
+        Ok(Self { store, _lock: None })
     }
 
     /// An in-memory adapter loaded with the deterministic Swiss seed — the
