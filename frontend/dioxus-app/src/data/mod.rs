@@ -25,6 +25,7 @@
 //! * [`csv_export`]   — CSV export of the transactions / budget / subscriptions lists.
 //! * [`subscriptions`]— standing charges, stats, billing sweep, detail.
 //! * [`debts`]        — open balances, stats, payoff trajectory, IOU ledger, detail.
+//! * [`new_transaction`] — the "NEW transaction" form: manual entry (T36).
 //! * [`settings`]     — `/config` preferences: get / set / reset (REAL via `phosk_settings`).
 //! * [`analytics`]    — spend history, momentum, weekday rhythm, movers, insights.
 //!
@@ -55,6 +56,7 @@ pub mod csv_export;
 pub mod cycle;
 pub mod dashboard;
 pub mod debts;
+pub mod new_transaction;
 pub mod settings;
 pub mod signals;
 pub mod subscriptions;
