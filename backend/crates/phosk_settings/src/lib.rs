@@ -27,7 +27,7 @@
 pub mod preferences;
 
 pub use preferences::{
-    PREFERENCE_RULES, PreferenceDto, PreferenceRule, SettingsSummaryDto, known_preference,
-    momentum_baseline_cycles, preference_rule, preferences, reset_preference, set_preference,
-    settings_summary, validate_preference,
+    CATEGORY_COLOUR_PREFIX, PREFERENCE_RULES, PreferenceDto, PreferenceRule, SettingsSummaryDto,
+    known_preference, momentum_baseline_cycles, preference_rule, preferences, reset_preference,
+    set_preference, settings_summary, validate_preference,
 };

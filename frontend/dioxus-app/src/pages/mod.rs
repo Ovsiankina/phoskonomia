@@ -1,4 +1,4 @@
-//! The 7 pages — one self-contained file each (mirrors React `src/pages/*.jsx`).
+//! The 8 pages — one self-contained file each (mirrors React `src/pages/*.jsx`).
 //!
 //! Each page agent REPLACES the body of its own `pages/<page>.rs` ONLY, and must
 //! NOT touch shared files (`main.rs`, `components/*`, `data/*`, this `mod.rs`).
@@ -16,6 +16,7 @@
 
 pub mod analytics;
 pub mod budgets;
+pub mod categories;
 pub mod config;
 pub mod dashboard;
 pub mod debts;

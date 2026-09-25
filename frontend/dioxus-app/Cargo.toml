@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 # Fullstack: one codebase -> web (default) + desktop + mobile. `router` for the
-# 7 routes. The client compiles to WASM (web) or native (desktop/mobile) — no JS.
+# 8 routes. The client compiles to WASM (web) or native (desktop/mobile) — no JS.
 # Pinned to =0.7.6 to match the installed `dx` CLI (dx and the dioxus crate must
 # share a minor+patch line, else `dx build` aborts with a version-mismatch error).
 dioxus = { version = "=0.7.6", features = ["fullstack", "router"] }

@@ -22,6 +22,8 @@ mod analytics;
 #[cfg(feature = "server")]
 mod budgets;
 #[cfg(feature = "server")]
+mod categories;
+#[cfg(feature = "server")]
 mod cycle;
 #[cfg(feature = "server")]
 mod dashboard;
