@@ -74,6 +74,54 @@ pub fn is_active(status: &str) -> bool {
     !matches!(status, STATUS_PAUSED | STATUS_CANCELLED)
 }
 
+/// A lifecycle transition a caller can request for a standing charge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LifecycleAction {
+    /// [`mark_paid`].
+    MarkPaid,
+    /// [`pause_subscription`].
+    Pause,
+    /// [`resume_subscription`].
+    Resume,
+    /// [`cancel_subscription`].
+    Cancel,
+}
+
+/// The transitions the lifecycle would accept for `sub` at `as_of`, primary
+/// first — the same checks each transition makes, so a caller never offers an
+/// action that is then refused. `charges` are `sub`'s recorded charges.
+///
+/// # Errors
+/// [`PhoskError::InvalidDate`] if the billing cycle cannot be derived.
+pub fn available_actions(
+    sub: &Subscription,
+    charges: &[Charge],
+    as_of: NaiveDate,
+) -> Result<Vec<LifecycleAction>, PhoskError> {
+    let mut actions = Vec::new();
+    if is_active(&sub.status) {
+        let billed_on = last_charge_date(as_of, sub.day, &sub.cadence, &sub.month)?;
+        if !cycle_settled(charges, billed_on, as_of) {
+            actions.push(LifecycleAction::MarkPaid);
+        }
+        actions.push(LifecycleAction::Pause);
+    }
+    if sub.status == STATUS_PAUSED {
+        actions.push(LifecycleAction::Resume);
+    }
+    if sub.status != STATUS_CANCELLED {
+        actions.push(LifecycleAction::Cancel);
+    }
+    Ok(actions)
+}
+
+/// Whether [`record_subscription_charge`] accepts a charge for `sub` at all
+/// (it still checks the amount and date).
+#[must_use]
+pub fn can_record_charge(sub: &Subscription) -> bool {
+    is_active(&sub.status)
+}
+
 /// Suspend a standing charge. Write path.
 ///
 /// # Errors

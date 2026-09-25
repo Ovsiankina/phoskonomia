@@ -223,6 +223,10 @@ pub struct SubscriptionDetailDto {
     pub guidance: SubGuidanceDto,
     /// `true` for an AI candidate (CONFIRM/DISMISS instead of cancel).
     pub candidate: bool,
+    /// The lifecycle actions the backend accepts right now, primary first.
+    pub actions: Vec<SubAction>,
+    /// Whether RECORD CHARGE is accepted right now.
+    pub can_record_charge: bool,
 }
 
 /// Subscription list options for `GET /subscriptions`.
@@ -341,37 +345,45 @@ pub async fn get_subscription(id: String) -> Result<SubscriptionDetailDto, Serve
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        let d = phosk_recurring::subscriptions::subscription_detail(
-            session.db(),
-            crate::data::today(),
-            &id,
-        )
-        .await
-        .map_err(crate::data::server_err)?;
-        Ok(SubscriptionDetailDto {
-            subscription: map_sub(d.subscription),
-            recent: d
-                .recent
-                .into_iter()
-                .map(|c| SubChargeDto {
-                    id: c.id,
-                    date: c.date,
-                    note: c.note,
-                    amount: c.amount,
-                })
-                .collect(),
-            guidance: SubGuidanceDto {
-                text: d.guidance.text,
-                severity: d.guidance.severity,
-            },
-            candidate: d.candidate,
-        })
+        get_subscription_with(session.db(), crate::data::today(), &id).await
     }
     #[cfg(not(feature = "server-deps"))]
     {
         let _ = id;
         Err(ServerFnError::new("server-only"))
     }
+}
+
+/// [`get_subscription`] against `db` as of `as_of`.
+#[cfg(feature = "server-deps")]
+pub(crate) async fn get_subscription_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    as_of: chrono::NaiveDate,
+    id: &str,
+) -> Result<SubscriptionDetailDto, ServerFnError> {
+    let d = phosk_recurring::subscriptions::subscription_detail(db, as_of, id)
+        .await
+        .map_err(crate::data::server_err)?;
+    Ok(SubscriptionDetailDto {
+        subscription: map_sub(d.subscription),
+        recent: d
+            .recent
+            .into_iter()
+            .map(|c| SubChargeDto {
+                id: c.id,
+                date: c.date,
+                note: c.note,
+                amount: c.amount,
+            })
+            .collect(),
+        guidance: SubGuidanceDto {
+            text: d.guidance.text,
+            severity: d.guidance.severity,
+        },
+        candidate: d.candidate,
+        actions: d.actions.into_iter().map(SubAction::from).collect(),
+        can_record_charge: d.can_record_charge,
+    })
 }
 
 // ── mappers (service DTO → wire DTO) ───────────────────────────────────────────
@@ -842,4 +854,424 @@ mod recurring_candidate_tests {
             "no raw detail: {msg}"
         );
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  WRITE PATH — create / edit / delete + lifecycle actions (T38).
+//
+//  The page sends raw typed text; each `*_with` inner fn validates it here with
+//  fixed messages (CHF parsed to exact centimes by `Money::parse_chf`, never a
+//  float), then delegates to `phosk_recurring::{subscription_write, lifecycle}`.
+//  Store errors are mapped to fixed lines: adapter text never reaches the page.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The create / edit form as typed. `amount` is CHF text (`"12.90"`), `day`
+/// the day-of-month text (monthly), `month` a `"JAN"`..`"DEC"` label (yearly).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionForm {
+    pub name: String,
+    pub amount: String,
+    pub cadence: String,
+    pub day: String,
+    pub month: String,
+    pub category: String,
+    pub glyph: String,
+    pub note: String,
+}
+
+/// A lifecycle transition the inspector can request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubAction {
+    MarkPaid,
+    Pause,
+    Resume,
+    Cancel,
+}
+
+impl SubAction {
+    /// Button label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MarkPaid => "MARK PAID",
+            Self::Pause => "PAUSE",
+            Self::Resume => "RESUME",
+            Self::Cancel => "CANCEL",
+        }
+    }
+}
+
+#[cfg(feature = "server-deps")]
+impl From<phosk_recurring::lifecycle::LifecycleAction> for SubAction {
+    fn from(a: phosk_recurring::lifecycle::LifecycleAction) -> Self {
+        use phosk_recurring::lifecycle::LifecycleAction as L;
+        match a {
+            L::MarkPaid => Self::MarkPaid,
+            L::Pause => Self::Pause,
+            L::Resume => Self::Resume,
+            L::Cancel => Self::Cancel,
+        }
+    }
+}
+
+/// Create a subscription from the typed form; returns its id (slug).
+#[server]
+pub async fn create_subscription(form: SubscriptionForm) -> Result<String, ServerFnError> {
+    #[cfg(feature = "server-deps")]
+    {
+        let session = crate::data::build_session().await?;
+        create_subscription_with(session.db(), crate::data::today(), form).await
+    }
+    #[cfg(not(feature = "server-deps"))]
+    {
+        let _ = form;
+        Err(ServerFnError::new("server-only"))
+    }
+}
+
+/// Replace an existing subscription's fields with the typed form.
+#[server]
+pub async fn edit_subscription(id: String, form: SubscriptionForm) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server-deps")]
+    {
+        let session = crate::data::build_session().await?;
+        edit_subscription_with(session.db(), &id, form).await
+    }
+    #[cfg(not(feature = "server-deps"))]
+    {
+        let _ = (id, form);
+        Err(ServerFnError::new("server-only"))
+    }
+}
+
+/// Delete a subscription (the page asks for confirmation first).
+#[server]
+pub async fn delete_subscription(id: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server-deps")]
+    {
+        let session = crate::data::build_session().await?;
+        delete_subscription_with(session.db(), &id).await
+    }
+    #[cfg(not(feature = "server-deps"))]
+    {
+        let _ = id;
+        Err(ServerFnError::new("server-only"))
+    }
+}
+
+/// Run a lifecycle transition (pause / resume / cancel / mark paid).
+#[server]
+pub async fn run_subscription_action(id: String, action: SubAction) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server-deps")]
+    {
+        let session = crate::data::build_session().await?;
+        run_subscription_action_with(session.db(), crate::data::today(), &id, action).await
+    }
+    #[cfg(not(feature = "server-deps"))]
+    {
+        let _ = (id, action);
+        Err(ServerFnError::new("server-only"))
+    }
+}
+
+/// Record an actual charge: CHF `amount` text, `date` as `YYYY-MM-DD` (empty =
+/// today).
+#[server]
+pub async fn record_subscription_charge(
+    id: String,
+    amount: String,
+    date: String,
+) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server-deps")]
+    {
+        let session = crate::data::build_session().await?;
+        record_subscription_charge_with(session.db(), crate::data::today(), &id, &amount, &date)
+            .await
+    }
+    #[cfg(not(feature = "server-deps"))]
+    {
+        let _ = (id, amount, date);
+        Err(ServerFnError::new("server-only"))
+    }
+}
+
+/// Fixed, digit-free user-facing texts of the write path.
+#[cfg(feature = "server-deps")]
+mod sub_msg {
+    pub(super) const BAD_ID: &str = "that is not a valid subscription id";
+    pub(super) const NAME: &str = "give the subscription a name";
+    pub(super) const TOO_LONG: &str = "one of the fields is too long";
+    pub(super) const AMOUNT_POSITIVE: &str = "the amount must be above zero";
+    pub(super) const AMOUNT_TOO_LARGE: &str = "the amount cannot exceed one million CHF";
+    pub(super) const CADENCE: &str = "the cadence must be monthly or yearly";
+    pub(super) const DAY: &str = "a monthly charge needs a day of the month";
+    pub(super) const MONTH: &str = "a yearly charge needs a month like MAR";
+    pub(super) const CATEGORY: &str = "choose a category";
+    pub(super) const DUPLICATE: &str = "a subscription with this name already exists";
+    pub(super) const GONE: &str = "this subscription no longer exists";
+    pub(super) const SAVE_FAILED: &str = "could not save the subscription, try again";
+    pub(super) const UNAVAILABLE: &str =
+        "that action is not available for this subscription's current status";
+    pub(super) const DATE: &str = "the date must look like YYYY-MM-DD";
+    pub(super) const DATE_FUTURE: &str = "a charge cannot be recorded in the future";
+    pub(super) const BEFORE_SINCE: &str = "the charge must fall on or after the tracking start";
+}
+
+/// Largest per-charge amount accepted: CHF 1'000'000.00.
+#[cfg(feature = "server-deps")]
+const MAX_SUB_AMOUNT: Money = Money::from_centimes(100_000_000);
+#[cfg(feature = "server-deps")]
+const MAX_NAME_LEN: usize = 64;
+#[cfg(feature = "server-deps")]
+const MAX_NOTE_LEN: usize = 200;
+#[cfg(feature = "server-deps")]
+const MONTHS: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
+#[cfg(feature = "server-deps")]
+fn sub_id(id: &str) -> Result<&str, ServerFnError> {
+    validate_candidate_id(id).map_err(|_| ServerFnError::new(sub_msg::BAD_ID))
+}
+
+/// Parse CHF text to a positive amount within [`MAX_SUB_AMOUNT`].
+#[cfg(feature = "server-deps")]
+fn parse_sub_amount(text: &str) -> Result<Money, ServerFnError> {
+    use phosk_core::error::PhoskError;
+    let amount = Money::parse_chf(text).map_err(|e| match e {
+        // `parse_chf` only returns fixed hints that never echo the input.
+        PhoskError::Invalid(hint) => ServerFnError::new(hint),
+        _ => ServerFnError::new(sub_msg::SAVE_FAILED),
+    })?;
+    if amount <= Money::ZERO {
+        return Err(ServerFnError::new(sub_msg::AMOUNT_POSITIVE));
+    }
+    if amount > MAX_SUB_AMOUNT {
+        return Err(ServerFnError::new(sub_msg::AMOUNT_TOO_LARGE));
+    }
+    Ok(amount)
+}
+
+/// The validated form, ready for the backend (`day` 0 / `month` empty when
+/// not used by the cadence).
+#[cfg(feature = "server-deps")]
+struct CheckedForm {
+    name: String,
+    amount: Money,
+    cadence: String,
+    day: u32,
+    month: String,
+    category: String,
+    glyph: String,
+    note: String,
+}
+
+#[cfg(feature = "server-deps")]
+fn check_form(form: &SubscriptionForm, creating: bool) -> Result<CheckedForm, ServerFnError> {
+    let name = form.name.trim();
+    // A new charge's id is its slug; an edit keeps the frozen one, so any
+    // non-blank name will do.
+    if name.is_empty()
+        || (creating && phosk_recurring::subscription_write::slugify(name).is_empty())
+    {
+        return Err(ServerFnError::new(sub_msg::NAME));
+    }
+    let category = form.category.trim();
+    let note = form.note.trim();
+    let glyph = form.glyph.trim();
+    if name.chars().count() > MAX_NAME_LEN
+        || category.chars().count() > MAX_NAME_LEN
+        || note.chars().count() > MAX_NOTE_LEN
+        || glyph.chars().count() > 2
+    {
+        return Err(ServerFnError::new(sub_msg::TOO_LONG));
+    }
+    let amount = parse_sub_amount(&form.amount)?;
+    let cadence = form.cadence.trim().to_ascii_lowercase();
+    let (day, month) = match cadence.as_str() {
+        "monthly" => match form.day.trim().parse::<u32>() {
+            Ok(d @ 1..=31) => (d, String::new()),
+            _ => return Err(ServerFnError::new(sub_msg::DAY)),
+        },
+        "yearly" => {
+            let m = form.month.trim().to_ascii_uppercase();
+            if !MONTHS.contains(&m.as_str()) {
+                return Err(ServerFnError::new(sub_msg::MONTH));
+            }
+            (0, m)
+        }
+        _ => return Err(ServerFnError::new(sub_msg::CADENCE)),
+    };
+    if category.is_empty() {
+        return Err(ServerFnError::new(sub_msg::CATEGORY));
+    }
+    let glyph = if glyph.is_empty() {
+        name.chars().take(1).flat_map(char::to_uppercase).collect()
+    } else {
+        glyph.to_owned()
+    };
+    Ok(CheckedForm {
+        name: name.to_owned(),
+        amount,
+        cadence,
+        day,
+        month,
+        category: category.to_owned(),
+        glyph,
+        note: note.to_owned(),
+    })
+}
+
+/// Map a backend write failure to a fixed line (`invalid` covers the
+/// transition / validation refusals the backend makes on its own).
+#[cfg(feature = "server-deps")]
+fn sub_store_error(e: &phosk_core::error::PhoskError, invalid: &str) -> ServerFnError {
+    use phosk_core::error::PhoskError;
+    ServerFnError::new(match e {
+        PhoskError::NotFound(_) => sub_msg::GONE,
+        PhoskError::Invalid(_) => invalid,
+        PhoskError::InvalidDate(_) | PhoskError::Overflow(_) => sub_msg::SAVE_FAILED,
+    })
+}
+
+/// `true` if another subscription already owns `name`'s slug.
+#[cfg(feature = "server-deps")]
+async fn name_taken(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    name: &str,
+    own_id: Option<&str>,
+) -> bool {
+    let slug = phosk_recurring::subscription_write::slugify(name);
+    own_id != Some(slug.as_str()) && db.subscription_by_slug(&slug).await.is_ok()
+}
+
+/// Validate the form, then create the subscription tracked from `as_of`.
+#[cfg(feature = "server-deps")]
+pub(crate) async fn create_subscription_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    as_of: chrono::NaiveDate,
+    form: SubscriptionForm,
+) -> Result<String, ServerFnError> {
+    let f = check_form(&form, true)?;
+    if name_taken(db, &f.name, None).await {
+        return Err(ServerFnError::new(sub_msg::DUPLICATE));
+    }
+    let input = phosk_recurring::subscription_write::NewSubscription {
+        name: f.name,
+        amount: f.amount,
+        cadence: f.cadence,
+        day: f.day,
+        month: f.month,
+        category: f.category,
+        glyph: f.glyph,
+        note: f.note,
+        since: as_of,
+    };
+    phosk_recurring::subscription_write::create_subscription(db, input)
+        .await
+        .map_err(|e| sub_store_error(&e, sub_msg::SAVE_FAILED))
+}
+
+/// Validate the form, then replace every editable field of `id` (its id and
+/// tracking start stay).
+#[cfg(feature = "server-deps")]
+pub(crate) async fn edit_subscription_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    id: &str,
+    form: SubscriptionForm,
+) -> Result<(), ServerFnError> {
+    let id = sub_id(id)?;
+    let f = check_form(&form, false)?;
+    let current = db
+        .subscription_by_slug(id)
+        .await
+        .map_err(|e| sub_store_error(&e, sub_msg::SAVE_FAILED))?;
+    if f.name != current.name && name_taken(db, &f.name, Some(id)).await {
+        return Err(ServerFnError::new(sub_msg::DUPLICATE));
+    }
+    let edit = phosk_recurring::subscription_write::SubscriptionEdit {
+        name: Some(f.name),
+        amount: Some(f.amount),
+        cadence: Some(f.cadence),
+        day: Some(f.day),
+        month: Some(f.month),
+        category: Some(f.category),
+        glyph: Some(f.glyph),
+        note: Some(f.note),
+        since: None,
+    };
+    phosk_recurring::subscription_write::edit_subscription(db, id, edit)
+        .await
+        .map_err(|e| sub_store_error(&e, sub_msg::SAVE_FAILED))
+}
+
+/// Delete `id`.
+#[cfg(feature = "server-deps")]
+pub(crate) async fn delete_subscription_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    id: &str,
+) -> Result<(), ServerFnError> {
+    let id = sub_id(id)?;
+    phosk_recurring::subscription_write::delete_subscription(db, id)
+        .await
+        .map_err(|e| sub_store_error(&e, sub_msg::SAVE_FAILED))
+}
+
+/// Run `action` on `id` as of `as_of`; the backend re-derives the status.
+#[cfg(feature = "server-deps")]
+pub(crate) async fn run_subscription_action_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    as_of: chrono::NaiveDate,
+    id: &str,
+    action: SubAction,
+) -> Result<(), ServerFnError> {
+    use phosk_recurring::lifecycle;
+    let id = sub_id(id)?;
+    let result = match action {
+        SubAction::MarkPaid => lifecycle::mark_paid(db, id, as_of).await,
+        SubAction::Pause => lifecycle::pause_subscription(db, id).await,
+        SubAction::Resume => lifecycle::resume_subscription(db, id, as_of).await,
+        SubAction::Cancel => lifecycle::cancel_subscription(db, id).await,
+    };
+    result.map_err(|e| sub_store_error(&e, sub_msg::UNAVAILABLE))
+}
+
+/// Validate the typed amount / date, then record the charge against `id`.
+#[cfg(feature = "server-deps")]
+pub(crate) async fn record_subscription_charge_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    as_of: chrono::NaiveDate,
+    id: &str,
+    amount: &str,
+    date: &str,
+) -> Result<(), ServerFnError> {
+    let id = sub_id(id)?;
+    let amount = parse_sub_amount(amount)?;
+    let date = match date.trim() {
+        "" => as_of,
+        d => chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+            .map_err(|_| ServerFnError::new(sub_msg::DATE))?,
+    };
+    if date > as_of {
+        return Err(ServerFnError::new(sub_msg::DATE_FUTURE));
+    }
+    let sub = db
+        .subscription_by_slug(id)
+        .await
+        .map_err(|e| sub_store_error(&e, sub_msg::SAVE_FAILED))?;
+    if !phosk_recurring::lifecycle::can_record_charge(&sub) {
+        return Err(ServerFnError::new(sub_msg::UNAVAILABLE));
+    }
+    if date < sub.since {
+        return Err(ServerFnError::new(sub_msg::BEFORE_SINCE));
+    }
+    let input = phosk_recurring::lifecycle::NewCharge {
+        date,
+        amount,
+        note: String::new(),
+    };
+    phosk_recurring::lifecycle::record_subscription_charge(db, id, as_of, input)
+        .await
+        .map_err(|e| sub_store_error(&e, sub_msg::SAVE_FAILED))
 }

@@ -62,7 +62,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 - [x] **T35** — CSV export buttons for transactions / budget / subscriptions (file download on web + desktop) (needs: T01)
 - [x] **T36** — "NEW transaction" form (needs: T10)
 - [ ] **T37** — Edit / delete transaction from the detail view, with confirm step (needs: T11, T36)
-- [ ] **T38** — Subscriptions create / edit / lifecycle actions (needs: T15)
+- [x] **T38** — Subscriptions create / edit / lifecycle actions (needs: T15)
 - [ ] **T39** — Debts + personal IOUs create / edit / payments (needs: T17, T18)
 - [ ] **T40** — `/categories` route: list, create, rename, merge; token-seeded colour picker (no raw hex input) (needs: T13)
 - [ ] **T41** — `/receipt` route: photo upload → `intake_receipt` → per-line review screen (needs: T20)

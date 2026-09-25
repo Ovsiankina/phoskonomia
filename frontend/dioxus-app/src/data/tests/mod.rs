@@ -36,6 +36,8 @@ mod settings;
 #[cfg(feature = "server")]
 mod signals;
 #[cfg(feature = "server")]
+mod subscription_write;
+#[cfg(feature = "server")]
 mod subscriptions;
 #[cfg(feature = "server")]
 mod transactions;
