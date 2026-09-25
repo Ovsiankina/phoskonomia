@@ -491,7 +491,7 @@ pub(crate) async fn correct_transaction_line_with(
 /// magnitude caps. Every message here is written for the user; store errors are
 /// mapped by kind and never echo their internal detail.
 #[cfg(feature = "server-deps")]
-mod line_fix {
+pub(crate) mod line_fix {
     use dioxus::prelude::ServerFnError;
     use phosk_core::error::PhoskError;
     use phosk_model::LineItem;
@@ -587,7 +587,7 @@ mod line_fix {
 
     /// A typed quantity: plain digits with an optional `.`/`,` decimal part (no
     /// sign, exponent, `inf` or `NaN`). The bounds are [`check_qty`]'s job.
-    fn parse_qty(raw: &str) -> Result<f64, PhoskError> {
+    pub(crate) fn parse_qty(raw: &str) -> Result<f64, PhoskError> {
         const SHAPE: &str = "Quantity must be a number such as 2 or 0.5.";
         let text = raw.trim().replace(',', ".");
         let (whole, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
