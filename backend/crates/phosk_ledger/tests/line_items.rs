@@ -526,6 +526,159 @@ async fn correct_line_non_numeric_unit_price_is_invalid() {
     );
 }
 
+// ── correct_line: F2 service-layer validation ─────────────────────────────
+//
+// `correct_line` must reject the same shapes `create_transaction`/`build_line`
+// reject (blank labels, a non-finite/non-positive qty, a negative unit price),
+// plus a length-bounded label, matching the wire layer's existing caps in
+// `dioxus-app/src/data/transactions.rs::line_fix`. A rejected correction must
+// leave the stored line, its provenance and the audit log untouched — nothing
+// is written until every check has passed.
+
+/// A blank (whitespace-only) name is rejected, and the stored line is
+/// untouched — re-reading it still shows the original name and confidence.
+#[tokio::test]
+async fn correct_line_blank_name_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 0).await; // Oat-milk flat white, conf 0.88
+    let err = correct_line(&db, line.id, "name", "   ")
+        .await
+        .expect_err("a blank name must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "blank name → Invalid, got {err:?}"
+    );
+
+    let dto = transaction_lines(&db, "t1")
+        .await
+        .expect("transaction_lines t1 ok");
+    assert_eq!(
+        dto.lines[0].name, "Oat-milk flat white",
+        "a rejected correction must not change the stored name"
+    );
+    assert!(
+        (dto.lines[0].confidence - 0.88).abs() < f64::EPSILON,
+        "a rejected correction must not touch provenance/confidence"
+    );
+}
+
+/// A blank (whitespace-only) category is likewise rejected, line untouched.
+#[tokio::test]
+async fn correct_line_blank_category_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 0).await;
+    let err = correct_line(&db, line.id, "category", "\t\n")
+        .await
+        .expect_err("a blank category must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "blank category → Invalid, got {err:?}"
+    );
+}
+
+/// A name past the length cap is rejected — mirrors the wire layer's
+/// `MAX_NAME_CHARS` (120) so the service is at least as strict as the UI.
+#[tokio::test]
+async fn correct_line_name_too_long_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 0).await;
+    let too_long = "x".repeat(121);
+    let err = correct_line(&db, line.id, "name", &too_long)
+        .await
+        .expect_err("a name past the length cap must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "over-long name → Invalid, got {err:?}"
+    );
+}
+
+/// A qty of exactly zero is rejected (not merely non-numeric).
+#[tokio::test]
+async fn correct_line_qty_zero_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 1).await; // Bananas, qty 1.2
+    let err = correct_line(&db, line.id, "qty", "0")
+        .await
+        .expect_err("qty of zero must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "qty 0 → Invalid, got {err:?}"
+    );
+
+    let dto = transaction_lines(&db, "t1")
+        .await
+        .expect("transaction_lines t1 ok");
+    assert!(
+        (dto.lines[1].qty - 1.2).abs() < f64::EPSILON,
+        "a rejected qty correction must not change the stored qty"
+    );
+}
+
+/// A negative qty is rejected.
+#[tokio::test]
+async fn correct_line_qty_negative_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, line.id, "qty", "-2")
+        .await
+        .expect_err("a negative qty must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "negative qty → Invalid, got {err:?}"
+    );
+}
+
+/// `NaN` parses as an f64 but is not a usable quantity — rejected.
+#[tokio::test]
+async fn correct_line_qty_nan_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, line.id, "qty", "NaN")
+        .await
+        .expect_err("a NaN qty must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "NaN qty → Invalid, got {err:?}"
+    );
+}
+
+/// `inf` parses as an f64 but is not a finite quantity — rejected.
+#[tokio::test]
+async fn correct_line_qty_infinite_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, line.id, "qty", "inf")
+        .await
+        .expect_err("an infinite qty must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "infinite qty → Invalid, got {err:?}"
+    );
+}
+
+/// A negative unit price is rejected — the seeded value is left untouched.
+#[tokio::test]
+async fn correct_line_unit_price_negative_is_invalid() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 1).await; // Bananas, unit price 320
+    let err = correct_line(&db, line.id, "unit_price", "-100")
+        .await
+        .expect_err("a negative unit_price must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "negative unit_price → Invalid, got {err:?}"
+    );
+
+    let dto = transaction_lines(&db, "t1")
+        .await
+        .expect("transaction_lines t1 ok");
+    assert_eq!(
+        dto.lines[1].unit_price.centimes(),
+        320,
+        "a rejected unit_price correction must not change the stored price"
+    );
+}
+
 /// The write path is callable behind the `&dyn DatabaseAdapter` PORT (ADR-010).
 #[tokio::test]
 async fn correct_line_works_through_the_port_trait_object() {
