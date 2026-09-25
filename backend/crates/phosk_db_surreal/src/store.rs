@@ -66,6 +66,7 @@ pub enum Bucket {
     Chat,
     Message,
     AiSuggestion,
+    ReceiptProposal,
 }
 
 impl Bucket {
@@ -93,11 +94,12 @@ impl Bucket {
             Self::Chat => "phosk_chat",
             Self::Message => "phosk_message",
             Self::AiSuggestion => "phosk_ai_suggestion",
+            Self::ReceiptProposal => "phosk_receipt_proposal",
         }
     }
 
     /// Every bucket, for schema definition / migration.
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::Transaction,
         Self::Category,
         Self::BudgetConfig,
@@ -119,6 +121,7 @@ impl Bucket {
         Self::Chat,
         Self::Message,
         Self::AiSuggestion,
+        Self::ReceiptProposal,
     ];
 }
 

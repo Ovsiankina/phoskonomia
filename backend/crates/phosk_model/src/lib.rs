@@ -28,8 +28,8 @@ pub mod provenance;
 
 pub use entities::{
     AiSuggestion, Alert, AlertAction, Budget, BudgetHistory, CategoryCap, Charge, Chat, Debt,
-    DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference, Receipt, Signal,
-    SignalOccurrence, Subscription,
+    DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference, Receipt, ReceiptProposal,
+    Signal, SignalOccurrence, Subscription,
 };
 pub use provenance::{CorrectionEvent, Provenance, Source};
 
