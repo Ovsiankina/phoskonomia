@@ -229,7 +229,7 @@ pub async fn list_debts() -> Result<Vec<DebtDto>, ServerFnError> {
         let session = crate::data::build_session().await?;
         let debts = phosk_debts::debts::list_debts(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(debts.into_iter().map(map_debt).collect())
     }
     #[cfg(not(feature = "server-deps"))]
@@ -248,7 +248,7 @@ pub async fn get_debt_stats() -> Result<DebtStatsDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let s = phosk_debts::debts::debt_stats(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(DebtStatsDto {
             count: s.count,
             auto_count: s.auto_count,
@@ -281,7 +281,7 @@ pub async fn get_trajectory(strategy: String) -> Result<TrajectoryDto, ServerFnE
         let session = crate::data::build_session().await?;
         let t = phosk_debts::debts::trajectory(session.db(), crate::data::today(), &strategy)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(TrajectoryDto {
             points: t
                 .points
@@ -312,7 +312,7 @@ pub async fn get_debt(id: String) -> Result<DebtDetailDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let d = phosk_debts::debts::debt_detail(session.db(), &id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(DebtDetailDto {
             decay_series: DecaySeriesDto {
                 hist: d.decay_series.hist,
@@ -339,7 +339,7 @@ pub async fn get_debt_payments(id: String) -> Result<Vec<DebtPaymentDto>, Server
         let session = crate::data::build_session().await?;
         let ps = phosk_debts::debts::debt_payments(session.db(), &id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(ps
             .into_iter()
             .map(|p| DebtPaymentDto {
@@ -368,7 +368,7 @@ pub async fn list_personal_ious() -> Result<Vec<PersonalIouDto>, ServerFnError> 
         let session = crate::data::build_session().await?;
         let ious = phosk_debts::personal_ious::list_personal_ious(session.db())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(ious
             .into_iter()
             .map(|p| PersonalIouDto {
@@ -400,7 +400,7 @@ pub async fn get_iou_stats() -> Result<IouStatsDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let s = phosk_debts::personal_ious::iou_stats(session.db())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(IouStatsDto {
             owed_to_you: s.owed_to_you,
             you_owe: s.you_owe,

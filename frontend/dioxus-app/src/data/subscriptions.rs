@@ -257,7 +257,7 @@ pub async fn list_subscriptions(filter: SubFilter) -> Result<Vec<SubscriptionDto
             svc_filter,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(crate::data::server_err)?;
         Ok(subs.into_iter().map(map_sub).collect())
     }
     #[cfg(not(feature = "server-deps"))]
@@ -278,7 +278,7 @@ pub async fn get_subscription_stats() -> Result<SubStatsDto, ServerFnError> {
         let s =
             phosk_recurring::subscriptions::subscription_stats(session.db(), crate::data::today())
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .map_err(crate::data::server_err)?;
         Ok(map_stats(s))
     }
     #[cfg(not(feature = "server-deps"))]
@@ -297,7 +297,7 @@ pub async fn get_billing_sweep() -> Result<BillingSweepDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let b = phosk_recurring::subscriptions::billing_sweep(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(BillingSweepDto {
             cycle: SweepCycleDto {
                 day: b.cycle.day,
@@ -347,7 +347,7 @@ pub async fn get_subscription(id: String) -> Result<SubscriptionDetailDto, Serve
             &id,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(crate::data::server_err)?;
         Ok(SubscriptionDetailDto {
             subscription: map_sub(d.subscription),
             recent: d

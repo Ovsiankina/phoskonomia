@@ -143,12 +143,15 @@ async fn apply_raises_the_targeted_cap_by_a_tenth() {
 #[tokio::test]
 async fn act_on_alert_rejects_bad_input_without_side_effects() {
     let db = fresh_db();
-    let msg = server_error(act_on_alert_with(&db, "no-such-alert", "dismiss").await);
-    assert!(msg.starts_with("not found"), "{msg}");
-    let msg = server_error(act_on_alert_with(&db, "a1", "explode").await);
-    assert!(msg.starts_with("invalid input"), "{msg}");
+    let msg = server_error(
+        act_on_alert_with(&db, "no-such-alert", "dismiss").await,
+        404,
+    );
+    assert_eq!(msg, crate::data::server_msg::NOT_FOUND);
+    let msg = server_error(act_on_alert_with(&db, "a1", "explode").await, 400);
+    assert_eq!(msg, crate::data::server_msg::INVALID);
     // a3 has no target envelope to raise.
-    let msg = server_error(act_on_alert_with(&db, "a3", "apply").await);
-    assert!(msg.starts_with("invalid input"), "{msg}");
+    let msg = server_error(act_on_alert_with(&db, "a3", "apply").await, 400);
+    assert_eq!(msg, crate::data::server_msg::INVALID);
     assert_eq!(active_ids(&db).await, ["a1", "a2", "a3"]);
 }

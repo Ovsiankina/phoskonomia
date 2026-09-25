@@ -27,6 +27,8 @@ mod cycle;
 mod dashboard;
 #[cfg(feature = "server")]
 mod debts;
+#[cfg(feature = "server-deps")]
+mod server_err;
 #[cfg(feature = "server")]
 mod settings;
 #[cfg(feature = "server")]
@@ -109,12 +111,16 @@ mod support {
         );
     }
 
-    /// The message of a server-side failure; any other outcome fails the test.
+    /// The message of a server-side failure at the given HTTP status; any
+    /// other outcome, or a mismatched status, fails the test.
     #[track_caller]
-    pub(super) fn server_error<T: std::fmt::Debug>(r: Result<T, ServerFnError>) -> String {
+    pub(super) fn server_error<T: std::fmt::Debug>(
+        r: Result<T, ServerFnError>,
+        expected_code: u16,
+    ) -> String {
         match r {
             Err(ServerFnError::ServerError { message, code, .. }) => {
-                assert_eq!(code, 500, "server failures surface as 500");
+                assert_eq!(code, expected_code, "status code");
                 message
             }
             other => panic!("expected a server error, got {other:?}"),

@@ -87,7 +87,7 @@ pub async fn get_ai_panel() -> Result<AiPanelDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let p = phosk_ai::ai_spine::ai_panel(session.db())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(AiPanelDto {
             feed: p
                 .feed
