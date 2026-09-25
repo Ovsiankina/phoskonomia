@@ -86,6 +86,16 @@ impl Provenance {
         }
     }
 
+    /// A value from a bulk import (bank export): [`Source::Imported`] at full
+    /// confidence — the bank's booking is the record of the spend.
+    #[must_use]
+    pub const fn imported() -> Self {
+        Self {
+            source: Source::Imported,
+            confidence: 1.0,
+        }
+    }
+
     /// Whether this value is below the [`LOW_CONFIDENCE_THRESHOLD`] review
     /// threshold (the coral flag). See [`is_low_confidence`] for how an
     /// out-of-range confidence (NaN included) is handled.
@@ -126,6 +136,13 @@ mod tests {
         let p = Provenance::user_entered();
         assert_eq!(p.source, Source::UserEntered);
         assert!((p.confidence - 1.0).abs() < f64::EPSILON);
+        assert!(!p.is_low_confidence());
+    }
+
+    #[test]
+    fn imported_is_full_confidence_import_source() {
+        let p = Provenance::imported();
+        assert_eq!(p.source, Source::Imported);
         assert!(!p.is_low_confidence());
     }
 
