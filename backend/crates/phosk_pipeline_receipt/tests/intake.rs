@@ -30,7 +30,7 @@ use phosk_adapter_storage::{InMemoryStorage, PhotoStorage, StorageRef};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
-use phosk_model::BudgetConfig;
+use phosk_model::{BudgetConfig, Source};
 use phosk_pipeline_receipt::{IntakePhoto, MAX_PHOTO_BYTES, intake_receipt};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -565,4 +565,67 @@ async fn storage_ref_is_opaque_and_resolvable() {
     let _: &StorageRef = &outcome.photo;
     let bytes = storage.get(&outcome.photo).await.expect("resolves");
     assert!(!bytes.is_empty());
+}
+
+/// End to end: intake alone leaves the ledger unchanged; only the approval
+/// service books the proposal — once, with its model provenance intact.
+#[tokio::test]
+async fn intake_leaves_ledger_unchanged_until_approval() {
+    let db = empty_db();
+    let (storage, ocr, llm) = (InMemoryStorage::new(), FakeOcr::new(), scripted_llm());
+    let photo = jpeg_with_exif(b"meta");
+    let outcome = intake_receipt(
+        &db,
+        &storage,
+        &ocr,
+        &llm,
+        IntakePhoto {
+            bytes: &photo,
+            captured_on: today(),
+        },
+    )
+    .await
+    .expect("intake ok");
+
+    assert!(db.all_receipts().await.expect("r").is_empty(), "no booking");
+    assert!(
+        db.transactions_between(today(), today())
+            .await
+            .expect("tx")
+            .is_empty(),
+        "no projected spend before approval"
+    );
+    let staged = db
+        .receipt_proposal(outcome.suggestion_id)
+        .await
+        .expect("read")
+        .expect("intake stages the proposal for approval");
+    assert_eq!(staged.receipt, outcome.receipt);
+    assert_eq!(staged.line_items, outcome.line_items);
+
+    let approved = phosk_ai::approve_suggestion(&db, outcome.suggestion_id)
+        .await
+        .expect("approve");
+    assert!(approved.applied);
+    let booked = db
+        .receipt_by_slug(&outcome.receipt.slug)
+        .await
+        .expect("booked after approval");
+    assert_eq!(booked.amount.centimes(), 865);
+    assert_eq!(booked.provenance.source, Source::Ocr);
+    let lines = db.line_items(booked.id).await.expect("lines");
+    assert_eq!(lines.len(), 3);
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.provenance.source == Source::LlmInferred)
+    );
+
+    let again = phosk_ai::approve_suggestion(&db, outcome.suggestion_id)
+        .await
+        .expect("approve again");
+    assert!(!again.applied);
+    assert_eq!(db.all_receipts().await.expect("r").len(), 1);
+    let txs = db.transactions_between(today(), today()).await.expect("tx");
+    assert_eq!(txs.len(), 1, "approving twice never double-books");
 }

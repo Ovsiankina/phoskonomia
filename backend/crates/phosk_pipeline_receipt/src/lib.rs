@@ -5,7 +5,7 @@
 //! **enqueued for human approval** and leaves. The pipeline NEVER writes a
 //! receipt to the ledger — its terminal effect is `db.enqueue_suggestion`, an
 //! append to the approval queue. A model can *propose*; only an approved
-//! suggestion is ever applied (later, by the approval pipeline). This is the
+//! suggestion is ever applied (by the `phosk_ai` approval service). This is the
 //! effect-typed gate from [`phosk_ai`], enforced structurally: this crate has no
 //! code path that calls `insert_receipt`.
 //!
@@ -29,9 +29,10 @@
 //!    (`Source::Ocr` for the receipt total read off the slip, `Source::LlmInferred`
 //!    for the model's line items). `line_total` is backend-derived
 //!    (`round(qty * unit_price)`), never trusted from the model.
-//! 6. **Enqueue.** A single per-receipt [`AiSuggestion`] (`kind == "receipt"`,
-//!    `status == "open"`) summarising the proposal is appended to the approval
-//!    queue. Bulk per-receipt: one suggestion carries the whole receipt.
+//! 6. **Stage + enqueue.** The [`ReceiptProposal`] payload is staged (off
+//!    ledger) and a single per-receipt [`AiSuggestion`] (`kind == "receipt"`,
+//!    `status == "open"`) summarising it is appended to the approval queue.
+//!    Only `phosk_ai::approve_suggestion` / `approve_receipt` apply it.
 //!
 //! ## Idempotency (ADR-010)
 //! The SHA-256 of the *validated* bytes is the idempotency key, surfaced as the
@@ -60,7 +61,7 @@ use phosk_adapter_storage::{PhotoStorage, StorageRef};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{LineItemId, ReceiptId, SuggestionId};
-use phosk_model::{AiSuggestion, LineItem, Provenance, Receipt, Source};
+use phosk_model::{AiSuggestion, LineItem, Provenance, Receipt, ReceiptProposal, Source};
 
 /// The maximum accepted photo size (bytes). Hostile input is size-capped before
 /// any decode/OCR/model work to bound resource use (a decompression-bomb / OOM
@@ -82,8 +83,8 @@ pub struct IntakePhoto<'a> {
 /// The result of a successful intake: a proposal **enqueued** for approval.
 ///
 /// Note what is NOT here: no DB write of the receipt. The receipt + lines are
-/// returned for the caller/UI to preview; the only persisted effect is the
-/// enqueued [`AiSuggestion`] (`suggestion_id`) and the stored photo (`photo`).
+/// returned for the caller/UI to preview; the persisted effects are the staged
+/// proposal + enqueued [`AiSuggestion`] (`suggestion_id`) and the stored photo (`photo`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntakeOutcome {
     /// The proposed receipt (NOT persisted to the ledger — awaiting approval).
@@ -117,7 +118,8 @@ enum ImageKind {
 /// Takes the four PORTs as `&dyn _` (DB, storage, OCR, LLM) — a technology swap
 /// is a new adapter impl wired at composition, never an edit here. Returns an
 /// [`IntakeOutcome`] whose only persisted effects are the stored sanitised photo
-/// and the enqueued approval suggestion; the receipt itself is **not** written.
+/// and the staged proposal + enqueued approval suggestion;
+/// the receipt itself is **not** written to the ledger.
 ///
 /// # Errors
 /// - [`PhoskError::Invalid`] if validation fails (empty / oversize / not a
@@ -155,8 +157,16 @@ pub async fn intake_receipt(
     let (receipt, line_items, low_confidence_lines) =
         assemble(&slug, photo.captured_on, &extracted, kind)?;
 
-    // ── Step 6: ENQUEUE one per-receipt proposal — never auto-write. ──
+    // ── Step 6: STAGE the payload + ENQUEUE one per-receipt proposal — never
+    // auto-write. Staged first, so an open suggestion always has its payload;
+    // only `phosk_ai::approve_*` ever applies it to the ledger. ──
     let suggestion = build_suggestion(&receipt, &line_items, low_confidence_lines);
+    db.stage_receipt_proposal(ReceiptProposal {
+        suggestion_id: suggestion.id,
+        receipt: receipt.clone(),
+        line_items: line_items.clone(),
+    })
+    .await?;
     let suggestion_id = db.enqueue_suggestion(suggestion).await?;
 
     Ok(IntakeOutcome {
