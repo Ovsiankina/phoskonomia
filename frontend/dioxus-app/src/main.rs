@@ -4,7 +4,7 @@
 //! backend through `#[server]` functions (see `mod data`); there is NO hand-written
 //! REST boundary. This file is the FOUNDATION SHELL every page plugs into:
 //!
-//!   * the `Route` enum (8 routes + index/unknown -> /dashboard),
+//!   * the `Route` enum (9 routes + index/unknown -> /dashboard),
 //!   * the `Layout` that renders the 3 permanent CRT overlays once + `Outlet`,
 //!   * all Oscillocore CSS linked in the EXACT cascade order from React `main.jsx`,
 //!   * `@font-face` injected with `asset!()`'d font URLs so Pilowlava + VG5000
@@ -25,8 +25,8 @@ mod pages;
 
 use pages::{
     analytics::AnalyticsPage, approvals::ApprovalsPage, budgets::BudgetsPage, config::ConfigPage,
-    dashboard::DashboardPage, debts::DebtsPage, subscriptions::SubscriptionsPage,
-    transactions::TransactionsPage,
+    dashboard::DashboardPage, debts::DebtsPage, receipt::ReceiptPage,
+    subscriptions::SubscriptionsPage, transactions::TransactionsPage,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,6 +95,8 @@ pub enum Route {
         AnalyticsPage {},
         #[route("/approvals")]
         ApprovalsPage {},
+        #[route("/receipt")]
+        ReceiptPage {},
         #[route("/config")]
         ConfigPage {},
         // Index + any unknown path -> /dashboard.

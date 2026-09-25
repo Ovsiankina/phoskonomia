@@ -30,6 +30,8 @@ mod dashboard;
 #[cfg(feature = "server")]
 mod debts;
 #[cfg(feature = "server")]
+mod receipt;
+#[cfg(feature = "server")]
 mod settings;
 #[cfg(feature = "server")]
 mod signals;

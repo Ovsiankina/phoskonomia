@@ -23,7 +23,7 @@ use crate::Route;
 /// One entry in the Phoskonomia page table (nav / hover-card / mega-menu).
 ///
 /// Faithful port of the `PHOSK_PAGES` array in `comps.jsx`. `route` is the
-/// router target (all eight pages exist, so there is no "SOON" disabled case).
+/// router target (all nine pages exist, so there is no "SOON" disabled case).
 #[derive(Clone, PartialEq)]
 pub struct PhoskPage {
     /// Full uppercase label (e.g. `DASHBOARD`).
@@ -38,7 +38,7 @@ pub struct PhoskPage {
     pub route: Route,
 }
 
-/// The eight Phoskonomia pages, in nav order.
+/// The nine Phoskonomia pages, in nav order.
 ///
 /// Faithful port of `PHOSK_PAGES` (`comps.jsx`). Order is cascade-significant for
 /// the probe-width measurement that picks the nav tier.
@@ -93,6 +93,13 @@ pub fn phosk_pages() -> Vec<PhoskPage> {
             glyph: "⊻",
             desc: "Review AI receipt proposals",
             route: Route::ApprovalsPage {},
+        },
+        PhoskPage {
+            key: "RECEIPT",
+            abbr: "RCPT",
+            glyph: "⎙",
+            desc: "Upload & review a receipt photo",
+            route: Route::ReceiptPage {},
         },
         PhoskPage {
             key: "CONFIG",

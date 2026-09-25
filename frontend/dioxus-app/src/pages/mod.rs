@@ -20,5 +20,6 @@ pub mod budgets;
 pub mod config;
 pub mod dashboard;
 pub mod debts;
+pub mod receipt;
 pub mod subscriptions;
 pub mod transactions;
