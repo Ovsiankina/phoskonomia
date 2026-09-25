@@ -32,16 +32,18 @@
 //! 6. **Stage + enqueue.** The [`ReceiptProposal`] payload is staged (off
 //!    ledger) and a single per-receipt [`AiSuggestion`] (`kind == "receipt"`,
 //!    `status == "open"`) summarising it is appended to the approval queue.
-//!    Model text is normalised first (control chars stripped, clamped, an
+//!    Model text is normalised first (control + bidi / zero-width chars stripped, clamped, an
 //!    illegible name → a zero-confidence `?`) and the proposal is checked with
 //!    `phosk_ai::validate_proposal`; what cannot be approved is never staged.
 //!    Only `phosk_ai::approve_suggestion` / `approve_receipt` apply it.
 //!
 //! ## Idempotency (ADR-010)
 //! The SHA-256 of the *validated* bytes is the idempotency key, surfaced as the
-//! receipt `slug` (`"rcpt:<hex>"`). Re-submitting the same photo finds the prior
-//! enqueued suggestion and returns it without storing, OCR-ing, calling the
-//! model, or enqueuing again ([`IntakeOutcome::deduplicated`] `== true`).
+//! receipt `slug` (`"rcpt:<hex>"`). Re-submitting the same photo while its
+//! suggestion is open or accepted returns that suggestion without storing,
+//! OCR-ing, calling the model, or enqueuing again
+//! ([`IntakeOutcome::deduplicated`] `== true`). A rejected (`dismissed`)
+//! suggestion does not count, so a rejected photo can be re-submitted.
 //!
 //! ## Sandbox seam (deployment-level)
 //! Steps 3–4 — the only steps that feed attacker-controlled bytes into a
@@ -102,8 +104,9 @@ pub struct IntakeOutcome {
     pub content_hash: String,
     /// How many line items came back below [`CONFIDENCE_THRESHOLD`] (coral-flagged).
     pub low_confidence_lines: usize,
-    /// `true` when this exact photo was already intaken — nothing was stored,
-    /// OCR-ed, sent to the model, or re-enqueued; the prior proposal is returned.
+    /// `true` when this exact photo already has an open or accepted suggestion —
+    /// nothing was stored, OCR-ed, sent to the model, or re-enqueued; the prior
+    /// suggestion is returned. (A rejected one does not dedup.)
     pub deduplicated: bool,
 }
 
@@ -507,11 +510,14 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
 /// Placeholder name of a line the model could not read.
 const ILLEGIBLE: &str = "?";
 
-/// Normalise hostile model text before it is persisted: control characters
-/// stripped, trimmed, clamped to [`phosk_ai::ai_approval::MAX_TEXT_CHARS`];
+/// Normalise hostile model text before it is persisted: control and invisible
+/// format characters ([`phosk_ai::ai_approval::is_unsafe_text_char`]) stripped, trimmed, clamped to [`phosk_ai::ai_approval::MAX_TEXT_CHARS`];
 /// `fallback` when nothing is left.
 fn clean_text(raw: &str, fallback: &str) -> String {
-    let kept: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let kept: String = raw
+        .chars()
+        .filter(|&c| !phosk_ai::ai_approval::is_unsafe_text_char(c))
+        .collect();
     let clamped: String = kept
         .trim()
         .chars()
