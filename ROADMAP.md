@@ -45,7 +45,7 @@ test) + input validation + `Provenance` + errors via `PhoskError`. No UI.
 - [ ] **T18** — `phosk_debts`: personal IOUs — create / edit / delete, record partial payment, settle (needs: T04)
 - [ ] **T19** — `phosk_planning`: set global monthly budget + savings target, with budget-history entry; alert snooze with re-trigger (needs: T04)
 - [x] **T20** — `phosk_ai`: **approval service** — list pending suggestions, approve (applies the receipt proposal to the ledger via `insert_receipt`, idempotent, provenance preserved), reject, bulk-approve per receipt. This is the ONLY path from a model proposal to the ledger. (needs: T10)
-- [ ] **T21** — `phosk_daemon`: compose the real `phosk_pipeline_receipt` ingest behind the existing seam; keep `NullIngest` for tests; selection by env (needs: T20)
+- [x] **T21** — `phosk_daemon`: compose the real `phosk_pipeline_receipt` ingest behind the existing seam; keep `NullIngest` for tests; selection by env (needs: T20)
 - [ ] **T22** — CSV import: column mapping, Swiss bank date/amount formats, dedupe by content hash, `Imported` provenance (needs: T10)
 
 ### Phase 2 — wire the UI (`frontend/dioxus-app`)

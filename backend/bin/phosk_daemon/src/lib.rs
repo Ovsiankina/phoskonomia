@@ -9,16 +9,15 @@
 //!
 //! ## What lives here vs. behind the seam
 //!
-//! A drained blob is still **hostile input**. The actual decode → OCR → LLM →
-//! persist pipeline runs in a network-less sandbox and is reached only through
-//! the [`ReceiptIngest`] port (the seam). The concrete pipeline + its OCR/LLM
-//! adapters are composed *elsewhere* (the desktop server context), never here —
-//! this bin only owns the **poll/drain loop** and the outbound HTTP client.
-//!
-//! The pipeline crate `phosk_pipeline_receipt` exists (`intake_receipt`), but
-//! no `impl ReceiptIngest` adapts it yet, so [`NullIngest`] is still what the
-//! binary runs and what the loop's tests run against. Wiring the real pipeline
-//! means a new `impl ReceiptIngest` plus a change at the composition root.
+//! A drained blob is still **hostile input**. The decode → OCR → LLM → stage
+//! pipeline is reached only through the [`ReceiptIngest`] port (the seam). This
+//! library owns the **poll/drain loop**, the outbound HTTP client and
+//! [`PipelineIngest`], which runs each blob through
+//! `phosk_pipeline_receipt::intake_receipt` over the L2 PORT traits. The
+//! concrete OCR/LLM/storage/DB adapters are named only at the composition root
+//! (`main.rs`), selected by [`IngestKind::select`] (`PHOSK_INGEST`, default
+//! `null` → [`NullIngest`]). The pipeline only STAGES a proposal for human
+//! approval; nothing here books to the ledger.
 //!
 //! ## The poll protocol
 //!
@@ -26,17 +25,24 @@
 //! 2. `200` → body is the raw blob bytes; headers carry `x-phosk-blob-id` and
 //!    `content-type`. The daemon wraps them in a [`DrainedBlob`] and calls
 //!    [`ReceiptIngest::ingest`]. The pop was destructive, so the desktop now
-//!    owns the only copy — ingest failures are logged, not retried against the
-//!    queue (the blob is gone).
+//!    owns the only copy — an ingest failure marks that blob
+//!    [`IngestOutcome::Failed`] (logged by error code only) and the loop moves
+//!    on; it is not retried against the queue (the blob is gone).
 //! 3. `204` → the queue was empty for the whole long-poll window; loop again
 //!    immediately (the wait already provided the pacing).
 //! 4. transport error (Pi down / unreachable) → back off [`PollConfig::idle_backoff`]
 //!    and retry. The Pi being offline is the normal case, not a fault.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_llm::LlmAdapter;
+use phosk_adapter_ocr::OcrAdapter;
+use phosk_adapter_storage::PhotoStorage;
 use phosk_core::error::PhoskError;
+use phosk_pipeline_receipt::{IntakePhoto, intake_receipt};
 
 /// One opaque blob the daemon drained from the Pi queue. Still hostile input:
 /// the bytes are **not** decoded here — only the seam (the sandboxed pipeline)
@@ -53,16 +59,17 @@ pub struct DrainedBlob {
     pub data: Vec<u8>,
 }
 
-/// The seam to the sandboxed receipt-import pipeline (`phosk_pipeline_receipt`,
-/// built but not yet adapted to this port). The daemon depends only on this port, never on the OCR/LLM
-/// adapters behind it (ADR-005/010). It is `async` (the pipeline is I/O-bound)
+/// The seam to the receipt-import pipeline (`phosk_pipeline_receipt`, adapted by
+/// [`PipelineIngest`]). The daemon loop depends only on this port, never on the
+/// OCR/LLM adapters behind it (ADR-005/010). It is `async` (the pipeline is I/O-bound)
 /// and object-safe so the daemon holds an `Arc<dyn ReceiptIngest + Send + Sync>`
 /// chosen by the composition root.
 #[async_trait]
 pub trait ReceiptIngest: Send + Sync {
     /// Hand one drained blob to the pipeline. Returns the pipeline's outcome, or
     /// a [`PhoskError`] if ingest failed. The daemon does **not** re-queue on
-    /// failure — the pop was destructive and the queue no longer holds the blob.
+    /// failure — the pop was destructive and the queue no longer holds the blob;
+    /// it records [`IngestOutcome::Failed`] and moves on.
     async fn ingest(&self, blob: DrainedBlob) -> Result<IngestOutcome, PhoskError>;
 }
 
@@ -84,11 +91,118 @@ pub enum IngestOutcome {
         /// Why the sandbox refused it.
         reason: String,
     },
+    /// Ingest returned an error (validation, OCR, model, storage or DB). Nothing
+    /// was staged; the blob is dropped (the queue pop was destructive).
+    Failed {
+        /// The source blob id.
+        blob_id: String,
+        /// The PII-free [`PhoskError::code`] — never the error's message, which
+        /// may carry OCR/model text.
+        reason: String,
+    },
+}
+
+/// Which [`ReceiptIngest`] the composition root wires (`PHOSK_INGEST`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestKind {
+    /// [`NullIngest`]: drained blobs are recorded and dropped. The default.
+    Null,
+    /// [`PipelineIngest`]: each blob goes through `intake_receipt`.
+    Pipeline,
+}
+
+impl IngestKind {
+    /// Select the ingest from the raw `PHOSK_INGEST` and `PHOSK_DB` values.
+    ///
+    /// Unset or `null` → [`IngestKind::Null`] (safe default: nothing is
+    /// imported). `pipeline` → [`IngestKind::Pipeline`], which requires
+    /// `PHOSK_DB=surreal`: the in-memory DB lives only in this process, so the
+    /// staged proposals would never reach the approval UI. Matching is ASCII
+    /// case-insensitive, like the Dioxus composition root.
+    ///
+    /// # Errors
+    /// [`PhoskError::Invalid`] for any other `PHOSK_INGEST` value, or for
+    /// `pipeline` without `PHOSK_DB=surreal`.
+    pub fn select(ingest: Option<&str>, db: Option<&str>) -> Result<Self, PhoskError> {
+        match ingest.map(str::trim) {
+            None | Some("") => Ok(Self::Null),
+            Some(v) if v.eq_ignore_ascii_case("null") => Ok(Self::Null),
+            Some(v) if v.eq_ignore_ascii_case("pipeline") => {
+                if db.is_some_and(|d| d.trim().eq_ignore_ascii_case("surreal")) {
+                    Ok(Self::Pipeline)
+                } else {
+                    Err(PhoskError::Invalid(
+                        "PHOSK_INGEST=pipeline needs PHOSK_DB=surreal (a memory DB would \
+                         lose every staged proposal)"
+                            .to_owned(),
+                    ))
+                }
+            }
+            Some(_) => Err(PhoskError::Invalid(
+                "PHOSK_INGEST must be `null` (default) or `pipeline`".to_owned(),
+            )),
+        }
+    }
+}
+
+/// The real [`ReceiptIngest`]: runs each drained blob through
+/// `phosk_pipeline_receipt::intake_receipt` with the injected PORTs. The
+/// pipeline validates the hostile bytes, stores the sanitised photo, and
+/// STAGES a proposal + an open approval suggestion — it never writes the
+/// ledger. The blob's advisory `mime` is ignored (the pipeline sniffs bytes).
+pub struct PipelineIngest {
+    db: Arc<dyn DatabaseAdapter>,
+    storage: Arc<dyn PhotoStorage>,
+    ocr: Arc<dyn OcrAdapter>,
+    llm: Arc<dyn LlmAdapter>,
+}
+
+impl PipelineIngest {
+    /// Assemble from the four PORTs (concrete adapters chosen by the caller).
+    #[must_use]
+    pub fn new(
+        db: Arc<dyn DatabaseAdapter>,
+        storage: Arc<dyn PhotoStorage>,
+        ocr: Arc<dyn OcrAdapter>,
+        llm: Arc<dyn LlmAdapter>,
+    ) -> Self {
+        Self {
+            db,
+            storage,
+            ocr,
+            llm,
+        }
+    }
+}
+
+#[async_trait]
+impl ReceiptIngest for PipelineIngest {
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn ingest(&self, blob: DrainedBlob) -> Result<IngestOutcome, PhoskError> {
+        let photo = IntakePhoto {
+            bytes: &blob.data,
+            // The desktop's local "today" (the pipeline books against it).
+            captured_on: chrono::Local::now().date_naive(),
+        };
+        let outcome = intake_receipt(
+            self.db.as_ref(),
+            self.storage.as_ref(),
+            self.ocr.as_ref(),
+            self.llm.as_ref(),
+            photo,
+        )
+        .await?;
+        tracing::debug!(
+            deduplicated = outcome.deduplicated,
+            lines = outcome.line_items.len(),
+            "daemon: photo staged for approval"
+        );
+        Ok(IngestOutcome::Queued { blob_id: blob.id })
+    }
 }
 
 /// A deterministic, side-effect-free [`ReceiptIngest`] for the loop's tests and
-/// for running the daemon until `phosk_pipeline_receipt` is wired behind this
-/// port. It records the
+/// the binary's default (`PHOSK_INGEST` unset / `null`). It records the
 /// blobs it received (so a test can assert the round-trip) and always reports
 /// `Queued`. It NEVER decodes the bytes — it is a seam stand-in, not a pipeline.
 #[derive(Debug, Default)]
@@ -241,15 +355,28 @@ impl<I: ReceiptIngest> Daemon<I> {
     }
 
     /// Poll once with a short non-blocking wait and, if a blob is ready, hand it
-    /// to the pipeline. Returns `Ok(Some(outcome))` when a blob was processed,
-    /// `Ok(None)` when the queue was empty, or the poll/ingest error.
+    /// to the pipeline. Returns `Ok(Some(outcome))` when a blob was processed
+    /// (an ingest error becomes [`IngestOutcome::Failed`], so one bad photo
+    /// never stops the loop), `Ok(None)` when the queue was empty, or the poll
+    /// (transport) error.
     ///
     /// `wait` is the long-poll window for this single poll (use `0` to peek).
     pub async fn poll_once(&self, wait: Duration) -> Result<Option<IngestOutcome>, PhoskError> {
         match self.client.poll_next(wait).await? {
             Some(blob) => {
                 tracing::debug!(id = %blob.id, bytes = blob.data.len(), "daemon: drained blob, handing to pipeline");
-                let outcome = self.ingest.ingest(blob).await?;
+                let blob_id = blob.id.clone();
+                let outcome = match self.ingest.ingest(blob).await {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        // Code only: the message may carry OCR/model text (PII).
+                        tracing::warn!(id = %blob_id, error = e.code(), "daemon: ingest failed, blob dropped");
+                        IngestOutcome::Failed {
+                            blob_id,
+                            reason: e.code().to_owned(),
+                        }
+                    }
+                };
                 Ok(Some(outcome))
             }
             None => Ok(None),
@@ -273,8 +400,9 @@ impl<I: ReceiptIngest> Daemon<I> {
 
     /// The long-running service loop: long-poll the queue forever, ingesting
     /// each blob as it arrives. Transport errors (Pi offline) are logged and
-    /// retried after [`PollConfig::idle_backoff`]; ingest errors are logged and
-    /// dropped (the destructive pop already removed the blob). The loop runs
+    /// retried after [`PollConfig::idle_backoff`]; ingest errors are marked
+    /// [`IngestOutcome::Failed`] and dropped (the destructive pop already
+    /// removed the blob). The loop runs
     /// until `shutdown` resolves, then returns the number of blobs processed.
     ///
     /// `shutdown` is any future (e.g. `tokio::signal::ctrl_c()`); when it
@@ -302,7 +430,7 @@ impl<I: ReceiptIngest> Daemon<I> {
                             // already provided the pacing by parking the request).
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "daemon: poll/ingest failed, backing off");
+                            tracing::warn!(error = %e, "daemon: poll failed, backing off");
                             tokio::time::sleep(self.config.idle_backoff).await;
                         }
                     }
@@ -333,6 +461,51 @@ mod tests {
             }
         );
         assert_eq!(ingest.received().await, vec![blob]);
+    }
+
+    #[test]
+    fn ingest_defaults_to_null_when_unset_or_null() {
+        assert_eq!(IngestKind::select(None, None).unwrap(), IngestKind::Null);
+        assert_eq!(
+            IngestKind::select(Some(""), None).unwrap(),
+            IngestKind::Null
+        );
+        assert_eq!(
+            IngestKind::select(Some("NULL"), Some("surreal")).unwrap(),
+            IngestKind::Null
+        );
+    }
+
+    #[test]
+    fn ingest_pipeline_is_selected_with_a_surreal_db() {
+        assert_eq!(
+            IngestKind::select(Some("pipeline"), Some("surreal")).unwrap(),
+            IngestKind::Pipeline
+        );
+        assert_eq!(
+            IngestKind::select(Some(" Pipeline "), Some("SURREAL")).unwrap(),
+            IngestKind::Pipeline
+        );
+    }
+
+    #[test]
+    fn ingest_pipeline_without_surreal_db_is_a_clear_error() {
+        for db in [None, Some("memory"), Some("")] {
+            let err = IngestKind::select(Some("pipeline"), db).unwrap_err();
+            assert!(
+                matches!(&err, PhoskError::Invalid(m) if m.contains("PHOSK_DB=surreal")),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ingest_invalid_value_is_a_clear_error() {
+        let err = IngestKind::select(Some("ollama"), Some("surreal")).unwrap_err();
+        assert!(
+            matches!(&err, PhoskError::Invalid(m) if m.contains("PHOSK_INGEST") && m.contains("pipeline")),
+            "{err:?}"
+        );
     }
 
     #[test]
