@@ -108,6 +108,6 @@ async fn get_subscription_inspects_one_charge() {
 
 #[tokio::test]
 async fn get_subscription_rejects_an_unknown_slug() {
-    let msg = server_error(get_subscription("no-such-sub".into()).await);
+    let msg = server_error(get_subscription("no-such-sub".into()).await, 404);
     assert!(msg.starts_with("not found"), "{msg}");
 }

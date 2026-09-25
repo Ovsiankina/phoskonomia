@@ -80,9 +80,9 @@ async fn get_debt_and_payments_inspect_one_balance() {
 
 #[tokio::test]
 async fn unknown_debts_are_not_found() {
-    let msg = server_error(get_debt("no-such-debt".into()).await);
+    let msg = server_error(get_debt("no-such-debt".into()).await, 404);
     assert!(msg.starts_with("not found"), "{msg}");
-    let msg = server_error(get_debt_payments("no-such-debt".into()).await);
+    let msg = server_error(get_debt_payments("no-such-debt".into()).await, 404);
     assert!(msg.starts_with("not found"), "{msg}");
 }
 

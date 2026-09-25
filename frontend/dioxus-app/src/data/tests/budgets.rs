@@ -101,8 +101,11 @@ async fn get_category_transactions_lists_the_envelope_receipts() {
 
 #[tokio::test]
 async fn unknown_envelopes_are_not_found() {
-    let msg = server_error(get_category_detail("No such envelope".into()).await);
+    let msg = server_error(get_category_detail("No such envelope".into()).await, 404);
     assert!(msg.starts_with("not found"), "{msg}");
-    let msg = server_error(get_category_transactions("No such envelope".into()).await);
+    let msg = server_error(
+        get_category_transactions("No such envelope".into()).await,
+        404,
+    );
     assert!(msg.starts_with("not found"), "{msg}");
 }

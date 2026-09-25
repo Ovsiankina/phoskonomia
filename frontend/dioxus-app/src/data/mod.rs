@@ -271,16 +271,51 @@ impl Session {
 /// ever see the `&dyn _` PORT objects [`Session`] exposes.
 ///
 /// # Errors
-/// Propagates any [`phosk_core::error::PhoskError`] from adapter construction
-/// (store open, key setup, model-name validation), surfaced to the client as a
-/// [`dioxus::prelude::ServerFnError`].
+/// A failure from adapter construction (store open, key setup, model-name
+/// validation) can carry a filesystem path or other operational detail (e.g.
+/// a "create surreal dir: …" I/O error), so unlike [`server_err`] it is
+/// **never** passed through: any failure here surfaces to the client as one
+/// fixed, generic [`dioxus::prelude::ServerFnError`].
 #[cfg(feature = "server-deps")]
 pub(crate) async fn build_session() -> Result<Session, dioxus::prelude::ServerFnError> {
     let stack = composition::stack()
         .await
-        .map_err(|e| dioxus::prelude::ServerFnError::new(e.to_string()))?
+        .map_err(|_| dioxus::prelude::ServerFnError::ServerError {
+            message: "The app server is unavailable. Please try again.".to_owned(),
+            code: 503,
+            details: None,
+        })?
         .clone();
     Ok(Session { stack })
+}
+
+/// Sanitising boundary from [`phosk_core::error::PhoskError`] to the
+/// [`dioxus::prelude::ServerFnError`] a `#[server]` fn returns to the client.
+///
+/// `Invalid` and `NotFound` messages are written by the feature services **for
+/// the user** (a rejected preference value, "no such receipt") — the services
+/// are the source of those strings, and they never embed a filesystem path or
+/// another user's data, so they pass through unchanged, at the error's own
+/// [`PhoskError::http_status`]. Every other variant (`InvalidDate`,
+/// `Overflow`) can originate from adapter/storage/internal code — carried
+/// strings there are written for a log line, not a screen, and can include a
+/// path or transport detail — so it becomes one fixed, generic message at the
+/// right status instead.
+#[cfg(feature = "server-deps")]
+pub(crate) fn server_err(err: phosk_core::error::PhoskError) -> dioxus::prelude::ServerFnError {
+    use phosk_core::error::PhoskError;
+    let code = err.http_status();
+    let message = match &err {
+        PhoskError::Invalid(_) | PhoskError::NotFound(_) => err.to_string(),
+        PhoskError::InvalidDate(_) | PhoskError::Overflow(_) => {
+            "Something went wrong. Please try again.".to_owned()
+        }
+    };
+    dioxus::prelude::ServerFnError::ServerError {
+        message,
+        code,
+        details: None,
+    }
 }
 
 // Foundation API consumed by page/data agents; unused until they land.

@@ -82,7 +82,7 @@ async fn get_signal_returns_the_inspector_payload() {
 
 #[tokio::test]
 async fn get_signal_rejects_an_unknown_slug() {
-    let msg = server_error(get_signal("no-such-signal".into()).await);
+    let msg = server_error(get_signal("no-such-signal".into()).await, 404);
     assert!(msg.starts_with("not found"), "{msg}");
 }
 
@@ -121,9 +121,9 @@ async fn dismiss_removes_the_candidate() {
 #[tokio::test]
 async fn track_and_dismiss_reject_an_unknown_slug() {
     let db = fresh_db();
-    let msg = server_error(track_signal_with(&db, "no-such-signal").await);
+    let msg = server_error(track_signal_with(&db, "no-such-signal").await, 404);
     assert!(msg.starts_with("not found"), "{msg}");
-    let msg = server_error(dismiss_signal_with(&db, "no-such-signal").await);
+    let msg = server_error(dismiss_signal_with(&db, "no-such-signal").await, 404);
     assert!(msg.starts_with("not found"), "{msg}");
     assert_eq!(
         svc::list_signals(&db, today())
