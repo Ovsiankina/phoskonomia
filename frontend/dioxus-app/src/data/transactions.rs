@@ -494,16 +494,10 @@ pub(crate) async fn correct_transaction_line_with(
 mod line_fix {
     use dioxus::prelude::ServerFnError;
     use phosk_core::error::PhoskError;
+    use phosk_ledger::line_items::{
+        MAX_CATEGORY_CHARS, MAX_NAME_CHARS, MAX_QTY, MAX_UNIT_PRICE_CENTIMES,
+    };
     use phosk_model::LineItem;
-
-    /// Longest accepted item name, in characters.
-    const MAX_NAME_CHARS: usize = 120;
-    /// Longest accepted category, in characters.
-    const MAX_CATEGORY_CHARS: usize = 60;
-    /// Largest accepted quantity (pieces or weighed units).
-    const MAX_QTY: f64 = 100_000.0;
-    /// Largest accepted unit price: CHF 1'000'000, in centimes.
-    const MAX_UNIT_PRICE_CENTIMES: i64 = 100_000_000;
 
     /// How far apart (relative) two quantities may be and still count as the
     /// same displayed value. A float that crossed the wire twice can land an
