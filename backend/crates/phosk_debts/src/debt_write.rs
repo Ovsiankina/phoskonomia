@@ -3,8 +3,8 @@
 //! A service over the [`DatabaseAdapter`] PORT, like the read side in
 //! [`crate::debts`]: it validates caller input, stamps
 //! [`Provenance`] and delegates the storage to the port. Plan changes
-//! (monthly/day/term adjustment, refinance) are a separate concern and are NOT
-//! here.
+//! (monthly/day/term adjustment, refinance) are a separate concern and live
+//! in [`crate::debt_plan`].
 //!
 //! **Identity.** A debt is addressed on the wire by its `slug` (that is what
 //! [`crate::debts::DebtDto::id`] carries). The slug is derived from the name
@@ -48,8 +48,9 @@ use phosk_model::{CorrectionEvent, Debt, DebtPayment, Provenance, Source};
 
 /// The lowest day-of-month an instalment may land on.
 const MIN_DAY: u32 = 1;
-/// The highest day-of-month an instalment may land on. Short months clamp on
-/// read (see [`crate::debts`]), so the 31st is accepted here.
+/// The highest day-of-month an instalment may land on. In a shorter month the
+/// due date falls on that month's last day (see [`crate::debts`]), so the 31st
+/// is accepted here.
 const MAX_DAY: u32 = 31;
 
 /// The debt kinds the read model knows how to group and label
@@ -272,8 +273,18 @@ pub async fn edit_debt(
         }
     }
     next.provenance = Provenance::user_modified();
+    write_audited(db, &current, next, chrono::Utc::now().date_naive()).await
+}
 
-    let changes = changed_fields(&current, &next);
+/// Write `next` over `current` and append one correction event per changed
+/// field, stamped `at`. The caller has validated `next` and set its provenance.
+pub(crate) async fn write_audited(
+    db: &dyn DatabaseAdapter,
+    current: &Debt,
+    next: Debt,
+    at: NaiveDate,
+) -> Result<(), PhoskError> {
+    let changes = changed_fields(current, &next);
     db.upsert_debt(next).await?;
     for (field, old_value, new_value) in changes {
         db.record_correction(CorrectionEvent {
@@ -282,7 +293,7 @@ pub async fn edit_debt(
             field: field.to_owned(),
             old_value,
             new_value,
-            at: chrono::Utc::now().date_naive(),
+            at,
         })
         .await?;
     }
@@ -391,7 +402,7 @@ async fn apply_payment(
 /// One month of interest on `balance` at `apr`: `round(balance · apr / 12)`,
 /// exact i64 centimes. The same rounding the read side's `annualInterest` uses,
 /// so a recorded instalment and the projection agree to the centime.
-fn monthly_interest(balance: Money, apr: f64) -> Result<Money, PhoskError> {
+pub(crate) fn monthly_interest(balance: Money, apr: f64) -> Result<Money, PhoskError> {
     #[allow(clippy::cast_precision_loss)]
     let raw = balance.centimes() as f64 * apr / 12.0;
     if !raw.is_finite() {
@@ -420,7 +431,7 @@ pub fn slugify(name: &str) -> String {
 
 /// Trim the free-text fields and upper-case the kind, so `"lease"` and
 /// `"LEASE"` are the same bucket to [`crate::debts`]'s `groupLabel` map.
-fn normalized(debt: Debt) -> Debt {
+pub(crate) fn normalized(debt: Debt) -> Debt {
     Debt {
         name: debt.name.trim().to_owned(),
         lender: debt.lender.trim().to_owned(),
@@ -433,7 +444,7 @@ fn normalized(debt: Debt) -> Debt {
 }
 
 /// Reject a record the read side could not make sense of.
-fn validate(debt: &Debt) -> Result<(), PhoskError> {
+pub(crate) fn validate(debt: &Debt) -> Result<(), PhoskError> {
     if debt.name.is_empty() {
         return Err(PhoskError::Invalid("debt name is empty".to_owned()));
     }
