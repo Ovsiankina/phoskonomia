@@ -197,7 +197,21 @@ pub async fn edit_subscription(
         next.since = since;
     }
 
-    let next = normalized(next);
+    let mut next = normalized(next);
+
+    let changes = changed_fields(&current, &next);
+    if changes.is_empty() {
+        // Nothing in the merged record differs from what is stored (an
+        // all-`None` edit, or one setting fields to their current values):
+        // write nothing, so a no-op edit cannot launder itself into a user
+        // decision (no provenance rewrite, no audit event). Checked before
+        // `validate` so a no-op on a record that fails today's rules (e.g.
+        // grandfathered before a validation rule tightened) still succeeds:
+        // nothing is written either way, so there is nothing to reject.
+        tracing::debug!("edit changed nothing; leaving the record untouched");
+        return Ok(());
+    }
+
     validate(&next)?;
     if next.name != current.name {
         // The slug is frozen at creation, but a rename must not collide with
@@ -211,17 +225,6 @@ pub async fn edit_subscription(
         }
     }
 
-    let changes = changed_fields(&current, &next);
-    if changes.is_empty() {
-        // Nothing in the merged record differs from what is stored (an
-        // all-`None` edit, or one setting fields to their current values):
-        // write nothing, so a no-op edit cannot launder itself into a user
-        // decision (no provenance rewrite, no audit event).
-        tracing::debug!("edit changed nothing; leaving the record untouched");
-        return Ok(());
-    }
-
-    let mut next = next;
     next.provenance = Provenance::user_modified();
     db.upsert_subscription(next).await?;
     for (field, old_value, new_value) in changes {

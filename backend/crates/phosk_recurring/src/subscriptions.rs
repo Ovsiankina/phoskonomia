@@ -328,7 +328,8 @@ pub struct SubscriptionDetailDto {
     pub recent: Vec<SubChargeDto>,
     /// AI guidance.
     pub guidance: SubGuidanceDto,
-    /// `true` for an AI candidate (CONFIRM/DISMISS instead of cancel).
+    /// `true` for an OPEN AI candidate, not yet dismissed or confirmed
+    /// (CONFIRM/DISMISS instead of cancel).
     pub candidate: bool,
 }
 

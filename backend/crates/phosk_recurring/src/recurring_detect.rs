@@ -3,8 +3,10 @@
 //! Scans receipts for repeated same-shop / same-amount monthly charges and
 //! surfaces candidate subscriptions (`source == LlmInferred`, `status` set by
 //! the heuristic). Confirming a candidate flips it to `UserEntered` and persists
-//! it; dismissing drops it. The real LLM wiring is deferred — for now this is the
-//! rule-based pre-pass that feeds the AI panel.
+//! it; dismissing pauses it (see [`is_open_candidate`]) — it stops surfacing but
+//! is not deleted, and [`crate::lifecycle::resume_subscription`] un-dismisses it.
+//! The real LLM wiring is deferred — for now this is the rule-based pre-pass
+//! that feeds the AI panel.
 
 use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;
