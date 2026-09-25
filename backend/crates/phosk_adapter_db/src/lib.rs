@@ -34,9 +34,9 @@ use phosk_id::{
     SubscriptionId, SuggestionId,
 };
 use phosk_model::{
-    AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
-    CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Receipt, Signal, SignalOccurrence, Subscription, Transaction,
+    AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
+    CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
+    PersonalIou, Preference, Receipt, Signal, SignalOccurrence, Subscription, Transaction,
 };
 
 /// The single fat database port (ADR-000): one async, object-safe trait covering
@@ -84,6 +84,29 @@ pub trait DatabaseAdapter: Send + Sync {
     /// Returns a [`PhoskError`] if no config exists or the store fails to
     /// answer.
     async fn budget_config(&self) -> Result<BudgetConfig, PhoskError>;
+
+    /// Replace the global [`BudgetConfig`] with `cfg` and append `change` to
+    /// the budget-change history, as one operation.
+    ///
+    /// The history entry is written first and keyed by its id, so a fault
+    /// between the two writes leaves an entry the caller can re-send unchanged
+    /// (re-appending the same id replaces it rather than duplicating it) —
+    /// the history never misses a config it did not record.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store rejects either write.
+    async fn set_budget_config(
+        &self,
+        cfg: BudgetConfig,
+        change: BudgetChange,
+    ) -> Result<(), PhoskError>;
+
+    /// The global budget's change history, oldest→newest in append order
+    /// (same-day entries included). An untouched store yields an empty `Vec`.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store fails to answer.
+    async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError>;
 
     // ── Ledger ───────────────────────────────────────────────────────────────
 
@@ -363,6 +386,14 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError::NotFound`] if no such alert.
     async fn update_alert_status(&self, id: AlertId, status: &str) -> Result<(), PhoskError>;
 
+    /// Snooze an alert: set its `status` to `"snoozed"` and its `snooze` to
+    /// `snooze`, leaving every other field alone. Snoozing an already-snoozed
+    /// alert replaces the previous term.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no such alert.
+    async fn snooze_alert(&self, id: AlertId, snooze: AlertSnooze) -> Result<(), PhoskError>;
+
     // ── Recurring ────────────────────────────────────────────────────────────
 
     /// Every [`Subscription`].
@@ -604,6 +635,16 @@ mod tests {
                 savings_target: Money::from_chf(900, 0).expect("valid target"),
             })
         }
+        async fn set_budget_config(
+            &self,
+            _cfg: BudgetConfig,
+            _change: BudgetChange,
+        ) -> Result<(), PhoskError> {
+            Ok(())
+        }
+        async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError> {
+            Ok(Vec::new())
+        }
 
         async fn receipts_between(
             &self,
@@ -705,6 +746,9 @@ mod tests {
             Err(PhoskError::NotFound("alert".to_owned()))
         }
         async fn update_alert_status(&self, _id: AlertId, _status: &str) -> Result<(), PhoskError> {
+            Ok(())
+        }
+        async fn snooze_alert(&self, _id: AlertId, _snooze: AlertSnooze) -> Result<(), PhoskError> {
             Ok(())
         }
         async fn subscriptions(&self) -> Result<Vec<Subscription>, PhoskError> {

@@ -65,9 +65,10 @@ use phosk_id::{
     SubscriptionId, SuggestionId,
 };
 use phosk_model::{
-    AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
-    CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription, Transaction,
+    AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
+    CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
+    PersonalIou, Preference, Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription,
+    Transaction,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -125,8 +126,10 @@ impl SurrealDb {
             .map_err(|e| PhoskError::Invalid(format!("surreal use ns/db: {e}")))?;
         let store = Store::new(db);
         migrate::run(&store).await?;
-        // Chat lines written from now on must sort after the stored ones.
+        // Chat lines and budget changes written from now on must sort after
+        // the stored ones.
         store.resume_sequence(Bucket::Message).await?;
+        store.resume_sequence(Bucket::BudgetChange).await?;
         Ok(Self { store })
     }
 
@@ -205,6 +208,27 @@ impl DatabaseAdapter for SurrealDb {
             .get::<BudgetConfig>(Bucket::BudgetConfig, "singleton")
             .await?
             .ok_or_else(|| PhoskError::NotFound("budget config".to_owned()))
+    }
+
+    async fn set_budget_config(
+        &self,
+        cfg: BudgetConfig,
+        change: BudgetChange,
+    ) -> Result<(), PhoskError> {
+        // History first, keyed by the change id: a retry after a fault
+        // between the two writes replaces the entry instead of duplicating it.
+        self.store
+            .put_in_sequence(Bucket::BudgetChange, &change.id.to_string(), &change)
+            .await?;
+        self.store
+            .put(Bucket::BudgetConfig, "singleton", &cfg)
+            .await
+    }
+
+    async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError> {
+        self.store
+            .list_in_insertion_order(Bucket::BudgetChange, |c: &BudgetChange| c.at)
+            .await
     }
 
     // ── Ledger ─────────────────────────────────────────────────────────────────
@@ -642,6 +666,18 @@ impl DatabaseAdapter for SurrealDb {
             .await?
             .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
         a.status = status.to_owned();
+        self.store.put(Bucket::Alert, &key, &a).await
+    }
+
+    async fn snooze_alert(&self, id: AlertId, snooze: AlertSnooze) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        let mut a = self
+            .store
+            .get::<Alert>(Bucket::Alert, &key)
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
+        a.status = "snoozed".to_owned();
+        a.snooze = Some(snooze);
         self.store.put(Bucket::Alert, &key, &a).await
     }
 

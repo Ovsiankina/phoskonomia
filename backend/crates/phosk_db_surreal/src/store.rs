@@ -55,6 +55,7 @@ pub enum Bucket {
     SignalOccurrence,
     CategoryCap,
     BudgetHistory,
+    BudgetChange,
     Alert,
     Subscription,
     Charge,
@@ -82,6 +83,7 @@ impl Bucket {
             Self::SignalOccurrence => "phosk_signal_occurrence",
             Self::CategoryCap => "phosk_category_cap",
             Self::BudgetHistory => "phosk_budget_history",
+            Self::BudgetChange => "phosk_budget_change",
             Self::Alert => "phosk_alert",
             Self::Subscription => "phosk_subscription",
             Self::Charge => "phosk_charge",
@@ -97,7 +99,7 @@ impl Bucket {
     }
 
     /// Every bucket, for schema definition / migration.
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::Transaction,
         Self::Category,
         Self::BudgetConfig,
@@ -108,6 +110,7 @@ impl Bucket {
         Self::SignalOccurrence,
         Self::CategoryCap,
         Self::BudgetHistory,
+        Self::BudgetChange,
         Self::Alert,
         Self::Subscription,
         Self::Charge,
