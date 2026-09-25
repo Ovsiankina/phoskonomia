@@ -61,7 +61,7 @@ pub struct DetectionDto {
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from the port or the scan.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(as_of = %as_of))]
 pub async fn detect(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
@@ -107,7 +107,7 @@ pub async fn detect(
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if `slug` resolves to no candidate;
 /// otherwise propagates any port/write error.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(slug))]
 pub async fn confirm_candidate(db: &dyn DatabaseAdapter, slug: &str) -> Result<(), PhoskError> {
     let mut sub = open_candidate_by_slug(db, slug).await?;
     sub.source = Source::UserEntered;
@@ -121,7 +121,7 @@ pub async fn confirm_candidate(db: &dyn DatabaseAdapter, slug: &str) -> Result<(
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if `slug` resolves to no candidate;
 /// otherwise propagates any port/write error.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(slug))]
 pub async fn dismiss_candidate(db: &dyn DatabaseAdapter, slug: &str) -> Result<(), PhoskError> {
     let mut sub = open_candidate_by_slug(db, slug).await?;
     // Dismissal pauses the candidate so it no longer surfaces, WITHOUT promoting

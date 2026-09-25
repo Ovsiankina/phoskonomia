@@ -178,7 +178,7 @@ impl SurrealDb {
 impl DatabaseAdapter for SurrealDb {
     // ── Dashboard slice ────────────────────────────────────────────────────────
 
-    #[tracing::instrument(level = "debug", skip(self))]
+    #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
     async fn transactions_between(
         &self,
         from: NaiveDate,
