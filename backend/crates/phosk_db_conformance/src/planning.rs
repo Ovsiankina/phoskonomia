@@ -128,15 +128,25 @@ pub async fn set_budget_config_replaces_it_and_appends_history(
     let second = change("savings_target", 90_000, 100_000);
     db.set_budget_config(saved.clone(), second.clone()).await?;
     ensure_eq(&db.budget_config().await?, &saved, "second config")?;
-    let want = vec![first, second.clone()];
+    let want = vec![first.clone(), second.clone()];
     ensure_eq(
         &db.budget_changes().await?,
         &want,
         "history in append order",
     )?;
 
-    db.set_budget_config(saved, second).await?;
-    ensure_eq(&db.budget_changes().await?.len(), &2, "same id replaces")
+    // Re-sending the older entry replaces it where it stands: no duplicate,
+    // and it does not move behind the newer one.
+    let resent = BudgetChange {
+        new_value: Money::from_centimes(460_000),
+        ..first
+    };
+    db.set_budget_config(saved, resent.clone()).await?;
+    ensure_eq(
+        &db.budget_changes().await?,
+        &vec![resent, second],
+        "same id replaces in place",
+    )
 }
 
 /// `snooze_alert` sets the status and the term, touching nothing else.

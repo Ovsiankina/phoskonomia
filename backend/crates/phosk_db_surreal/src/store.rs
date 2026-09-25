@@ -226,8 +226,13 @@ impl Store {
     /// next insertion sequence number, so [`Store::list_in_insertion_order`] can
     /// return the bucket in the order its records were written.
     ///
-    /// Used for buckets whose port contract is ordered (chat messages): record
-    /// keys are random UUIDs and a table scan has no defined order.
+    /// Re-writing an existing key replaces its `doc` but keeps its sequence
+    /// number, so the record stays where it was first written (the in-memory
+    /// adapter replaces in place the same way).
+    ///
+    /// Used for buckets whose port contract is ordered (chat messages, budget
+    /// history): record keys are random UUIDs and a table scan has no defined
+    /// order.
     pub(crate) async fn put_in_sequence<T: Serialize + Sync>(
         &self,
         bucket: Bucket,
@@ -237,7 +242,7 @@ impl Store {
         let doc = serde_json::to_string(value)
             .map_err(|e| PhoskError::Invalid(format!("serialize {}: {e}", bucket.table())))?;
         let seq = NEXT_SEQ.fetch_add(1, Ordering::SeqCst);
-        let sql = "UPSERT type::thing($tb, $id) CONTENT { doc: $doc, seq: $seq } RETURN NONE";
+        let sql = "UPSERT type::thing($tb, $id) SET doc = $doc, seq = seq ?? $seq RETURN NONE";
         self.db
             .query(sql)
             .bind(("tb", bucket.table()))
