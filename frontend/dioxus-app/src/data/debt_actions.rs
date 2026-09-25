@@ -20,7 +20,8 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// The debt types the create/edit form offers — `phosk_debts`'s accepted
-/// kinds (a test creates one debt of each, so the two cannot drift apart).
+/// kinds (the WASM client cannot depend on that crate; a test asserts the two
+/// lists are equal, so they cannot drift apart in either direction).
 pub const DEBT_KINDS: [&str; 6] = ["LEASE", "LOAN", "CARD", "TAX", "BNPL", "MEDICAL"];
 
 /// The debt create/edit form, exactly as typed. Parsed server-side.
@@ -38,13 +39,15 @@ pub struct DebtForm {
     pub balance: String,
     /// Original amount, CHF text.
     pub orig: String,
-    /// Scheduled monthly payment, CHF text.
+    /// Scheduled monthly payment, CHF text. Create only, like `apr`, `day`
+    /// and `term`: afterwards the plan and the rate change through T17's
+    /// `phosk_debts::debt_plan` rules, which this form does not run.
     pub monthly: String,
-    /// APR in percent, e.g. `"4.9"`.
+    /// APR in percent, e.g. `"4.9"`. Create only.
     pub apr: String,
-    /// Payment day of month, `1..=31`.
+    /// Payment day of month, `1..=31`. Create only.
     pub day: String,
-    /// Term in months (`0` = revolving).
+    /// Term in months (`0` = revolving). Create only.
     pub term: String,
     /// Free note.
     pub note: String,
@@ -85,7 +88,10 @@ macro_rules! delegate {
         pub async fn $name($($arg: $ty),*) -> Result<$ret, ServerFnError> {
             #[cfg(feature = "server-deps")]
             {
-                let session = crate::data::build_session().await?;
+                // Session detail (paths, store errors) never reaches the page.
+                let session = crate::data::build_session()
+                    .await
+                    .map_err(|_| ServerFnError::new(msg::RETRY))?;
                 $inner(session.db(), $($arg),*).await
             }
             #[cfg(not(feature = "server-deps"))]
@@ -156,8 +162,13 @@ mod inner {
 
     /// Largest amount any field accepts: CHF 100'000'000.00.
     const MAX_AMOUNT: Money = Money::from_centimes(10_000_000_000);
-    /// Longest id accepted (slugs are short; anything longer is junk).
-    const MAX_ID_LEN: usize = 64;
+    /// Longest id accepted. A slug is at most as long as the name it comes
+    /// from ([`MAX_NAME`]) plus an IOU's `-<n>` suffix, so this leaves room.
+    const MAX_ID_LEN: usize = 80;
+    /// Longest name, lender or person, in characters.
+    const MAX_NAME: usize = 60;
+    /// Longest note or reason, in characters.
+    const MAX_TEXT: usize = 280;
 
     /// A fixed failure text.
     fn fail(text: &'static str) -> ServerFnError {
@@ -220,6 +231,15 @@ mod inner {
         Ok(f64::from(bp) / 10_000.0)
     }
 
+    /// `text` unless it is longer than `max` characters, else `bad`.
+    fn bounded(text: String, max: usize, bad: &'static str) -> Result<String, ServerFnError> {
+        if text.chars().count() <= max {
+            Ok(text)
+        } else {
+            Err(fail(bad))
+        }
+    }
+
     /// A small whole number in `range`, else `bad`.
     fn number(
         text: &str,
@@ -232,27 +252,25 @@ mod inner {
         }
     }
 
-    /// The typed debt form, parsed. Kind is checked against [`DEBT_KINDS`].
-    struct ParsedDebt {
+    /// The fields both create and edit write, parsed and bounded.
+    struct DebtFields {
+        name: String,
+        lender: String,
         kind: String,
         orig: Money,
-        monthly: Money,
-        apr: f64,
-        day: u32,
-        term: u32,
+        note: String,
     }
 
-    fn parse_debt(f: &DebtForm) -> Result<ParsedDebt, ServerFnError> {
+    fn debt_fields(f: DebtForm) -> Result<DebtFields, ServerFnError> {
         let kind = f.kind.trim().to_ascii_uppercase();
         if !DEBT_KINDS.contains(&kind.as_str()) {
             return Err(fail(msg::KIND));
         }
-        Ok(ParsedDebt {
+        Ok(DebtFields {
+            name: bounded(f.name, MAX_NAME, msg::NAME)?,
+            lender: bounded(f.lender, MAX_NAME, msg::LENDER)?,
             orig: amount(&f.orig, msg::ORIG)?,
-            monthly: amount(&f.monthly, msg::MONTHLY)?,
-            apr: apr(&f.apr)?,
-            day: number(&f.day, 1..=31, msg::DAY)?,
-            term: number(&f.term, 0..=1200, msg::TERM)?,
+            note: bounded(f.note, MAX_TEXT, msg::NOTE)?,
             kind,
         })
     }
@@ -272,20 +290,25 @@ mod inner {
         db: &dyn DatabaseAdapter,
         form: DebtForm,
     ) -> Result<String, ServerFnError> {
-        let p = parse_debt(&form)?;
+        let balance = amount(&form.balance, msg::BALANCE)?;
+        let monthly = amount(&form.monthly, msg::MONTHLY)?;
+        let apr = apr(&form.apr)?;
+        let day = number(&form.day, 1..=31, msg::DAY)?;
+        let term = number(&form.term, 0..=1200, msg::TERM)?;
+        let p = debt_fields(form)?;
         let input = NewDebt {
-            name: form.name,
-            lender: form.lender,
+            name: p.name,
+            lender: p.lender,
             glyph: glyph(&p.kind).to_owned(),
             kind: p.kind,
-            balance: amount(&form.balance, msg::BALANCE)?,
+            balance,
             orig: p.orig,
-            monthly: p.monthly,
-            apr: p.apr,
-            day: p.day,
-            term: p.term,
+            monthly,
+            apr,
+            day,
+            term,
             since: crate::data::today(),
-            note: form.note,
+            note: p.note,
         };
         debt_write::create_debt(db, input)
             .await
@@ -298,18 +321,15 @@ mod inner {
         form: DebtForm,
     ) -> Result<(), ServerFnError> {
         let id = slug(msg::DEBT_GONE, &id)?;
-        let p = parse_debt(&form)?;
-        // Balance, status, glyph and since stay as they are (see `DebtForm`).
+        let p = debt_fields(form)?;
+        // Balance, plan (monthly / day / term), APR, status, glyph and since
+        // stay as they are (see `DebtForm`): nothing here re-sends them.
         let edit = DebtEdit {
-            name: Some(form.name),
-            lender: Some(form.lender),
+            name: Some(p.name),
+            lender: Some(p.lender),
             kind: Some(p.kind),
             orig: Some(p.orig),
-            monthly: Some(p.monthly),
-            apr: Some(p.apr),
-            day: Some(p.day),
-            term: Some(p.term),
-            note: Some(form.note),
+            note: Some(p.note),
             ..DebtEdit::default()
         };
         debt_write::edit_debt(db, id, edit)
@@ -376,10 +396,10 @@ mod inner {
         let input = NewPersonalIou {
             dir: dir(&form.dir)?,
             amount: amount(&form.amount, msg::IOU_AMOUNT)?,
-            person: form.person,
+            person: bounded(form.person, MAX_NAME, msg::PERSON)?,
             // Blank: the service derives the initials from the name.
             initials: String::new(),
-            reason: form.reason,
+            reason: bounded(form.reason, MAX_TEXT, msg::REASON)?,
             since: crate::data::today(),
         };
         iou_write::create_personal_iou(db, input)
@@ -396,8 +416,8 @@ mod inner {
         let edit = PersonalIouEdit {
             dir: Some(dir(&form.dir)?),
             of: Some(amount(&form.amount, msg::IOU_AMOUNT)?),
-            person: Some(form.person),
-            reason: Some(form.reason),
+            person: Some(bounded(form.person, MAX_NAME, msg::PERSON)?),
+            reason: Some(bounded(form.reason, MAX_TEXT, msg::REASON)?),
             ..PersonalIouEdit::default()
         };
         iou_write::edit_personal_iou(db, id, edit)
@@ -449,6 +469,11 @@ mod msg {
     pub(super) const APR: &str = "APR: enter a percentage from zero to one hundred, like 4.9.";
     pub(super) const DAY: &str = "Payment day: enter a day of the month.";
     pub(super) const TERM: &str = "Term: enter a whole number of months, zero if revolving.";
+    pub(super) const NAME: &str = "Name: use at most sixty characters.";
+    pub(super) const LENDER: &str = "Lender: use at most sixty characters.";
+    pub(super) const NOTE: &str = "Note: use at most two hundred eighty characters.";
+    pub(super) const PERSON: &str = "Person: use at most sixty characters.";
+    pub(super) const REASON: &str = "Reason: use at most two hundred eighty characters.";
     pub(super) const KIND: &str = "Type: pick one of the listed debt types.";
     pub(super) const DEBT_INVALID: &str = "Could not save the debt: the name must be new and not \
         blank, the lender filled in, the original amount above zero and the balance no more than \

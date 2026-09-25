@@ -26,8 +26,10 @@
 //!     and IOU create / edit / delete / partial payment / settle go through
 //!     `data::debt_actions`; the forms live in `pages::debt_forms`, each in its
 //!     own page-level signal, and every success refetches the reads it feeds.
-//!     REFINANCE / ADJUST PLAN still render inert (no UI for T17's plan changes
-//!     yet); REMIND had no backend and is replaced by RECORD PAYMENT.
+//!     The plan (monthly / day / term) and the APR are create-only: changing
+//!     them must run T17's `debt_plan` rules, which have no UI yet, so
+//!     REFINANCE / ADJUST PLAN render disabled. REMIND had no backend and is
+//!     replaced by RECORD PAYMENT.
 //!   * SVG charts (`PayoffTrajectory`, `DecayLine`, `NetBeam`) are hand-written
 //!     inline here, faithful to the JSX (Debts owns these page-specific charts;
 //!     they are not shared F2 primitives). `Spark` (the card balance trace) IS a
@@ -41,7 +43,7 @@ use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg, Spark};
 use crate::components::shell::{AiPanel, TopBar};
-use crate::components::states::Awaiting;
+use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::chf;
 use crate::data::cycle::{get_cycle, CycleDto};
 use crate::data::debt_actions::{
@@ -170,6 +172,7 @@ pub fn DebtsPage() -> Element {
     let mut iou_edit = use_signal(Panel::<IouForm>::default);
     let iou_pay = use_signal(Panel::<PayDraft>::default);
     let iou_row = use_signal(Panel::<bool>::default);
+    let iou_settle = use_signal(Panel::<bool>::default);
 
     // Responsive dock vs drawer: narrow (<1280px) drawers the inspector.
     let narrow = use_signal(|| false);
@@ -250,18 +253,42 @@ pub fn DebtsPage() -> Element {
         submit(debt_pay, action, refresh_debts);
     });
     let delete_debt_cb = use_callback(move |id: String| {
-        submit(debt_row, delete_debt(id), on_debt_deleted);
+        let (mut edit, mut pay) = (debt_edit, debt_pay);
+        let action = async move {
+            delete_debt(id.clone()).await?;
+            // No panel may stay open on a record that is gone.
+            if edit.peek().is_open_for(&id) {
+                edit.write().close();
+            }
+            if pay.peek().is_open_for(&id) {
+                pay.write().close();
+            }
+            Ok(())
+        };
+        submit(debt_row, action, on_debt_deleted);
     });
     let pay_iou_cb = use_callback(move |(id, d): (String, PayDraft)| {
         submit(iou_pay, pay_iou(id, d.amount), refresh_ious);
     });
     let delete_iou_cb = use_callback(move |id: String| {
-        submit(iou_row, delete_iou(id), refresh_ious);
+        let (mut edit, mut pay) = (iou_edit, iou_pay);
+        let action = async move {
+            delete_iou(id.clone()).await?;
+            if edit.peek().is_open_for(&id) {
+                edit.write().close();
+            }
+            if pay.peek().is_open_for(&id) {
+                pay.write().close();
+            }
+            Ok(())
+        };
+        submit(iou_row, action, refresh_ious);
     });
+    // Its own panel: settling one IOU never disarms another's DELETE confirm.
     let settle_iou_cb = use_callback(move |id: String| {
-        let mut row = iou_row;
-        row.write().open(&id, false);
-        submit(iou_row, settle_iou(id), refresh_ious);
+        let mut settle = iou_settle;
+        settle.write().open(&id, false);
+        submit(iou_settle, settle_iou(id), refresh_ious);
     });
 
     // ---- read resources into owned snapshots (clone out of the borrow) ----
@@ -639,6 +666,8 @@ pub fn DebtsPage() -> Element {
                                         }
                                     }
                                 }
+                            } else if debts_v.is_some() {
+                                Awaiting { label: "OPEN BALANCES".to_string(), legend: "EMPTY".to_string(), message: "No debts. Add one with + NEW DEBT.".to_string() }
                             } else {
                                 Awaiting { label: "OPEN BALANCES".to_string(), loading: debts_loading, tone: "coral".to_string() }
                             }
@@ -682,6 +711,7 @@ pub fn DebtsPage() -> Element {
                                                         p: p.clone(),
                                                         iou_pay,
                                                         iou_row,
+                                                        iou_settle,
                                                         on_edit: move |p: PersonalIouDto| iou_edit.write().open(&p.id, iou_draft(&p)),
                                                         on_pay: pay_iou_cb,
                                                         on_settle: settle_iou_cb,
@@ -700,6 +730,7 @@ pub fn DebtsPage() -> Element {
                                                         p: p.clone(),
                                                         iou_pay,
                                                         iou_row,
+                                                        iou_settle,
                                                         on_edit: move |p: PersonalIouDto| iou_edit.write().open(&p.id, iou_draft(&p)),
                                                         on_pay: pay_iou_cb,
                                                         on_settle: settle_iou_cb,
@@ -708,6 +739,8 @@ pub fn DebtsPage() -> Element {
                                                 }
                                             }
                                         }
+                                    } else if ious_v.is_some() {
+                                        Awaiting { label: "PERSONAL IOUS".to_string(), legend: "EMPTY".to_string(), message: "No IOUs. Add one with + NEW IOU.".to_string() }
                                     } else {
                                         Awaiting { label: "PERSONAL IOUS".to_string(), loading: ious_loading }
                                     }
@@ -1409,9 +1442,8 @@ fn DebtRow(
 
 // ════════════════════════════ INSPECTOR (right dock) ════════════════════════
 
-/// Debt inspector (`DebtInspector` in the JSX). The dead REST mutations
-/// (PAY EXTRA / REFINANCE / ADJUST PLAN) have no F3 server fn yet, so the buttons
-/// render (faithful DOM) but are inert until those mutations land.
+/// Debt inspector (`DebtInspector` in the JSX). REFINANCE / ADJUST PLAN have
+/// no UI for T17's `debt_plan` yet, so they render (faithful DOM) disabled.
 #[component]
 fn DebtInspector(
     d: Option<DebtDto>,
@@ -1592,9 +1624,9 @@ fn DebtInspector(
                     span { class: "dx-note", "PAID OFF · NO PAYMENT DUE" }
                 }
                 if refinance {
-                    button { class: if d.status == "high" { "gbtn coral" } else { "gbtn" }, "REFINANCE" }
+                    button { class: if d.status == "high" { "gbtn coral" } else { "gbtn" }, r#type: "button", disabled: true, "REFINANCE" }
                 } else {
-                    button { class: "gbtn", "ADJUST PLAN" }
+                    button { class: "gbtn", r#type: "button", disabled: true, "ADJUST PLAN" }
                 }
             }
             PayField { panel: debt_pay, target: d.id.clone(), label: pay_label, on_pay }
@@ -1713,6 +1745,7 @@ fn PersonCard(
     p: PersonalIouDto,
     iou_pay: Signal<Panel<PayDraft>>,
     iou_row: Signal<Panel<bool>>,
+    iou_settle: Signal<Panel<bool>>,
     on_edit: EventHandler<PersonalIouDto>,
     on_pay: Callback<(String, PayDraft), ()>,
     on_settle: Callback<String>,
@@ -1747,7 +1780,14 @@ fn PersonCard(
         chf(p.of, 0)
     );
     let (pay_id, settle_id, edit_p) = (p.id.clone(), p.id.clone(), p.clone());
-    let row_busy = iou_row.read().saving;
+    // One settle runs at a time; its pending line and error show on its card.
+    let settle = iou_settle.read().clone();
+    let settle_busy = settle.saving;
+    let (settling_here, settle_error) = if settle.is_open_for(&p.id) {
+        (settle.saving, settle.error)
+    } else {
+        (false, None)
+    };
 
     rsx! {
         div { class: "{dir_cls}",
@@ -1782,11 +1822,12 @@ fn PersonCard(
                         button {
                             class: "gbtn p",
                             r#type: "button",
-                            disabled: row_busy,
+                            disabled: settle_busy,
                             onclick: move |_| on_settle.call(settle_id.clone()),
                             "MARK SETTLED"
                         }
                     }
+                    InlineStatus { pending: settling_here, error: settle_error }
                 }
             }
             PayField { panel: iou_pay, target: p.id.clone(), label: "Payment · CHF".to_string(), on_pay }

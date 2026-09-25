@@ -103,25 +103,16 @@ where
     });
 }
 
-/// An APR rate as the percent text the form edits (`0.039` → `"3.9"`).
-fn percent_text(apr: f64) -> String {
-    let s = format!("{:.2}", apr * 100.0);
-    s.trim_end_matches('0').trim_end_matches('.').to_owned()
-}
-
-/// The edit form's starting values for `d`.
+/// The edit form's starting values for `d`. Balance, plan and APR are
+/// create-only (see `DebtForm`), so the edit draft leaves them blank.
 pub fn debt_draft(d: &DebtDto) -> DebtForm {
     DebtForm {
         name: d.name.clone(),
         lender: d.lender.clone(),
         kind: d.kind.clone(),
-        balance: cap_input_text(d.balance),
         orig: cap_input_text(d.orig),
-        monthly: cap_input_text(d.monthly),
-        apr: percent_text(d.apr),
-        day: d.day.to_string(),
-        term: d.term.to_string(),
         note: d.note.clone(),
+        ..DebtForm::default()
     }
 }
 
@@ -244,15 +235,19 @@ pub fn DebtFormPanel(panel: Signal<Panel<DebtForm>>, on_saved: Callback<()>) -> 
                     }
                 }
             }
-            // The balance is set once; afterwards only payments move it.
+            // The balance is set once; afterwards only payments move it. The
+            // plan and the APR are set once too: changing them is T17's
+            // adjust-plan / refinance, which has no UI yet.
             if target.is_empty() {
                 Field { label: "Balance · CHF", value: f.balance, num: true, busy, on_input: set(|d, v| d.balance = v) }
             }
             Field { label: "Original · CHF", value: f.orig, num: true, busy, on_input: set(|d, v| d.orig = v) }
-            Field { label: "Monthly · CHF", value: f.monthly, num: true, busy, on_input: set(|d, v| d.monthly = v) }
-            Field { label: "APR · %", value: f.apr, num: true, busy, on_input: set(|d, v| d.apr = v) }
-            Field { label: "Payment day", value: f.day, num: true, busy, on_input: set(|d, v| d.day = v) }
-            Field { label: "Term · months", value: f.term, num: true, busy, on_input: set(|d, v| d.term = v) }
+            if target.is_empty() {
+                Field { label: "Monthly · CHF", value: f.monthly, num: true, busy, on_input: set(|d, v| d.monthly = v) }
+                Field { label: "APR · %", value: f.apr, num: true, busy, on_input: set(|d, v| d.apr = v) }
+                Field { label: "Payment day", value: f.day, num: true, busy, on_input: set(|d, v| d.day = v) }
+                Field { label: "Term · months", value: f.term, num: true, busy, on_input: set(|d, v| d.term = v) }
+            }
             Field { label: "Note", value: f.note, wide: true, busy, on_input: set(|d, v| d.note = v) }
             FormActions { busy, error: p.error, on_cancel: move |()| panel.write().close() }
         }
