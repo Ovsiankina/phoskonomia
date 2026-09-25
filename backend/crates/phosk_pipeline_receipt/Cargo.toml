@@ -26,8 +26,9 @@ phosk_adapter_ocr = { path = "../phosk_adapter_ocr" }
 phosk_adapter_llm = { path = "../phosk_adapter_llm" }
 phosk_adapter_storage = { path = "../phosk_adapter_storage" }
 # phosk_ai: the effect-typed approval gate. The pipeline's terminal step builds an
-# AiSuggestion proposal and ENQUEUES it (db.enqueue_suggestion) — it reuses the
-# AI crate's CONFIDENCE_THRESHOLD so the coral-flag rule is defined in one place.
+# AiSuggestion proposal and ENQUEUES it (db.enqueue_suggestion) — the coral-flag
+# rule (phosk_model::LOW_CONFIDENCE_THRESHOLD / is_low_confidence) is defined once
+# in phosk_model, the single source of truth every layer reads.
 phosk_ai = { path = "../phosk_ai" }
 # infer: pure-Rust magic-byte MIME sniff for the hostile-input validation gate.
 infer = { workspace = true }

@@ -143,7 +143,7 @@ async fn ai_panel_feed_low_confidence_item_is_below_threshold_but_present() {
     let flagged: Vec<&AiFeedItemDto> = panel
         .feed
         .iter()
-        .filter(|f| f.conf.map(|c| c < 0.7).unwrap_or(false))
+        .filter(|f| f.conf.is_some_and(phosk_model::is_low_confidence))
         .collect();
     // No seeded item is < 0.7, but the running (conf == None) item must still be present.
     assert!(

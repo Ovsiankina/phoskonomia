@@ -4,7 +4,8 @@
 //!
 //! - [`Provenance`] is embedded in every machine-derivable entity: where a value
 //!   came from ([`Source`]) and how confident the machine is ([`Provenance::confidence`]).
-//!   Lines below `0.7` are "low-confidence" and the UI flags them in coral.
+//!   Lines below `0.7`, or with a NaN/out-of-range confidence, are "low-confidence"
+//!   and the UI flags them in coral (see [`is_low_confidence`]).
 //! - [`CorrectionEvent`] is a SEPARATE append-only audit log — one row per
 //!   user edit (which entity, which field, old → new, when). It is not stored on
 //!   the entity and is not a full field-by-field history.
@@ -30,10 +31,34 @@ pub enum Source {
     RuleGenerated,
 }
 
+/// The confidence floor below which a machine-derived value is "low-confidence"
+/// and surfaced for review (the coral flag).
+///
+/// This is the single source of truth for that floor: every layer that needs
+/// it (backend AI tools, the WASM UI) reads this constant rather than keeping
+/// its own copy. Compare against it with [`is_low_confidence`], not a bare
+/// `<` — a bare comparison lets a NaN/out-of-range confidence read as
+/// "confident" (see [`is_low_confidence`]).
+pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.7;
+
+/// Whether a machine confidence value counts as low-confidence.
+///
+/// `confidence` is expected in `0.0..=1.0`; model output is hostile input, so
+/// anything outside that range — NaN, ±infinity, negative, or above `1.0` — is
+/// treated as low-confidence too, never as confident. A bare
+/// `confidence < LOW_CONFIDENCE_THRESHOLD` comparison does not catch this:
+/// every comparison with NaN is `false`, so a NaN confidence would otherwise
+/// compare as "confident".
+#[must_use]
+pub fn is_low_confidence(confidence: f64) -> bool {
+    !(0.0..=1.0).contains(&confidence) || confidence < LOW_CONFIDENCE_THRESHOLD
+}
+
 /// Where a value came from + how confident the machine is about it.
 ///
 /// `confidence` is in `0.0..=1.0`. User-authored values are `1.0`; values below
-/// `0.7` are "low-confidence" and surfaced for review (see [`Provenance::is_low_confidence`]).
+/// [`LOW_CONFIDENCE_THRESHOLD`] are "low-confidence" and surfaced for review
+/// (see [`Provenance::is_low_confidence`]).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Provenance {
     /// The origin of the value.
@@ -61,10 +86,12 @@ impl Provenance {
         }
     }
 
-    /// Whether this value is below the `0.7` review threshold (the coral flag).
+    /// Whether this value is below the [`LOW_CONFIDENCE_THRESHOLD`] review
+    /// threshold (the coral flag). See [`is_low_confidence`] for how an
+    /// out-of-range confidence (NaN included) is handled.
     #[must_use]
     pub fn is_low_confidence(&self) -> bool {
-        self.confidence < 0.7
+        is_low_confidence(self.confidence)
     }
 }
 
@@ -115,6 +142,60 @@ mod tests {
             !Provenance {
                 source: Source::Ocr,
                 confidence: 0.70
+            }
+            .is_low_confidence()
+        );
+    }
+
+    // ── is_low_confidence: hostile-input confidence values ──────────────────
+
+    #[test]
+    fn nan_confidence_is_low_confidence() {
+        assert!(
+            is_low_confidence(f64::NAN),
+            "NaN must never compare as confident"
+        );
+    }
+
+    #[test]
+    fn positive_infinity_confidence_is_low_confidence() {
+        assert!(is_low_confidence(f64::INFINITY));
+    }
+
+    #[test]
+    fn negative_infinity_confidence_is_low_confidence() {
+        assert!(is_low_confidence(f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn negative_confidence_is_low_confidence() {
+        assert!(is_low_confidence(-0.1));
+    }
+
+    #[test]
+    fn confidence_above_one_is_low_confidence() {
+        assert!(is_low_confidence(1.5));
+    }
+
+    #[test]
+    fn confidence_exactly_at_threshold_is_not_low_confidence() {
+        assert!(!is_low_confidence(LOW_CONFIDENCE_THRESHOLD));
+    }
+
+    #[test]
+    fn a_normal_confident_value_is_not_low_confidence() {
+        assert!(!is_low_confidence(0.9));
+    }
+
+    #[test]
+    fn nan_provenance_is_low_confidence_not_confident() {
+        // The regression this whole predicate exists for: a bare `confidence
+        // < LOW_CONFIDENCE_THRESHOLD` on `Provenance` would let a NaN reading
+        // (hostile model output) through as "confident".
+        assert!(
+            Provenance {
+                source: Source::LlmInferred,
+                confidence: f64::NAN,
             }
             .is_low_confidence()
         );

@@ -414,7 +414,7 @@ async fn correct_line_flips_provenance_to_user_modified() {
         .await
         .expect("transaction_lines t1 ok");
     assert!(
-        dto.lines[2].confidence >= 0.7,
+        !phosk_model::is_low_confidence(dto.lines[2].confidence),
         "a user-modified line is full-confidence; the coral flag clears"
     );
 
