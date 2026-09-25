@@ -142,13 +142,19 @@ pub fn line_total(qty: f64, unit_price: Money) -> Result<Money, PhoskError> {
     Ok(Money::from_centimes(rounded as i64))
 }
 
-/// Longest accepted line name, in characters. Mirrors the wire layer's
-/// `MAX_NAME_CHARS` in `dioxus-app/src/data/transactions.rs::line_fix`, so the
-/// service is never laxer than the UI it backs.
-const MAX_NAME_CHARS: usize = 120;
-/// Longest accepted line category, in characters. Mirrors the wire layer's
-/// `MAX_CATEGORY_CHARS`.
-const MAX_CATEGORY_CHARS: usize = 60;
+/// Longest accepted line name, in characters. The wire layer
+/// (`dioxus-app/src/data/transactions.rs::line_fix`) reuses this constant, so
+/// the service is never laxer than the UI it backs.
+pub const MAX_NAME_CHARS: usize = 120;
+/// Longest accepted line category, in characters. Reused by the wire layer's
+/// `line_fix` module.
+pub const MAX_CATEGORY_CHARS: usize = 60;
+/// Largest accepted quantity (pieces or weighed units). Reused by the wire
+/// layer's `line_fix` module.
+pub const MAX_QTY: f64 = 100_000.0;
+/// Largest accepted unit price: CHF 1'000'000, in centimes. Reused by the
+/// wire layer's `line_fix` module.
+pub const MAX_UNIT_PRICE_CENTIMES: i64 = 100_000_000;
 
 /// Correct a single line field (records a `CorrectionEvent`, updates the line,
 /// flips its provenance to `UserModified`). Write path.
@@ -172,6 +178,13 @@ pub async fn correct_line(
     let old_value = field_value(&current, field)?;
 
     apply_field(db, &mut current, field, new_value).await?;
+    // name/category are stored trimmed; log the normalised value that was
+    // actually written, not the raw (possibly padded) input.
+    let logged_value = match field {
+        "name" => current.name.clone(),
+        "category" => current.category.clone(),
+        _ => new_value.to_owned(),
+    };
     // Any user touch re-derives the (backend-owned) total and clears the
     // low-confidence flag: the line is now user-reviewed at full confidence.
     current.line_total = line_total(current.qty, current.unit_price)?;
@@ -183,7 +196,7 @@ pub async fn correct_line(
         entity_id: line.to_string(),
         field: field.to_owned(),
         old_value,
-        new_value: new_value.to_owned(),
+        new_value: logged_value,
         at: chrono::Utc::now().date_naive(),
     })
     .await
@@ -265,6 +278,12 @@ async fn apply_field(
                     line.name
                 )));
             }
+            if qty > MAX_QTY {
+                return Err(PhoskError::Invalid(format!(
+                    "line `{}`: qty is larger than {MAX_QTY}",
+                    line.name
+                )));
+            }
             line.qty = qty;
         }
         "unit_price" => {
@@ -274,6 +293,12 @@ async fn apply_field(
             if centimes < 0 {
                 return Err(PhoskError::Invalid(format!(
                     "line `{}`: unit price must not be negative",
+                    line.name
+                )));
+            }
+            if centimes > MAX_UNIT_PRICE_CENTIMES {
+                return Err(PhoskError::Invalid(format!(
+                    "line `{}`: unit price is larger than {MAX_UNIT_PRICE_CENTIMES} centimes",
                     line.name
                 )));
             }
