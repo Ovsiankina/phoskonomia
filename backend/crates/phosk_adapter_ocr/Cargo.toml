@@ -23,6 +23,10 @@ tracing = { version = "0.1", features = ["release_max_level_off"] }
 tokio = { workspace = true }
 # Test-only: assert the result types round-trip across the serde boundary.
 serde_json = { workspace = true }
+# Test-only: compare a fixture's confidence against the shared low-confidence
+# threshold rather than a copied `0.7` literal. Not a production dependency —
+# the port itself stays defined only in terms of phosk_core (see above).
+phosk_model = { path = "../phosk_model" }
 
 [lints]
 workspace = true

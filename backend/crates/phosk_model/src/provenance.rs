@@ -4,7 +4,8 @@
 //!
 //! - [`Provenance`] is embedded in every machine-derivable entity: where a value
 //!   came from ([`Source`]) and how confident the machine is ([`Provenance::confidence`]).
-//!   Lines below `0.7` are "low-confidence" and the UI flags them in coral.
+//!   Lines below `0.7`, or with a NaN/out-of-range confidence, are "low-confidence"
+//!   and the UI flags them in coral (see [`is_low_confidence`]).
 //! - [`CorrectionEvent`] is a SEPARATE append-only audit log — one row per
 //!   user edit (which entity, which field, old → new, when). It is not stored on
 //!   the entity and is not a full field-by-field history.

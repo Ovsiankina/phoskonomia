@@ -129,7 +129,7 @@ async fn get_transaction_lines_returns_the_parsed_receipt() {
         .find(|x| x.name == "Bread (unclear)")
         .expect("line");
     assert!(
-        bread.confidence < 0.7,
+        phosk_model::is_low_confidence(bread.confidence),
         "the flagged line keeps its confidence"
     );
 

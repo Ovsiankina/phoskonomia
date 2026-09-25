@@ -82,33 +82,18 @@ fn is_low_conf(c: f64) -> bool {
     phosk_model::is_low_confidence(c)
 }
 
-#[cfg(test)]
-mod is_low_conf_tests {
-    use super::is_low_conf;
-
-    #[test]
-    fn nan_confidence_is_low_confidence() {
-        assert!(is_low_conf(f64::NAN));
-    }
-
-    #[test]
-    fn a_normal_confident_value_is_not_low_confidence() {
-        assert!(!is_low_conf(0.9));
-    }
-}
-
 /// Confidence tone (React `ConfDot`): `>=0.85` ok, `>=0.7` blue, else `warn`.
 ///
 /// A low reading is a caution, so it takes the canonical `--warn` flag rather
 /// than coral (`alert`): several flagged lines must not multiply the page's one
 /// coral moment.
 fn conf_tone(c: f64) -> &'static str {
-    if c >= 0.85 {
-        "ok"
-    } else if !is_low_conf(c) {
-        "blue"
-    } else {
+    if is_low_conf(c) {
         "warn"
+    } else if c >= 0.85 {
+        "ok"
+    } else {
+        "blue"
     }
 }
 
@@ -984,9 +969,15 @@ fn ReceiptScreen(
     } else {
         t.item_count.to_string()
     };
-    let conf_pct = avg_conf.map_or(0, |c| (c * 100.0).round() as i64);
+    let conf_pct = avg_conf.map_or(0, |c| {
+        if c.is_nan() {
+            0
+        } else {
+            ((c * 100.0).round().clamp(0.0, 100.0)) as i64
+        }
+    });
     let conf_w = format!("{conf_pct}%");
-    let conf_bar_bg = if avg_conf.is_some_and(|c| c >= 0.85) {
+    let conf_bar_bg = if avg_conf.is_some_and(|c| !is_low_conf(c) && c >= 0.85) {
         "var(--ok)"
     } else {
         "var(--warn)"
@@ -1436,5 +1427,50 @@ fn AiPanelTxn(
             on_toggle: move |()| on_toggle.call(()),
             on_track: move |id: String| on_track.call(id),
         }
+    }
+}
+
+#[cfg(test)]
+mod is_low_conf_tests {
+    use super::is_low_conf;
+
+    #[test]
+    fn nan_confidence_is_low_confidence() {
+        assert!(is_low_conf(f64::NAN));
+    }
+
+    #[test]
+    fn a_normal_confident_value_is_not_low_confidence() {
+        assert!(!is_low_conf(0.9));
+    }
+}
+
+#[cfg(test)]
+mod conf_tone_tests {
+    use super::conf_tone;
+
+    #[test]
+    fn out_of_range_confidence_is_warn() {
+        assert_eq!(conf_tone(1.5), "warn");
+    }
+
+    #[test]
+    fn positive_infinity_confidence_is_warn() {
+        assert_eq!(conf_tone(f64::INFINITY), "warn");
+    }
+
+    #[test]
+    fn nan_confidence_is_warn() {
+        assert_eq!(conf_tone(f64::NAN), "warn");
+    }
+
+    #[test]
+    fn high_confidence_is_ok() {
+        assert_eq!(conf_tone(0.9), "ok");
+    }
+
+    #[test]
+    fn mid_confidence_is_blue() {
+        assert_eq!(conf_tone(0.75), "blue");
     }
 }

@@ -568,12 +568,8 @@ pub(crate) async fn list_recurring_candidates_with(
         .candidates
         .into_iter()
         .map(|c| RecurringCandidateDto {
-            // The model's own 0.7 review threshold, not a copy of it.
-            low_confidence: phosk_model::Provenance {
-                source: phosk_model::Source::LlmInferred,
-                confidence: c.confidence,
-            }
-            .is_low_confidence(),
+            // The model's own review threshold, not a copy of it.
+            low_confidence: phosk_model::is_low_confidence(c.confidence),
             id: c.id,
             name: c.name,
             amount: c.amount,

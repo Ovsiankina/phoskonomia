@@ -21,9 +21,9 @@
 //!   pipeline). A write tool that wrote to the DB would be a bug; the type makes
 //!   that impossible to do by accident — these fns hand back data, never a commit.
 //!
-//! Low-confidence (`< 0.7`) proposals are still returned, but carry
-//! [`ProposedWrite::low_confidence`] `== true` so the approval UI can coral-flag
-//! them (ADR confidence rule).
+//! Low-confidence (`< 0.7`, or NaN/out-of-range — see [`is_low_confidence`])
+//! proposals are still returned, but carry [`ProposedWrite::low_confidence`]
+//! `== true` so the approval UI can coral-flag them (ADR confidence rule).
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
