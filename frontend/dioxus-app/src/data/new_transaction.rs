@@ -66,7 +66,7 @@ pub struct CreatedTxnDto {
 /// `phosk_ledger::transactions::create_transaction` (validation, derived
 /// totals, `UserEntered` provenance). Failures from the entry itself carry a
 /// short message written for the page (see [`create_error_text`]); a failure
-/// to open the store (`build_session`) passes its own text through for now.
+/// to open the store (`build_session`) is the fixed "unavailable" line (503).
 #[server]
 pub async fn create_transaction(form: NewTxnForm) -> Result<CreatedTxnDto, ServerFnError> {
     #[cfg(feature = "server-deps")]
