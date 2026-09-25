@@ -30,6 +30,10 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
     let mut itemised = use_signal(|| false);
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
+    // One stable key per line row, parallel to `form.lines`, so REMOVE never
+    // hands a row's DOM state to its neighbour.
+    let mut keys = use_signal(Vec::<u64>::new);
+    let mut next_key = use_signal(|| 0_u64);
 
     let names: Option<Vec<String>> = match &*cats.read() {
         Some(Ok(list)) => Some(list.iter().map(|c| c.name.clone()).collect()),
@@ -78,6 +82,7 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
     let busy = pending();
     let items = itemised();
     let f = form.read().clone();
+    let row_keys = keys.read().clone();
     let mode_cls = |on: bool| if on { "gbtn p" } else { "gbtn" };
 
     rsx! {
@@ -128,15 +133,18 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
                 button { class: mode_cls(!items), disabled: busy, onclick: move |_| itemised.set(false), "TOTAL" }
                 button { class: mode_cls(items), disabled: busy, onclick: move |_| itemised.set(true), "ITEMS" }
             }
+            p { class: "ntx-hint",
+                "Amounts in CHF with a dot, e.g. 4.20 (4,20 is refused). Quantity takes 0.5 or 0,5."
+            }
             if items {
-                for (i , l) in f.lines.iter().cloned().enumerate() {
-                    div { key: "{i}", class: "lfix-grid ntx-line",
+                for (i , (l , k)) in f.lines.iter().cloned().zip(row_keys.iter().copied()).enumerate() {
+                    div { key: "{k}", class: "lfix-grid ntx-line",
                         label { class: "lfix-f",
                             span { class: "k", "Item {i + 1}" }
                             input {
                                 value: "{l.name}",
                                 disabled: busy,
-                                oninput: move |e| form.write().lines[i].name = e.value(),
+                                oninput: move |e| if let Some(l) = form.write().lines.get_mut(i) { l.name = e.value(); },
                             }
                         }
                         label { class: "lfix-f",
@@ -146,7 +154,7 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
                                 inputmode: "decimal",
                                 value: "{l.qty}",
                                 disabled: busy,
-                                oninput: move |e| form.write().lines[i].qty = e.value(),
+                                oninput: move |e| if let Some(l) = form.write().lines.get_mut(i) { l.qty = e.value(); },
                             }
                         }
                         label { class: "lfix-f",
@@ -156,14 +164,14 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
                                 inputmode: "decimal",
                                 value: "{l.unit_price}",
                                 disabled: busy,
-                                oninput: move |e| form.write().lines[i].unit_price = e.value(),
+                                oninput: move |e| if let Some(l) = form.write().lines.get_mut(i) { l.unit_price = e.value(); },
                             }
                         }
                         label { class: "lfix-f",
                             span { class: "k", "Line category" }
                             select {
                                 disabled: busy,
-                                onchange: move |e| form.write().lines[i].category = e.value(),
+                                onchange: move |e| if let Some(l) = form.write().lines.get_mut(i) { l.category = e.value(); },
                                 option { value: "", selected: l.category.is_empty(), "Same as entry" }
                                 for n in names.iter() {
                                     option { key: "{n}", value: "{n}", selected: *n == l.category, "{n}" }
@@ -175,7 +183,11 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
                                 class: "gbtn",
                                 disabled: busy,
                                 onclick: move |_| {
-                                    form.write().lines.remove(i);
+                                    let mut f = form.write();
+                                    if i < f.lines.len() {
+                                        f.lines.remove(i);
+                                        keys.write().remove(i);
+                                    }
                                 },
                                 "REMOVE"
                             }
@@ -188,6 +200,9 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
                         disabled: busy,
                         onclick: move |_| {
                             form.write().lines.push(NewTxnLineForm { qty: "1".to_string(), ..NewTxnLineForm::default() });
+                            let key = next_key();
+                            next_key.set(key + 1);
+                            keys.write().push(key);
                         },
                         "+ LINE"
                     }
@@ -210,6 +225,7 @@ pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>
                 div { class: "line-state",
                     Awaiting {
                         label: "NEW·TX · ENTRY".to_string(),
+                        loading: true,
                         legend: Some("SAVING".to_string()),
                         message: Some("Saving the transaction…".to_string()),
                     }
