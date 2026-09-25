@@ -244,3 +244,18 @@ body.no-sparks .spill svg { display: none; }
 .lfix-f input:focus { outline: none; border-color: var(--indigo-neon); box-shadow: var(--glow-indigo); }
 .lfix-f input:disabled { color: var(--ink-3); }
 .lfix-acts { display: flex; justify-content: flex-end; gap: var(--s-2); margin-top: var(--s-3); }
+
+/* NEW transaction form (T36): reuses the line editor's field styles */
+.txn-acts { display: flex; align-items: flex-start; gap: var(--s-2); }
+.ntx { margin: 0 0 var(--s-4); }
+.lfix-f select {
+  min-width: 0; padding: var(--s-2);
+  font-family: var(--font-body); font-size: var(--t-sm); color: var(--ink);
+  background: var(--bg-inset); border: var(--bw-hair) solid var(--hairline); border-radius: var(--r-0);
+}
+.lfix-f select:focus { outline: none; border-color: var(--indigo-neon); box-shadow: var(--glow-indigo); }
+.lfix-f select:disabled { color: var(--ink-3); }
+.ntx-check input { align-self: flex-start; accent-color: var(--indigo-neon); }
+.ntx-mode { display: flex; gap: var(--s-2); margin-top: var(--s-3); }
+.ntx-line { margin-top: var(--s-3); }
+.ntx-rm { justify-content: flex-end; }
