@@ -26,7 +26,9 @@
 use dioxus::prelude::*;
 use phosk_core::money::Money;
 
-use crate::components::comps::{Alert, AlertAction, AlertItem, Cat, CatRows, Rec, RecRow, Txn, TxnTape};
+use crate::components::comps::{
+    Alert, AlertAction, AlertItem, Cat, CatRows, Rec, RecRow, Txn, TxnTape,
+};
 use crate::components::prims::{pct_tone, Dot, PhoskChart, SavingsDial, ScannerBg, Spark};
 use crate::components::shell::{Sig, SigOcc, SignalPanel, SignalStrip, TopBar};
 use crate::components::states::{Awaiting, InlineStatus};
