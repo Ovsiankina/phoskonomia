@@ -64,8 +64,9 @@ pub struct CreatedTxnDto {
 ///
 /// REAL: `create_transaction_with` parses the typed text, then composes
 /// `phosk_ledger::transactions::create_transaction` (validation, derived
-/// totals, `UserEntered` provenance). Failures carry a short message that is
-/// safe to show as-is (see [`create_error_text`]).
+/// totals, `UserEntered` provenance). Failures from the entry itself carry a
+/// short message written for the page (see [`create_error_text`]); a failure
+/// to open the store (`build_session`) passes its own text through for now.
 #[server]
 pub async fn create_transaction(form: NewTxnForm) -> Result<CreatedTxnDto, ServerFnError> {
     #[cfg(feature = "server-deps")]
@@ -80,9 +81,8 @@ pub async fn create_transaction(form: NewTxnForm) -> Result<CreatedTxnDto, Serve
     }
 }
 
-/// The text to show for a failed save: the server's own message (always
-/// user-safe for [`create_transaction`]), or a generic line when the server
-/// could not be reached.
+/// The text to show for a failed save: the server's own message, or a generic
+/// line when the server could not be reached.
 #[must_use]
 pub fn create_error_text(err: &ServerFnError) -> String {
     match err {
@@ -99,8 +99,8 @@ pub fn create_error_text(err: &ServerFnError) -> String {
 /// # Errors
 /// A `ServerFnError` whose message is page-safe: one of the field messages of
 /// [`entry`], or a fixed line for a ledger/store refusal. Adapter errors can
-/// carry engine detail (file paths, driver text), so their text is never
-/// forwarded.
+/// carry engine detail (file paths, driver text), so this function never
+/// forwards their text.
 #[cfg(feature = "server-deps")]
 pub(crate) async fn create_transaction_with(
     db: &dyn phosk_adapter_db::DatabaseAdapter,
@@ -119,10 +119,15 @@ pub(crate) async fn create_transaction_with(
 
 /// Parsing and page-safe checks for [`create_transaction`].
 ///
-/// The checks mirror what `create_transaction` refuses (blank shop, category
-/// or item name; quantity not above zero; negative amount; neither total nor
-/// lines), so the user gets a message naming the field. The ledger stays the
-/// authority and re-checks everything.
+/// Labels, quantities and unit prices go through the same checks as the line
+/// editor (`transactions::line_fix`: trimmed, bounded, no control characters,
+/// quantity in (0, 100000], unit price at most CHF 1'000'000), so a line this
+/// form stores is one that editor would accept. On top: the shop is bounded
+/// like an item name, a stated total is capped at [`MAX_TOTAL_CENTIMES`] and an
+/// entry has at most [`MAX_LINES`] lines. With those caps the derived total is
+/// at most 500 × 100000 × CHF 1'000'000 (5·10¹⁵ centimes), far inside `i64`, so
+/// the ledger's `Overflow` cannot be reached from this form. The ledger stays
+/// the authority and re-checks everything.
 #[cfg(feature = "server-deps")]
 mod entry {
     use chrono::NaiveDate;
@@ -132,17 +137,28 @@ mod entry {
     use phosk_ledger::transactions::{NewLineInput, NewTransaction};
 
     use super::{NewTxnForm, NewTxnLineForm};
+    use crate::data::transactions::line_fix::{
+        check_qty, check_unit_price, label, parse_qty, MAX_CATEGORY_CHARS, MAX_NAME_CHARS,
+    };
+
+    /// Most line items one entry may carry.
+    pub(super) const MAX_LINES: usize = 500;
+    /// Largest accepted stated total: CHF 1'000'000, in centimes.
+    pub(super) const MAX_TOTAL_CENTIMES: i64 = 100_000_000;
 
     /// The typed form → the ledger's input, or the first problem found.
     pub(super) fn parse(form: &NewTxnForm) -> Result<NewTransaction, String> {
-        let shop = required(&form.shop, "Shop")?;
+        let shop = label(&form.shop, "Shop", MAX_NAME_CHARS).map_err(hint)?;
         let date = NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d")
             .map_err(|_| "Date: pick a date.".to_owned())?;
-        let category = required(&form.category, "Category")?;
+        let category = label(&form.category, "Category", MAX_CATEGORY_CHARS).map_err(hint)?;
         let amount = match form.total.trim() {
             "" => None,
-            raw => Some(chf(raw).map_err(|m| format!("Total: {m}"))?),
+            raw => Some(total(raw).map_err(|m| format!("Total: {m}"))?),
         };
+        if form.lines.len() > MAX_LINES {
+            return Err(format!("Too many line items (at most {MAX_LINES})."));
+        }
         let lines = form
             .lines
             .iter()
@@ -163,27 +179,30 @@ mod entry {
     }
 
     fn line(l: &NewTxnLineForm) -> Result<NewLineInput, String> {
-        let name = required(&l.name, "Item name")?;
-        let qty = crate::data::transactions::line_fix::parse_qty(&l.qty).map_err(hint)?;
-        if qty <= 0.0 {
-            return Err("Quantity must be greater than zero.".to_owned());
-        }
+        let name = label(&l.name, "Item name", MAX_NAME_CHARS).map_err(hint)?;
+        let qty = parse_qty(&l.qty).and_then(check_qty).map_err(hint)?;
         let unit_price = chf(&l.unit_price).map_err(|m| format!("Unit price: {m}"))?;
+        check_unit_price(unit_price.centimes()).map_err(hint)?;
+        let category = match l.category.trim() {
+            "" => String::new(),
+            raw => label(raw, "Category", MAX_CATEGORY_CHARS).map_err(hint)?,
+        };
         Ok(NewLineInput {
             name,
             qty,
             unit_price,
-            category: l.category.trim().to_owned(),
+            category,
             signal_id: String::new(),
         })
     }
 
-    /// A trimmed, non-empty field.
-    fn required(raw: &str, what: &str) -> Result<String, String> {
-        match raw.trim() {
-            "" => Err(format!("{what} is required.")),
-            value => Ok(value.to_owned()),
+    /// A stated total: CHF text, not negative, at most [`MAX_TOTAL_CENTIMES`].
+    fn total(raw: &str) -> Result<Money, String> {
+        let amount = chf(raw)?;
+        if amount.centimes() > MAX_TOTAL_CENTIMES {
+            return Err("too large (at most CHF 1'000'000).".to_owned());
         }
+        Ok(amount)
     }
 
     /// Typed CHF text → exact centimes (`Money::parse_chf`, no float), not
@@ -196,8 +215,8 @@ mod entry {
         Ok(amount)
     }
 
-    /// The text of a parser refusal. Both parsers return fixed hints that never
-    /// repeat the input.
+    /// The text of a check's refusal. The parsers and `line_fix` checks return
+    /// fixed hints that never repeat the input.
     fn hint(err: PhoskError) -> String {
         match err {
             PhoskError::Invalid(hint) => hint,
@@ -223,6 +242,44 @@ mod entry {
             PhoskError::Overflow(_) => reply(400, "The amounts are too large."),
             PhoskError::NotFound(_) | PhoskError::InvalidDate(_) => {
                 reply(500, "The transaction could not be saved. Try again.")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn message(err: &ServerFnError) -> (u16, &str) {
+            match err {
+                ServerFnError::ServerError { code, message, .. } => (*code, message.as_str()),
+                other => panic!("expected a server error, got {other:?}"),
+            }
+        }
+
+        /// Every ledger/store failure maps to a fixed line; its detail is dropped.
+        #[test]
+        fn a_ledger_failure_never_forwards_its_text() {
+            let secret = "C:/Users/me/db.surreal: driver said no";
+            let cases = [
+                (
+                    PhoskError::Invalid(secret.into()),
+                    400,
+                    "The transaction was refused. Check the amounts and try again.",
+                ),
+                (
+                    PhoskError::Overflow(secret.into()),
+                    400,
+                    "The amounts are too large.",
+                ),
+                (
+                    PhoskError::NotFound(secret.into()),
+                    500,
+                    "The transaction could not be saved. Try again.",
+                ),
+            ];
+            for (err, code, text) in cases {
+                assert_eq!(message(&failed(err)), (code, text));
             }
         }
     }

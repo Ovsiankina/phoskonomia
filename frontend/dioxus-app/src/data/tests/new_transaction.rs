@@ -161,12 +161,116 @@ async fn a_stated_total_must_match_the_lines() {
     let db = fresh_db();
     let mut form = total_only("9.00");
     form.lines = vec![line("Tea", "1", "2", "")];
-    let (code, _) = refusal(create_transaction_with(&db, form).await);
+    let before = june_ids(&db).await;
+    let (code, msg) = refusal(create_transaction_with(&db, form).await);
     assert_eq!(code, 400);
+    assert_eq!(
+        msg,
+        "The transaction was refused. Check the amounts and try again."
+    );
+    assert_eq!(june_ids(&db).await, before, "nothing was written");
 }
 
 #[test]
 fn an_unreachable_server_reads_as_not_saved() {
     let msg = create_error_text(&ServerFnError::Deserialization("offline".into()));
     assert!(msg.contains("not saved"), "{msg}");
+}
+
+/// A refusal that names `field` and leaves the store untouched.
+async fn assert_refused(db: &MemoryDb, form: NewTxnForm, field: &str) {
+    let before = june_ids(db).await;
+    let (code, msg) = refusal(create_transaction_with(db, form).await);
+    assert_eq!(code, 400, "{msg}");
+    assert!(msg.starts_with(field), "expected `{field}…`, got {msg}");
+    assert_eq!(june_ids(db).await, before, "nothing was written");
+}
+
+fn one_line(l: NewTxnLineForm) -> NewTxnForm {
+    let mut form = total_only("");
+    form.lines = vec![l];
+    form
+}
+
+#[tokio::test]
+async fn an_overlong_shop_is_refused() {
+    let db = fresh_db();
+    let mut form = total_only("12.50");
+    form.shop = "S".repeat(121);
+    assert_refused(&db, form, "Shop is too long").await;
+}
+
+#[tokio::test]
+async fn an_overlong_category_is_refused() {
+    let db = fresh_db();
+    let mut form = total_only("12.50");
+    form.category = "C".repeat(61);
+    assert_refused(&db, form, "Category is too long").await;
+
+    let form = one_line(line("Tea", "1", "2", &"C".repeat(61)));
+    assert_refused(&db, form, "Line 1: Category is too long").await;
+}
+
+#[tokio::test]
+async fn control_characters_are_refused() {
+    let db = fresh_db();
+    let mut form = total_only("12.50");
+    form.shop = "Kiosk\u{7}".into();
+    assert_refused(&db, form, "Shop contains characters").await;
+
+    let form = one_line(line("Te\na", "1", "2", ""));
+    assert_refused(&db, form, "Line 1: Item name contains characters").await;
+}
+
+#[tokio::test]
+async fn a_blank_item_name_is_refused() {
+    let db = fresh_db();
+    assert_refused(&db, one_line(line("  ", "1", "2", "")), "Line 1: Item name").await;
+}
+
+#[tokio::test]
+async fn a_quantity_out_of_range_is_refused() {
+    let db = fresh_db();
+    let form = one_line(line("Tea", "0", "2", ""));
+    assert_refused(&db, form, "Line 1: Quantity must be greater than zero").await;
+
+    let form = one_line(line("Tea", "100001", "2", ""));
+    assert_refused(&db, form, "Line 1: Quantity is too large").await;
+
+    // 400 digits parse to f64 infinity: named as too large, not a generic refusal.
+    let form = one_line(line("Tea", &"9".repeat(400), "2", ""));
+    assert_refused(&db, form, "Line 1: Quantity is too large").await;
+}
+
+#[tokio::test]
+async fn a_unit_price_above_the_cap_is_refused() {
+    let db = fresh_db();
+    let form = one_line(line("Yacht", "1", "1000000.01", ""));
+    assert_refused(&db, form, "Line 1: Unit price is too large").await;
+}
+
+#[tokio::test]
+async fn a_total_above_the_cap_is_refused() {
+    let db = fresh_db();
+    assert_refused(&db, total_only("1000000.01"), "Total: too large").await;
+}
+
+#[tokio::test]
+async fn too_many_lines_are_refused() {
+    let db = fresh_db();
+    let mut form = total_only("");
+    form.lines = vec![line("Tea", "1", "2", ""); 501];
+    assert_refused(&db, form, "Too many line items").await;
+}
+
+#[tokio::test]
+async fn the_largest_accepted_entry_is_saved_exactly() {
+    // Every cap at once: 500 lines × 100000 × CHF 1'000'000 stays far inside
+    // the centime range, so the ledger's Overflow cannot be reached from here.
+    let db = fresh_db();
+    let mut form = total_only("");
+    form.lines = vec![line("Gold", "100000", "1000000", ""); 500];
+    let created = create_transaction_with(&db, form).await.expect("saved");
+    assert_eq!(created.amount, money(500 * 100_000 * 100_000_000));
+    assert_eq!(created.item_count, 500);
 }
