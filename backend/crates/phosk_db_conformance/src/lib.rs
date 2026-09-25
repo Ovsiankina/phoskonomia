@@ -69,6 +69,7 @@ macro_rules! database_adapter_conformance {
             ledger::insert_receipt_same_slug_replaces_in_place,
             ledger::insert_receipt_projects_a_dashboard_transaction,
             ledger::insert_receipt_same_slug_replaces_the_projection,
+            ledger::delete_receipt_removes_it_its_lines_and_its_projection,
             ledger::receipts_between_filters_inclusively,
             ledger::receipt_lookups_report_not_found,
             ledger::update_line_item_replaces_the_stored_line,

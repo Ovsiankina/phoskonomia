@@ -9,7 +9,9 @@
 //!
 //! The rest of the context lives in the feature modules declared below —
 //! including the write side ([`transactions::create_transaction`] for manual
-//! entry, and the category create/rename/delete-if-empty in [`categories`]).
+//! entry, [`transactions::edit_transaction`] /
+//! [`transactions::delete_transaction`] for correcting and removing a recorded
+//! spend, and the category create/rename/delete-if-empty in [`categories`]).
 //!
 //! **Layering (ADR-010).** The service takes `&dyn DatabaseAdapter` and depends
 //! only on the PORT trait crate (`phosk_adapter_db`) plus the domain/foundation
