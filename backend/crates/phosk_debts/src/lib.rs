@@ -32,6 +32,7 @@
 //! [`DatabaseAdapter`]: phosk_adapter_db::DatabaseAdapter
 //! [`PhoskError`]: phosk_core::error::PhoskError
 
+pub mod debt_plan;
 pub mod debt_write;
 pub mod debts;
 pub mod personal_ious;
