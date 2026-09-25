@@ -8,6 +8,7 @@
 //!   * `comps`  — composite UI pieces (React `comps.jsx`).
 //!   * `csv_export` — the CSV export button of the list page headers.
 //!   * `new_transaction` — the Transactions page's "NEW transaction" form.
+//!   * `edit_transaction` — EDIT / DELETE in the receipt detail.
 //!   * `shell`  — TopBar + left Nav sidebar — EVERY page must render these
 //!     (React `shell.jsx`).
 //!   * `states` — empty / loading states (React `states.jsx`).
@@ -18,6 +19,7 @@
 
 pub mod comps;
 pub mod csv_export;
+pub mod edit_transaction;
 pub mod new_transaction;
 pub mod prims;
 pub mod shell;

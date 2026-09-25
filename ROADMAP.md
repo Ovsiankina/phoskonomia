@@ -35,7 +35,7 @@ Each task: service fn(s) in the feature crate + any new port method in **both** 
 test) + input validation + `Provenance` + errors via `PhoskError`. No UI.
 
 - [x] **T10** — `phosk_ledger`: `create_transaction` (manual entry, with line items; `UserEntered`) (needs: T04)
-- [ ] **T11** — `phosk_ledger`: `edit_transaction` (category, shop, fixed, date, amount → `UserModified`) and `delete_transaction` (needs: T10)
+- [x] **T11** — `phosk_ledger`: `edit_transaction` (category, shop, fixed, date, amount → `UserModified`) and `delete_transaction` (needs: T10)
 - [x] **T12** — `phosk_ledger`: category create / rename / delete-if-empty (needs: T04)
 - [x] **T13** — `phosk_ledger`: category merge and split, re-pointing historical line items atomically (needs: T12)
 - [x] **T14** — `phosk_recurring`: subscription create / edit / delete (needs: T04)
@@ -61,7 +61,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 - [x] **T34** — Config page on real `phosk_settings`: get / set / reset preferences (needs: T01)
 - [x] **T35** — CSV export buttons for transactions / budget / subscriptions (file download on web + desktop) (needs: T01)
 - [x] **T36** — "NEW transaction" form (needs: T10)
-- [ ] **T37** — Edit / delete transaction from the detail view, with confirm step (needs: T11, T36)
+- [x] **T37** — Edit / delete transaction from the detail view, with confirm step (needs: T11, T36)
 - [ ] **T38** — Subscriptions create / edit / lifecycle actions (needs: T15)
 - [ ] **T39** — Debts + personal IOUs create / edit / payments (needs: T17, T18)
 - [ ] **T40** — `/categories` route: list, create, rename, merge; token-seeded colour picker (no raw hex input) (needs: T13)
