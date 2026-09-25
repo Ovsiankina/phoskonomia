@@ -26,13 +26,27 @@
 //!    `content-type`. The daemon wraps them in a [`DrainedBlob`] and calls
 //!    [`ReceiptIngest::ingest`]. The pop was destructive, so the desktop now
 //!    owns the only copy — an ingest failure marks that blob
-//!    [`IngestOutcome::Failed`] (logged by error code only) and the loop moves
-//!    on; it is not retried against the queue (the blob is gone).
+//!    [`IngestOutcome::Failed`] (logged by error code only); it is not retried
+//!    against the queue (the blob is gone). The body is capped at
+//!    [`QueueClient::with_max_blob_bytes`] before it is read fully.
 //! 3. `204` → the queue was empty for the whole long-poll window; loop again
 //!    immediately (the wait already provided the pacing).
 //! 4. transport error (Pi down / unreachable) → back off [`PollConfig::idle_backoff`]
 //!    and retry. The Pi being offline is the normal case, not a fault.
+//!
+//! ## Not losing photos to an outage
+//!
+//! Because the pop is destructive, the daemon asks [`ReceiptIngest::ready`]
+//! (for [`PipelineIngest`]: LLM health + the OCR probe) **before every pop** and
+//! leaves the photos on the Pi while a dependency is down. After a
+//! [`IngestOutcome::Failed`] it backs off ([`Daemon::run`]) or stops
+//! ([`Daemon::drain_pending`]) instead of popping the next photo into the same
+//! failure. Once a blob is popped, its ingest always runs to completion — a
+//! shutdown request is only honoured between blobs.
 
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,6 +85,28 @@ pub trait ReceiptIngest: Send + Sync {
     /// failure — the pop was destructive and the queue no longer holds the blob;
     /// it records [`IngestOutcome::Failed`] and moves on.
     async fn ingest(&self, blob: DrainedBlob) -> Result<IngestOutcome, PhoskError>;
+
+    /// Whether the pipeline can take a blob right now. The daemon asks this
+    /// BEFORE each destructive pop and leaves the photos on the Pi while it is
+    /// `false`. Default: always ready (no dependencies).
+    async fn ready(&self) -> bool {
+        true
+    }
+}
+
+/// A readiness probe for the OCR engine, supplied by the composition root (the
+/// OCR port has no health method; the concrete engines do).
+pub type OcrProbe = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+
+/// What [`Daemon::run`] did before it stopped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunSummary {
+    /// Blobs the pipeline staged ([`IngestOutcome::Queued`]) or refused
+    /// ([`IngestOutcome::Rejected`]).
+    pub processed: u64,
+    /// Blobs whose ingest failed ([`IngestOutcome::Failed`]) — popped from the
+    /// Pi and NOT staged.
+    pub failed: u64,
 }
 
 /// What the pipeline did with a blob. Kept coarse on purpose: the daemon only
@@ -145,16 +181,39 @@ impl IngestKind {
     }
 }
 
+/// The data directory for pipeline mode, from the raw `PHOSK_DATA_DIR`.
+///
+/// Required and absolute: the daemon must open the SAME store the approval UI
+/// reads, and a relative default (`./phosk-data`) resolves against whatever
+/// directory each process was started in.
+///
+/// # Errors
+/// [`PhoskError::Invalid`] when unset, empty or relative.
+pub fn pipeline_data_dir(raw: Option<std::ffi::OsString>) -> Result<PathBuf, PhoskError> {
+    match raw.map(PathBuf::from) {
+        Some(p) if p.is_absolute() => Ok(p),
+        _ => Err(PhoskError::Invalid(
+            "PHOSK_INGEST=pipeline needs PHOSK_DATA_DIR set to an absolute path (the \
+             approval UI's data directory)"
+                .to_owned(),
+        )),
+    }
+}
+
 /// The real [`ReceiptIngest`]: runs each drained blob through
 /// `phosk_pipeline_receipt::intake_receipt` with the injected PORTs. The
 /// pipeline validates the hostile bytes, stores the sanitised photo, and
 /// STAGES a proposal + an open approval suggestion — it never writes the
 /// ledger. The blob's advisory `mime` is ignored (the pipeline sniffs bytes).
+///
+/// Ready when the LLM reports `health() == Ok(true)` and the optional
+/// [`OcrProbe`] ([`PipelineIngest::with_ocr_probe`]) reports `true`.
 pub struct PipelineIngest {
     db: Arc<dyn DatabaseAdapter>,
     storage: Arc<dyn PhotoStorage>,
     ocr: Arc<dyn OcrAdapter>,
     llm: Arc<dyn LlmAdapter>,
+    ocr_probe: Option<OcrProbe>,
 }
 
 impl PipelineIngest {
@@ -171,7 +230,15 @@ impl PipelineIngest {
             storage,
             ocr,
             llm,
+            ocr_probe: None,
         }
+    }
+
+    /// Also require `probe` to report the OCR engine reachable before each pop.
+    #[must_use]
+    pub fn with_ocr_probe(mut self, probe: OcrProbe) -> Self {
+        self.ocr_probe = Some(probe);
+        self
     }
 }
 
@@ -181,7 +248,10 @@ impl ReceiptIngest for PipelineIngest {
     async fn ingest(&self, blob: DrainedBlob) -> Result<IngestOutcome, PhoskError> {
         let photo = IntakePhoto {
             bytes: &blob.data,
-            // The desktop's local "today" (the pipeline books against it).
+            // The DRAIN date (the desktop's local "today"), not the shot date:
+            // the queue carries no capture date, and EXIF is stripped unread.
+            // A photo that waited on the Pi over midnight is proposed for the
+            // day it was drained — the approver corrects the date if needed.
             captured_on: chrono::Local::now().date_naive(),
         };
         let outcome = intake_receipt(
@@ -198,6 +268,16 @@ impl ReceiptIngest for PipelineIngest {
             "daemon: photo staged for approval"
         );
         Ok(IngestOutcome::Queued { blob_id: blob.id })
+    }
+
+    async fn ready(&self) -> bool {
+        if !matches!(self.llm.health().await, Ok(true)) {
+            return false;
+        }
+        match &self.ocr_probe {
+            Some(probe) => probe().await,
+            None => true,
+        }
     }
 }
 
@@ -241,7 +321,12 @@ impl ReceiptIngest for NullIngest {
 pub struct QueueClient {
     http: reqwest::Client,
     base: String,
+    max_blob_bytes: usize,
 }
+
+/// The largest blob [`QueueClient`] accepts by default — `phosk_queue`'s own
+/// default `max_blob_bytes` (16 MiB).
+pub const DEFAULT_MAX_BLOB_BYTES: usize = 16 * 1024 * 1024;
 
 impl QueueClient {
     /// Build a client against `base` (e.g. `http://pi.local:8765`). Trailing
@@ -257,7 +342,17 @@ impl QueueClient {
         Ok(Self {
             http,
             base: base.into().trim_end_matches('/').to_string(),
+            max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
         })
+    }
+
+    /// Cap a drained body at `max` bytes (match the Pi's
+    /// `PHOSK_QUEUE_MAX_BLOB_BYTES`). A larger body is refused before it is
+    /// read fully — the Pi is untrusted and could stream without end.
+    #[must_use]
+    pub const fn with_max_blob_bytes(mut self, max: usize) -> Self {
+        self.max_blob_bytes = max;
+        self
     }
 
     /// Long-poll the queue for the next blob, waiting up to `wait` for one.
@@ -268,7 +363,7 @@ impl QueueClient {
     /// treats it as "back off and retry", not a crash).
     pub async fn poll_next(&self, wait: Duration) -> Result<Option<DrainedBlob>, PhoskError> {
         let url = format!("{}/queue/next", self.base);
-        let resp = self
+        let mut resp = self
             .http
             .get(&url)
             .query(&[("wait_ms", wait.as_millis().to_string())])
@@ -292,11 +387,26 @@ impl QueueClient {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("application/octet-stream")
                     .to_string();
-                let data = resp
-                    .bytes()
+                let max = self.max_blob_bytes;
+                let too_big =
+                    || PhoskError::Invalid(format!("queue blob exceeds {max} bytes, dropped"));
+                if resp
+                    .content_length()
+                    .is_some_and(|n| usize::try_from(n).map_or(true, |n| n > max))
+                {
+                    return Err(too_big());
+                }
+                let mut data = Vec::new();
+                while let Some(chunk) = resp
+                    .chunk()
                     .await
                     .map_err(|e| PhoskError::Invalid(format!("queue body read error: {e}")))?
-                    .to_vec();
+                {
+                    if data.len().saturating_add(chunk.len()) > max {
+                        return Err(too_big());
+                    }
+                    data.extend_from_slice(&chunk);
+                }
                 Ok(Some(DrainedBlob { id, mime, data }))
             }
             other => Err(PhoskError::Invalid(format!(
@@ -313,8 +423,9 @@ pub struct PollConfig {
     /// its own ceiling; a generous value keeps the loop mostly parked server-side
     /// instead of busy-spinning.
     pub long_poll: Duration,
-    /// How long to sleep after a **transport failure** (Pi unreachable) before
-    /// retrying. The Pi being offline is normal, so this is gentle, not alarming.
+    /// How long to sleep after a **transport failure** (Pi unreachable), while
+    /// the pipeline is not [ready](ReceiptIngest::ready), and after a
+    /// [`IngestOutcome::Failed`] before trying again.
     pub idle_backoff: Duration,
 }
 
@@ -355,7 +466,8 @@ impl<I: ReceiptIngest> Daemon<I> {
     }
 
     /// Poll once with a short non-blocking wait and, if a blob is ready, hand it
-    /// to the pipeline. Returns `Ok(Some(outcome))` when a blob was processed
+    /// to the pipeline. Does NOT check [`ReceiptIngest::ready`] (callers that
+    /// loop do). Returns `Ok(Some(outcome))` when a blob was processed
     /// (an ingest error becomes [`IngestOutcome::Failed`], so one bad photo
     /// never stops the loop), `Ok(None)` when the queue was empty, or the poll
     /// (transport) error.
@@ -363,23 +475,26 @@ impl<I: ReceiptIngest> Daemon<I> {
     /// `wait` is the long-poll window for this single poll (use `0` to peek).
     pub async fn poll_once(&self, wait: Duration) -> Result<Option<IngestOutcome>, PhoskError> {
         match self.client.poll_next(wait).await? {
-            Some(blob) => {
-                tracing::debug!(id = %blob.id, bytes = blob.data.len(), "daemon: drained blob, handing to pipeline");
-                let blob_id = blob.id.clone();
-                let outcome = match self.ingest.ingest(blob).await {
-                    Ok(outcome) => outcome,
-                    Err(e) => {
-                        // Code only: the message may carry OCR/model text (PII).
-                        tracing::warn!(id = %blob_id, error = e.code(), "daemon: ingest failed, blob dropped");
-                        IngestOutcome::Failed {
-                            blob_id,
-                            reason: e.code().to_owned(),
-                        }
-                    }
-                };
-                Ok(Some(outcome))
-            }
+            Some(blob) => Ok(Some(self.ingest_blob(blob).await)),
             None => Ok(None),
+        }
+    }
+
+    /// Hand one popped blob to the pipeline; an error becomes
+    /// [`IngestOutcome::Failed`].
+    async fn ingest_blob(&self, blob: DrainedBlob) -> IngestOutcome {
+        tracing::debug!(id = %blob.id, bytes = blob.data.len(), "daemon: drained blob, handing to pipeline");
+        let blob_id = blob.id.clone();
+        match self.ingest.ingest(blob).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Code only: the message may carry OCR/model text (PII).
+                tracing::warn!(id = %blob_id, error = e.code(), "daemon: ingest failed, blob dropped");
+                IngestOutcome::Failed {
+                    blob_id,
+                    reason: e.code().to_owned(),
+                }
+            }
         }
     }
 
@@ -387,55 +502,101 @@ impl<I: ReceiptIngest> Daemon<I> {
     /// empty poll. Each blob is handed to the pipeline; the outcomes are
     /// returned in order. Bounded: it stops at the first empty poll (it does
     /// **not** long-poll for future arrivals — that is [`Daemon::run`]'s job).
+    /// It also stops — leaving the rest on the Pi — when the pipeline is not
+    /// [ready](ReceiptIngest::ready) or right after a [`IngestOutcome::Failed`].
     ///
     /// Used by the integration test and as a one-shot "catch up" pass.
     pub async fn drain_pending(&self) -> Result<Vec<IngestOutcome>, PhoskError> {
         let mut outcomes = Vec::new();
         // wait_ms = 0: a non-blocking pop. Loop until the queue reports empty.
-        while let Some(outcome) = self.poll_once(Duration::from_millis(0)).await? {
+        while self.ingest.ready().await {
+            let Some(outcome) = self.poll_once(Duration::from_millis(0)).await? else {
+                break;
+            };
+            let failed = matches!(outcome, IngestOutcome::Failed { .. });
             outcomes.push(outcome);
+            if failed {
+                break;
+            }
         }
         Ok(outcomes)
     }
 
     /// The long-running service loop: long-poll the queue forever, ingesting
-    /// each blob as it arrives. Transport errors (Pi offline) are logged and
-    /// retried after [`PollConfig::idle_backoff`]; ingest errors are marked
-    /// [`IngestOutcome::Failed`] and dropped (the destructive pop already
-    /// removed the blob). The loop runs
-    /// until `shutdown` resolves, then returns the number of blobs processed.
+    /// each blob as it arrives. Before each pop it checks
+    /// [`ReceiptIngest::ready`] and, while not ready, backs off
+    /// [`PollConfig::idle_backoff`] so the photos stay on the Pi. Transport
+    /// errors (Pi offline) and [`IngestOutcome::Failed`] also back off.
     ///
-    /// `shutdown` is any future (e.g. `tokio::signal::ctrl_c()`); when it
-    /// completes the loop exits at the next iteration boundary.
-    pub async fn run<S>(&self, shutdown: S) -> u64
+    /// `shutdown` is any future (e.g. `tokio::signal::ctrl_c()`). It is raced
+    /// only against the readiness check, the long-poll and the back-off sleeps
+    /// — never against an ingest: once a blob has been popped (the pop is
+    /// destructive) its ingest runs to completion, then the loop stops.
+    /// Returns what was processed and what failed.
+    pub async fn run<S>(&self, shutdown: S) -> RunSummary
     where
         S: std::future::Future<Output = ()> + Send,
     {
-        let mut processed: u64 = 0;
+        let mut summary = RunSummary::default();
         tokio::pin!(shutdown);
         loop {
-            tokio::select! {
+            let ready = tokio::select! {
                 biased;
-                () = &mut shutdown => {
-                    tracing::info!(processed, "daemon: shutdown requested, stopping poll loop");
-                    return processed;
+                () = &mut shutdown => break,
+                ready = self.ingest.ready() => ready,
+            };
+            if !ready {
+                tracing::warn!("daemon: pipeline not ready, leaving photos on the Pi");
+                if self.backoff_or_shutdown(&mut shutdown).await {
+                    break;
                 }
-                result = self.poll_once(self.config.long_poll) => {
-                    match result {
-                        Ok(Some(_outcome)) => {
-                            processed = processed.saturating_add(1);
-                        }
-                        Ok(None) => {
-                            // Empty long-poll: loop again immediately (the server
-                            // already provided the pacing by parking the request).
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "daemon: poll failed, backing off");
-                            tokio::time::sleep(self.config.idle_backoff).await;
-                        }
-                    }
-                }
+                continue;
             }
+            let polled = tokio::select! {
+                biased;
+                () = &mut shutdown => break,
+                polled = self.client.poll_next(self.config.long_poll) => polled,
+            };
+            let back_off = match polled {
+                // Popped: the desktop holds the only copy — never cancelled.
+                Ok(Some(blob)) => match self.ingest_blob(blob).await {
+                    IngestOutcome::Failed { .. } => {
+                        summary.failed = summary.failed.saturating_add(1);
+                        true
+                    }
+                    IngestOutcome::Queued { .. } | IngestOutcome::Rejected { .. } => {
+                        summary.processed = summary.processed.saturating_add(1);
+                        false
+                    }
+                },
+                // Empty long-poll: the server already paced us by parking it.
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(error = %e, "daemon: poll failed, backing off");
+                    true
+                }
+            };
+            if back_off && self.backoff_or_shutdown(&mut shutdown).await {
+                break;
+            }
+        }
+        tracing::info!(
+            processed = summary.processed,
+            failed = summary.failed,
+            "daemon: shutdown requested, stopping poll loop"
+        );
+        summary
+    }
+
+    /// Sleep [`PollConfig::idle_backoff`]; `true` if shutdown fired meanwhile.
+    async fn backoff_or_shutdown<S>(&self, shutdown: &mut Pin<&mut S>) -> bool
+    where
+        S: std::future::Future<Output = ()>,
+    {
+        tokio::select! {
+            biased;
+            () = shutdown.as_mut() => true,
+            () = tokio::time::sleep(self.config.idle_backoff) => false,
         }
     }
 }
@@ -505,6 +666,22 @@ mod tests {
         assert!(
             matches!(&err, PhoskError::Invalid(m) if m.contains("PHOSK_INGEST") && m.contains("pipeline")),
             "{err:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_data_dir_must_be_an_explicit_absolute_path() {
+        for raw in [None, Some(""), Some("phosk-data"), Some("./phosk-data")] {
+            let err = pipeline_data_dir(raw.map(Into::into)).unwrap_err();
+            assert!(
+                matches!(&err, PhoskError::Invalid(m) if m.contains("PHOSK_DATA_DIR")),
+                "{raw:?}: {err:?}"
+            );
+        }
+        let abs = std::env::temp_dir().join("phosk-data");
+        assert_eq!(
+            pipeline_data_dir(Some(abs.clone().into_os_string())).unwrap(),
+            abs
         );
     }
 

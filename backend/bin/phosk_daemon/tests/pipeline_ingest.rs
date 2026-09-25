@@ -1,23 +1,27 @@
 //! The real `phosk_pipeline_receipt` ingest behind the daemon's seam, driven
 //! end to end against a real `phosk_queue` on loopback and the PORT fakes (no
 //! Ollama, no `PaddleOCR`, no disk). A drained photo must end up as a PENDING
-//! approval suggestion — never a ledger receipt — and a failing OCR/LLM must be
-//! marked failed for that one blob without stopping the drain.
+//! approval suggestion — never a ledger receipt. The pop is destructive, so a
+//! dependency outage must NOT drain the queue: the daemon checks readiness
+//! before each pop, and stops (drain) or backs off (run) after a failure.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use serde_json::json;
 
 use phosk_adapter_db::DatabaseAdapter;
-use phosk_adapter_llm::LlmAdapter;
+use phosk_adapter_llm::{FakeLlm, LlmAdapter};
 use phosk_adapter_ocr::{FakeOcr, OcrAdapter, OcrResult};
 use phosk_adapter_storage::InMemoryStorage;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
-use phosk_daemon::{Daemon, IngestOutcome, PipelineIngest, PollConfig, QueueClient};
+use phosk_daemon::{
+    Daemon, IngestOutcome, OcrProbe, PipelineIngest, PollConfig, QueueClient, RunSummary,
+};
 use phosk_db_memory::MemoryDb;
 use phosk_model::BudgetConfig;
 use phosk_queue::{QueueConfig, QueueState, build_app};
@@ -166,7 +170,7 @@ async fn queued_photo_becomes_a_pending_suggestion_and_ledger_is_unchanged() {
 }
 
 #[tokio::test]
-async fn failing_llm_marks_that_blob_failed_and_the_drain_continues() {
+async fn failing_llm_stops_the_drain_and_leaves_the_rest_queued() {
     let state = QueueState::new(QueueConfig::default());
     let base = spawn_queue(state.clone()).await;
     let first = enqueue(&base, jpeg(1)).await;
@@ -180,26 +184,118 @@ async fn failing_llm_marks_that_blob_failed_and_the_drain_continues() {
         PollConfig::default(),
     );
 
-    let outcomes = daemon.drain_pending().await.expect("drain is not aborted");
+    // The failure stops this pass: the next photo stays on the Pi instead of
+    // being popped into a pipeline that just failed.
+    let outcomes = daemon.drain_pending().await.expect("drain");
     assert_eq!(
         outcomes,
-        vec![
+        vec![IngestOutcome::Failed {
+            blob_id: first,
             // A PII-free error code, never the adapter's message.
-            IngestOutcome::Failed {
-                blob_id: first,
-                reason: "invalid_input".to_owned(),
-            },
-            IngestOutcome::Queued { blob_id: second },
-        ]
+            reason: "invalid_input".to_owned(),
+        }]
     );
+    assert_eq!(state.len().await, 1, "the second photo is still queued");
+
+    // The next pass (model recovered) stages it.
+    let outcomes = daemon.drain_pending().await.expect("second drain");
+    assert_eq!(outcomes, vec![IngestOutcome::Queued { blob_id: second }]);
     let pending = phosk_ai::pending_suggestions(db.as_ref())
         .await
         .expect("pending");
     assert_eq!(pending.len(), 1, "only the second photo was staged");
     assert!(db.all_receipts().await.expect("receipts").is_empty());
-    // The pop is destructive (phosk_queue semantics): the failed blob is not
-    // re-queued, so the queue is empty rather than stuck on it.
     assert!(state.is_empty().await);
+}
+
+#[tokio::test]
+async fn unreachable_llm_leaves_the_queue_untouched() {
+    let state = QueueState::new(QueueConfig::default());
+    let base = spawn_queue(state.clone()).await;
+    enqueue(&base, jpeg(1)).await;
+    enqueue(&base, jpeg(2)).await;
+
+    let db = empty_db();
+    let ingest = pipeline(
+        &db,
+        Arc::new(FakeOcr::new()),
+        Arc::new(FakeLlm::new().reachable(false).fail_completions(true)),
+    );
+    let daemon = Daemon::new(
+        QueueClient::new(&base).expect("client"),
+        ingest,
+        PollConfig {
+            long_poll: Duration::from_millis(0),
+            idle_backoff: Duration::from_millis(10),
+        },
+    );
+
+    assert!(daemon.drain_pending().await.expect("drain").is_empty());
+    assert_eq!(state.len().await, 2, "nothing popped while the LLM is down");
+
+    // The service loop backs off instead of popping, for as long as it runs.
+    let summary = daemon
+        .run(tokio::time::sleep(Duration::from_millis(200)))
+        .await;
+    assert_eq!(summary, RunSummary::default());
+    assert_eq!(state.len().await, 2, "the loop never drained the queue");
+    assert!(db.ai_suggestions().await.expect("suggestions").is_empty());
+}
+
+#[tokio::test]
+async fn unreachable_ocr_probe_leaves_the_queue_untouched() {
+    let state = QueueState::new(QueueConfig::default());
+    let base = spawn_queue(state.clone()).await;
+    enqueue(&base, jpeg(1)).await;
+
+    let db = empty_db();
+    let down: OcrProbe = Arc::new(|| Box::pin(async { false }));
+    let daemon = Daemon::new(
+        QueueClient::new(&base).expect("client"),
+        pipeline(&db, Arc::new(FakeOcr::new()), Arc::new(ScriptedLlm::new(0))).with_ocr_probe(down),
+        PollConfig::default(),
+    );
+
+    assert!(daemon.drain_pending().await.expect("drain").is_empty());
+    assert_eq!(state.len().await, 1);
+}
+
+#[tokio::test]
+async fn run_counts_failures_separately() {
+    let state = QueueState::new(QueueConfig::default());
+    let base = spawn_queue(state.clone()).await;
+    enqueue(&base, jpeg(1)).await;
+    enqueue(&base, jpeg(2)).await;
+
+    let db = empty_db();
+    let daemon = Daemon::new(
+        QueueClient::new(&base).expect("client"),
+        pipeline(&db, Arc::new(FakeOcr::new()), Arc::new(ScriptedLlm::new(1))),
+        PollConfig {
+            long_poll: Duration::from_millis(0),
+            idle_backoff: Duration::from_millis(10),
+        },
+    );
+
+    // Stop once the Pi is empty; the in-flight photo still finishes.
+    let probe = state.clone();
+    let shutdown = async move {
+        while !probe.is_empty().await {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    let summary = daemon.run(shutdown).await;
+    assert_eq!(
+        summary,
+        RunSummary {
+            processed: 1,
+            failed: 1
+        }
+    );
+    let pending = phosk_ai::pending_suggestions(db.as_ref())
+        .await
+        .expect("pending");
+    assert_eq!(pending.len(), 1);
 }
 
 #[tokio::test]
