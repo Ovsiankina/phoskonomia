@@ -9,7 +9,7 @@ use super::support::{fresh_db, server_error};
 use crate::data::categories::{
     create_category_with, delete_category_with, list_categories, list_categories_with,
     merge_categories_with, merge_preview_with, rename_category_with, set_category_colour_with,
-    store_error, CategoriesDto, CategoryRowDto, COLOUR_TOKENS, DEFAULT_COLOUR,
+    store_error, with_colour_notice, CategoriesDto, CategoryRowDto, COLOUR_TOKENS, DEFAULT_COLOUR,
 };
 
 fn row<'a>(view: &'a CategoriesDto, name: &str) -> &'a CategoryRowDto {
@@ -41,6 +41,18 @@ async fn list_shows_every_stored_category_with_usage_and_the_palette() {
     want.sort_unstable();
     assert_eq!(names, want, "one row per stored category");
 
+    for r in &view.rows {
+        let uses = phosk_ledger::categories::category_usage(&db, &r.name)
+            .await
+            .expect("usage");
+        assert_eq!(
+            r.uses, uses,
+            "one-pass usage matches the ledger for {}",
+            r.name
+        );
+    }
+    assert_eq!(view.notice, None);
+
     let groceries = row(&view, "Groceries");
     assert_eq!(groceries.slug, "groceries");
     assert_eq!(groceries.glyph, "▤");
@@ -67,11 +79,11 @@ async fn the_server_fn_reads_the_global_stack() {
 #[tokio::test]
 async fn create_stores_the_category_and_its_colour_token() {
     let db = fresh_db();
-    let view = create_category_with(&db, "  Pets ", "", "ok")
+    let view = create_category_with(&db, "  Pets ", "", "text-blue")
         .await
         .expect("created");
     let pets = row(&view, "Pets");
-    assert_eq!(pets.colour, "ok");
+    assert_eq!(pets.colour, "text-blue");
     assert_eq!(pets.uses, 0);
     assert_eq!(pets.glyph, "◆", "blank glyph falls back to the default");
     assert!(db.category_cap_by_name("Pets").await.is_ok());
@@ -91,9 +103,9 @@ async fn create_refuses_anything_but_a_palette_token_and_writes_nothing() {
 #[tokio::test]
 async fn create_surfaces_the_ledger_validation_message() {
     let db = fresh_db();
-    let msg = server_error(create_category_with(&db, "groceries", "", "ok").await);
+    let msg = server_error(create_category_with(&db, "groceries", "", "indigo-2").await);
     assert_eq!(msg, "category Groceries already exists");
-    let msg = server_error(create_category_with(&db, "   ", "", "ok").await);
+    let msg = server_error(create_category_with(&db, "   ", "", "indigo-2").await);
     assert_eq!(msg, "category name cannot be empty");
 }
 
@@ -107,7 +119,7 @@ async fn set_colour_accepts_tokens_only_and_survives_a_rename() {
         DEFAULT_COLOUR
     );
 
-    set_category_colour_with(&db, "Transport", "warn")
+    set_category_colour_with(&db, "Transport", "indigo-neon")
         .await
         .expect("set");
     let view = rename_category_with(&db, "Transport", "Travel")
@@ -116,7 +128,7 @@ async fn set_colour_accepts_tokens_only_and_survives_a_rename() {
     assert!(view.rows.iter().all(|r| r.name != "Transport"));
     assert_eq!(
         row(&view, "Travel").colour,
-        "warn",
+        "indigo-neon",
         "colour follows the slug"
     );
 }
@@ -124,7 +136,7 @@ async fn set_colour_accepts_tokens_only_and_survives_a_rename() {
 #[tokio::test]
 async fn set_colour_on_an_unknown_category_is_not_found() {
     let db = fresh_db();
-    let msg = server_error(set_category_colour_with(&db, "Nope", "ok").await);
+    let msg = server_error(set_category_colour_with(&db, "Nope", "indigo").await);
     assert_eq!(msg, "this category no longer exists");
 }
 
@@ -194,7 +206,7 @@ async fn merge_into_itself_or_an_unknown_category_is_refused_before_writing() {
 #[tokio::test]
 async fn delete_removes_an_unused_category_and_refuses_a_used_one() {
     let db = fresh_db();
-    create_category_with(&db, "Pets", "", "ok")
+    create_category_with(&db, "Pets", "", "ink-2")
         .await
         .expect("created");
     let view = delete_category_with(&db, "Pets").await.expect("deleted");
@@ -217,4 +229,91 @@ fn store_errors_never_leak_adapter_detail() {
         server_error::<()>(Err(store_error(overflow))),
         "could not save the change, try again"
     );
+}
+
+#[test]
+fn the_palette_leaves_out_status_and_warm_accent_tokens() {
+    // `ok` / `warn` mean status, `neon-magenta` is a warm red-pink next to the
+    // coral signal; none of them may tag a category.
+    for t in ["ok", "warn", "neon-magenta", "neon", "coral"] {
+        assert!(
+            !COLOUR_TOKENS.contains(&t),
+            "{t} must not be a category colour"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_colour_stored_before_the_palette_shrank_reads_as_the_default() {
+    let db = fresh_db();
+    db.set_preference("category_colour.rent", "warn")
+        .await
+        .expect("raw write");
+    let view = list_categories_with(&db).await.expect("read");
+    assert_eq!(row(&view, "Rent").colour, DEFAULT_COLOUR);
+    let msg = server_error(set_category_colour_with(&db, "Rent", "warn").await);
+    assert_eq!(msg, "pick a colour from the palette");
+}
+
+/// The colour row a vanished category leaves behind: cleared, not user-set.
+async fn assert_colour_cleared(db: &dyn DatabaseAdapter, slug: &str) {
+    let pref = db
+        .preference(&format!("category_colour.{slug}"))
+        .await
+        .expect("the row stays, reset");
+    assert!(
+        !COLOUR_TOKENS.contains(&pref.value.as_str()),
+        "a reused slug must not inherit {:?}",
+        pref.value
+    );
+    assert_eq!(pref.provenance.source, phosk_model::Source::RuleGenerated);
+}
+
+#[tokio::test]
+async fn delete_clears_the_vanished_category_colour() {
+    let db = fresh_db();
+    let before = phosk_settings::settings_summary(&db)
+        .await
+        .expect("summary");
+    let view = create_category_with(&db, "Pets", "", "indigo-3")
+        .await
+        .expect("created");
+    let slug = row(&view, "Pets").slug.clone();
+    delete_category_with(&db, "Pets").await.expect("deleted");
+    assert_colour_cleared(&db, &slug).await;
+    let after = phosk_settings::settings_summary(&db)
+        .await
+        .expect("summary");
+    assert_eq!(after.total_preferences, before.total_preferences);
+    assert_eq!(after.changed_count, before.changed_count);
+}
+
+#[tokio::test]
+async fn merge_clears_the_source_colour_and_keeps_the_target_colour() {
+    let db = fresh_db();
+    set_category_colour_with(&db, "Coffee & snacks", "ink-3")
+        .await
+        .expect("set");
+    let view = set_category_colour_with(&db, "Groceries", "indigo-2")
+        .await
+        .expect("set");
+    let slug = row(&view, "Coffee & snacks").slug.clone();
+    let (_, view) = merge_categories_with(&db, "coffee & snacks", "Groceries")
+        .await
+        .expect("merged");
+    assert_colour_cleared(&db, &slug).await;
+    assert_eq!(row(&view, "Groceries").colour, "indigo-2");
+}
+
+#[tokio::test]
+async fn a_colour_write_failing_after_create_is_a_notice_not_an_error() {
+    let db = fresh_db();
+    let view = list_categories_with(&db).await.expect("read");
+    assert_eq!(with_colour_notice(view.clone(), true).notice, None);
+    let noticed = with_colour_notice(view.clone(), false);
+    assert_eq!(
+        noticed.notice.as_deref(),
+        Some("category created, but its colour was not saved · pick it again")
+    );
+    assert_eq!(noticed.rows, view.rows, "the category is still listed");
 }

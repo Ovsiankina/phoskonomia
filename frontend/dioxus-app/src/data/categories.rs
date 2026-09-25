@@ -5,14 +5,18 @@
 //!
 //! A category's colour is an Oscillocore **token name** (`"indigo-neon"`), never
 //! a raw hex or free text: the wire value is checked server-side against
-//! `COLOUR_TOKENS`, and the page renders it as `var(--<token>)`. The coral
-//! family is left out on purpose — coral is the view's single signal moment.
+//! `COLOUR_TOKENS`, and the page renders it as `var(--<token>)`. Left out
+//! on purpose: the coral family and the warm `neon-magenta` (coral is the
+//! view's single signal moment), and `ok` / `warn` (they mean status).
 //!
 //! `CategoryCap` has no colour field, so the token is stored as the preference
 //! `category_colour.<slug>` (the slug is stable across renames). That keeps the
 //! port and both adapters untouched; `/config` lists only its own rule-table
-//! keys, so these rows never show up there. A stored value that is not in the
-//! palette reads back as [`DEFAULT_COLOUR`].
+//! keys and `phosk_settings::settings_summary` skips the prefix, so these rows
+//! never show up there. A stored value that is not in the palette reads back as
+//! [`DEFAULT_COLOUR`]. When a delete or merge makes a category vanish, its row
+//! is reset to an empty, non-user value (the port has no removal), so a slug
+//! reused later never inherits the old colour.
 //!
 //! Every write returns the refreshed [`CategoriesDto`], so the page never needs
 //! a second round-trip. Testable inner fns are `*_with(db, …)` (see
@@ -31,9 +35,6 @@ pub const COLOUR_TOKENS: &[&str] = &[
     "indigo-3",
     "indigo-neon",
     "text-blue",
-    "neon-magenta",
-    "ok",
-    "warn",
     "ink-2",
     "ink-3",
 ];
@@ -67,6 +68,9 @@ pub struct CategoriesDto {
     pub rows: Vec<CategoryRowDto>,
     /// The colour tokens the picker offers (the server's allow-list).
     pub palette: Vec<String>,
+    /// A write that half-succeeded (the category exists, a side detail was not
+    /// saved): shown as a hint, not an error.
+    pub notice: Option<String>,
 }
 
 /// What a merge would do — shown in the confirm step before it runs.
@@ -90,6 +94,8 @@ mod msg {
     pub(super) const BAD_COLOUR: &str = "pick a colour from the palette";
     pub(super) const UNKNOWN: &str = "this category no longer exists";
     pub(super) const FAILED: &str = "could not save the change, try again";
+    pub(super) const COLOUR_NOT_SAVED: &str =
+        "category created, but its colour was not saved · pick it again";
 }
 
 /// Shown when a call fails before the server could answer.
@@ -106,8 +112,8 @@ pub fn error_text(err: &ServerFnError) -> String {
 
 // ═══ server fns ══════════════════════════════════════════════════════════════
 
-/// The category list. REAL: `DatabaseAdapter::category_caps` +
-/// `phosk_ledger::categories::category_usage` + the colour preferences.
+/// The category list. REAL: `DatabaseAdapter::category_caps` + one usage pass
+/// over the store + the colour preferences.
 #[server]
 pub async fn list_categories() -> Result<CategoriesDto, ServerFnError> {
     #[cfg(feature = "server-deps")]
@@ -225,14 +231,71 @@ pub async fn merge_categories(from: String, into: String) -> Result<CategoriesDt
 // ═══ inner fns (server-only, testable against any adapter) ═══════════════════
 
 #[cfg(feature = "server-deps")]
+use std::collections::HashMap;
+
+#[cfg(feature = "server-deps")]
 use phosk_adapter_db::DatabaseAdapter;
 #[cfg(feature = "server-deps")]
 use phosk_core::error::PhoskError;
+#[cfg(feature = "server-deps")]
+use phosk_model::CategoryCap;
 
 /// The preference key holding a category's colour token.
 #[cfg(feature = "server-deps")]
 fn colour_key(slug: &str) -> String {
-    format!("category_colour.{slug}")
+    format!("{}{slug}", phosk_settings::CATEGORY_COLOUR_PREFIX)
+}
+
+/// Reset the colour row of every category in `before` that no longer exists,
+/// so a slug reused later (e.g. by a split) starts from the default. Best
+/// effort: the delete/merge already happened, and a leftover row is only
+/// cosmetic, so a failed reset does not turn that success into an error.
+#[cfg(feature = "server-deps")]
+async fn clear_vanished_colours(db: &dyn DatabaseAdapter, before: &[CategoryCap]) {
+    let Ok(after) = db.category_caps().await else {
+        return;
+    };
+    for gone in before
+        .iter()
+        .filter(|b| after.iter().all(|a| a.slug != b.slug))
+    {
+        let _ = db.reset_preference(&colour_key(&gone.slug), "").await;
+    }
+}
+
+/// Every stored row naming each category, in one pass over the store — the
+/// same four sources `phosk_ledger::categories::category_usage` counts.
+#[cfg(feature = "server-deps")]
+async fn usage_by_name(db: &dyn DatabaseAdapter) -> Result<HashMap<String, u32>, PhoskError> {
+    let mut uses: HashMap<String, u32> = HashMap::new();
+    let mut bump = |name: &str| {
+        let n = uses.entry(name.to_owned()).or_default();
+        *n = n.saturating_add(1);
+    };
+    for r in db.all_receipts().await? {
+        bump(&r.category);
+        for l in db.line_items(r.id).await? {
+            bump(&l.category);
+        }
+    }
+    for s in db.subscriptions().await? {
+        bump(&s.category);
+    }
+    for s in db.signals().await? {
+        bump(&s.parent);
+    }
+    Ok(uses)
+}
+
+/// Mark a freshly created view when the category exists but its colour write
+/// failed: retrying would only hit "already exists", so this is a notice, not
+/// an error.
+#[cfg(feature = "server-deps")]
+pub(crate) fn with_colour_notice(mut view: CategoriesDto, colour_saved: bool) -> CategoriesDto {
+    if !colour_saved {
+        view.notice = Some(msg::COLOUR_NOT_SAVED.to_owned());
+    }
+    view
 }
 
 /// Accept only an exact palette token.
@@ -267,6 +330,7 @@ pub(crate) async fn list_categories_with(
 ) -> Result<CategoriesDto, ServerFnError> {
     let caps = db.category_caps().await.map_err(store_error)?;
     let prefs = db.preferences().await.map_err(store_error)?;
+    let usage = usage_by_name(db).await.map_err(store_error)?;
     let mut rows = Vec::with_capacity(caps.len());
     for c in caps {
         let key = colour_key(&c.slug);
@@ -276,9 +340,7 @@ pub(crate) async fn list_categories_with(
             .and_then(|p| COLOUR_TOKENS.iter().find(|t| **t == p.value))
             .copied()
             .unwrap_or(DEFAULT_COLOUR);
-        let uses = phosk_ledger::categories::category_usage(db, &c.name)
-            .await
-            .map_err(store_error)?;
+        let uses = usage.get(&c.name).copied().unwrap_or(0);
         rows.push(CategoryRowDto {
             name: c.name,
             slug: c.slug,
@@ -292,11 +354,13 @@ pub(crate) async fn list_categories_with(
     Ok(CategoriesDto {
         rows,
         palette: COLOUR_TOKENS.iter().map(|t| (*t).to_owned()).collect(),
+        notice: None,
     })
 }
 
 /// Validate the colour first (a bad token creates nothing), then create the
-/// category and store its colour.
+/// category and store its colour. Once the category exists the create has
+/// succeeded: a failed colour write comes back as a [`CategoriesDto::notice`].
 #[cfg(feature = "server-deps")]
 pub(crate) async fn create_category_with(
     db: &dyn DatabaseAdapter,
@@ -317,10 +381,14 @@ pub(crate) async fn create_category_with(
     )
     .await
     .map_err(store_error)?;
-    db.set_preference(&colour_key(&created.slug), colour)
+    let colour_saved = db
+        .set_preference(&colour_key(&created.slug), colour)
         .await
-        .map_err(store_error)?;
-    list_categories_with(db).await
+        .is_ok();
+    Ok(with_colour_notice(
+        list_categories_with(db).await?,
+        colour_saved,
+    ))
 }
 
 /// Rename; the colour follows because it is keyed by the stable slug.
@@ -351,15 +419,18 @@ pub(crate) async fn set_category_colour_with(
     list_categories_with(db).await
 }
 
-/// Delete-if-empty; a used category is refused with the ledger's count.
+/// Delete-if-empty; a used category is refused with the ledger's count. The
+/// deleted category's colour row is cleared.
 #[cfg(feature = "server-deps")]
 pub(crate) async fn delete_category_with(
     db: &dyn DatabaseAdapter,
     name: &str,
 ) -> Result<CategoriesDto, ServerFnError> {
+    let before = db.category_caps().await.map_err(store_error)?;
     phosk_ledger::categories::delete_category(db, name)
         .await
         .map_err(store_error)?;
+    clear_vanished_colours(db, &before).await;
     list_categories_with(db).await
 }
 
@@ -401,15 +472,18 @@ pub(crate) async fn merge_preview_with(
     })
 }
 
-/// Run the merge; returns how many rows moved, and the refreshed view.
+/// Run the merge; returns how many rows moved, and the refreshed view. The
+/// source's colour row is cleared; the target keeps its own.
 #[cfg(feature = "server-deps")]
 pub(crate) async fn merge_categories_with(
     db: &dyn DatabaseAdapter,
     from: &str,
     into: &str,
 ) -> Result<(u32, CategoriesDto), ServerFnError> {
+    let before = db.category_caps().await.map_err(store_error)?;
     let moved = phosk_ledger::categories::merge_categories(db, from, into)
         .await
         .map_err(store_error)?;
+    clear_vanished_colours(db, &before).await;
     Ok((moved, list_categories_with(db).await?))
 }
