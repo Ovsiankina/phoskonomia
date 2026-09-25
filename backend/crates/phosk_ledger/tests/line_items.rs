@@ -330,7 +330,8 @@ async fn correct_line_direct_edit_updates_the_field() {
     );
 }
 
-/// Correcting the `name` field is applied verbatim.
+/// Correcting the `name` field is applied (trimmed, per the service's
+/// `bounded_label` validation).
 #[tokio::test]
 async fn correct_line_name_edit_is_applied() {
     let db = seeded();
@@ -522,6 +523,322 @@ async fn correct_line_non_numeric_unit_price_is_invalid() {
     assert!(
         matches!(err, PhoskError::Invalid(_)),
         "non-numeric unit_price → Invalid, got {err:?}"
+    );
+}
+
+// ── correct_line: F2 service-layer validation ─────────────────────────────
+//
+// `correct_line` must reject the same shapes `create_transaction`/`build_line`
+// reject (blank labels, a non-finite/non-positive qty, a negative unit price),
+// plus a length-bounded label, matching the wire layer's existing caps in
+// `dioxus-app/src/data/transactions.rs::line_fix`. A rejected correction must
+// leave the stored line, its provenance and the audit log untouched — nothing
+// is written until every check has passed.
+
+/// A blank (whitespace-only) name is rejected, and the stored line — every
+/// field, not just the name — is byte-for-byte untouched.
+#[tokio::test]
+async fn correct_line_blank_name_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 0).await; // Oat-milk flat white, conf 0.88
+    let err = correct_line(&db, before.id, "name", "   ")
+        .await
+        .expect_err("a blank name must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "blank name → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 0).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A blank (whitespace-only) category is likewise rejected, and the stored
+/// line is byte-for-byte untouched.
+#[tokio::test]
+async fn correct_line_blank_category_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 0).await;
+    let err = correct_line(&db, before.id, "category", "\t\n")
+        .await
+        .expect_err("a blank category must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "blank category → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 0).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A name past the length cap is rejected — mirrors the wire layer's
+/// `MAX_NAME_CHARS` (120) so the service is at least as strict as the UI —
+/// and the stored line is byte-for-byte untouched.
+#[tokio::test]
+async fn correct_line_name_too_long_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 0).await;
+    let too_long = "x".repeat(121);
+    let err = correct_line(&db, before.id, "name", &too_long)
+        .await
+        .expect_err("a name past the length cap must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "over-long name → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 0).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A category past the length cap is rejected — mirrors the wire layer's
+/// `MAX_CATEGORY_CHARS` (60) — and the stored line is untouched.
+#[tokio::test]
+async fn correct_line_category_too_long_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 0).await;
+    let too_long = "x".repeat(61);
+    let err = correct_line(&db, before.id, "category", &too_long)
+        .await
+        .expect_err("a category past the length cap must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "over-long category → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 0).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A name exactly at the length cap (120 chars) is accepted.
+#[tokio::test]
+async fn correct_line_name_at_max_length_is_accepted() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 0).await;
+    let max_len = "x".repeat(120);
+    correct_line(&db, line.id, "name", &max_len)
+        .await
+        .expect("a 120-char name must be accepted");
+
+    let after = nth_line_id(&db, "t1", 0).await;
+    assert_eq!(after.name, max_len, "the 120-char name is stored in full");
+}
+
+/// A name containing a control character is rejected, and the stored line is
+/// untouched.
+#[tokio::test]
+async fn correct_line_name_with_control_char_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 0).await;
+    let err = correct_line(&db, before.id, "name", "Bad\u{7}name")
+        .await
+        .expect_err("a name with a control character must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "control character in name → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 0).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A name with leading/trailing whitespace is accepted and stored trimmed.
+#[tokio::test]
+async fn correct_line_name_padded_is_stored_trimmed() {
+    let db = seeded();
+    let line = nth_line_id(&db, "t1", 0).await;
+    correct_line(&db, line.id, "name", "  Sourdough loaf  ")
+        .await
+        .expect("a padded name must be accepted");
+
+    let after = nth_line_id(&db, "t1", 0).await;
+    assert_eq!(after.name, "Sourdough loaf", "the stored name is trimmed");
+}
+
+/// A qty of exactly zero is rejected (not merely non-numeric), and the stored
+/// line is byte-for-byte untouched.
+#[tokio::test]
+async fn correct_line_qty_zero_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await; // Bananas, qty 1.2
+    let err = correct_line(&db, before.id, "qty", "0")
+        .await
+        .expect_err("qty of zero must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "qty 0 → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A negative qty is rejected, and the stored line is byte-for-byte untouched.
+#[tokio::test]
+async fn correct_line_qty_negative_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, before.id, "qty", "-2")
+        .await
+        .expect_err("a negative qty must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "negative qty → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// `NaN` parses as an f64 but is not a usable quantity — rejected, and the
+/// stored line is byte-for-byte untouched.
+#[tokio::test]
+async fn correct_line_qty_nan_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, before.id, "qty", "NaN")
+        .await
+        .expect_err("a NaN qty must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "NaN qty → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// `inf` parses as an f64 but is not a finite quantity — rejected, and the
+/// stored line is byte-for-byte untouched.
+#[tokio::test]
+async fn correct_line_qty_infinite_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, before.id, "qty", "inf")
+        .await
+        .expect_err("an infinite qty must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "infinite qty → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A negative unit price is rejected — the stored line is byte-for-byte
+/// untouched.
+#[tokio::test]
+async fn correct_line_unit_price_negative_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await; // Bananas, unit price 320
+    let err = correct_line(&db, before.id, "unit_price", "-100")
+        .await
+        .expect_err("a negative unit_price must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "negative unit_price → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A qty above `MAX_QTY` is rejected — the stored line is untouched.
+#[tokio::test]
+async fn correct_line_qty_above_max_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, before.id, "qty", "100000.5")
+        .await
+        .expect_err("a qty above MAX_QTY must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "qty above the cap → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A qty exactly at `MAX_QTY` is still accepted.
+#[tokio::test]
+async fn correct_line_qty_at_max_is_accepted() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    correct_line(&db, before.id, "qty", "100000")
+        .await
+        .expect("a qty exactly at MAX_QTY is accepted");
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert!((after.qty - phosk_ledger::line_items::MAX_QTY).abs() < f64::EPSILON);
+}
+
+/// A unit price above `MAX_UNIT_PRICE_CENTIMES` is rejected — the stored line
+/// is untouched.
+#[tokio::test]
+async fn correct_line_unit_price_above_max_is_invalid() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    let err = correct_line(&db, before.id, "unit_price", "100000001")
+        .await
+        .expect_err("a unit price above the cap must be rejected as Invalid");
+    assert!(
+        matches!(err, PhoskError::Invalid(_)),
+        "unit price above the cap → Invalid, got {err:?}"
+    );
+
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        before, after,
+        "a rejected correction must not change the stored line"
+    );
+}
+
+/// A unit price exactly at `MAX_UNIT_PRICE_CENTIMES` is still accepted.
+#[tokio::test]
+async fn correct_line_unit_price_at_max_is_accepted() {
+    let db = seeded();
+    let before = nth_line_id(&db, "t1", 1).await;
+    correct_line(&db, before.id, "unit_price", "100000000")
+        .await
+        .expect("a unit price exactly at the cap is accepted");
+    let after = nth_line_id(&db, "t1", 1).await;
+    assert_eq!(
+        after.unit_price.centimes(),
+        phosk_ledger::line_items::MAX_UNIT_PRICE_CENTIMES
     );
 }
 
