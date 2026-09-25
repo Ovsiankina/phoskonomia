@@ -1,10 +1,10 @@
-//! RED integration tests for `phosk_ai` — the AI read-slice + spine SERVICE crate.
+//! Integration tests for `phosk_ai` — the AI read-slice + spine SERVICE crate.
 //!
 //! Drives the five public service fns (`ai_panel`, `send_message`, `clear_chat`,
 //! `dismiss_feed_item`, `dashboard_insight`) against the deterministic Swiss
-//! May/June-2026 seed (`phosk_db_memory::MemoryDb::seeded`). Every body is
-//! `todo!()` today, so each `#[tokio::test]` COMPILES then PANICS at runtime —
-//! these are the red tests the green phase turns true.
+//! May/June-2026 seed (`phosk_db_memory::MemoryDb::seeded`). Each `#[tokio::test]`
+//! exercises the implemented service end to end and asserts the exact wire
+//! shapes below.
 //!
 //! Scope (per the AI feature checklist): activity feed (+ dismiss), narrative
 //! dashboard insight, chat history + send + clear (persistence), AI status

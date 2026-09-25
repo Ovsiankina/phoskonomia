@@ -17,13 +17,11 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for the `phosk_insights::analytics`, `::momentum` and
+//! Integration tests for the `phosk_insights::analytics`, `::momentum` and
 //! `::exports` slices (F3).
 //!
-//! These are written BEFORE the implementations: every service body is a
-//! `todo!()`, so each `#[tokio::test]` that drives a service COMPILES and then
-//! PANICS at runtime (red). The pure `momentum` helpers are likewise `todo!()`
-//! and their tests fail the same way.
+//! These drive the implemented services and pure `momentum` helpers end to end
+//! against the contract below.
 //!
 //! The contract is pinned to:
 //!   - `frontend/dioxus-app/src/data/analytics.rs` (the DTO field shapes + the

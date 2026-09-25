@@ -17,7 +17,7 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED tests for `phosk_recurring::recurring_detect`.
+//! Tests for `phosk_recurring::recurring_detect`.
 //!
 //! These pin the recurring-detection AI slice against the deterministic Swiss
 //! seed (`phosk_db_memory::MemoryDb::seeded`) at `as_of = 2026-06-18`:
@@ -32,9 +32,9 @@
 //!   slug.
 //! - Usage-based review flags: the `gym` sub (status `watch`) stays flagged.
 //!
-//! Every body under test is `todo!()`, so each test COMPILES and then panics at
-//! runtime — i.e. RED. No production logic lives here. `expect("msg")` is used
-//! for fallible setup; never a bare `unwrap()`.
+//! Every service under test is implemented, so each test drives the real
+//! detection paths against the seed. `expect("msg")` is used for fallible
+//! setup; never a bare `unwrap()`.
 
 use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;
