@@ -204,7 +204,8 @@ const BAD_ID: &str = "That is not a valid proposal id.";
 #[cfg(feature = "server-deps")]
 const BAD_SLUG: &str = "That is not a valid receipt.";
 #[cfg(feature = "server-deps")]
-const GONE: &str = "This proposal is no longer pending. Refresh to see the current queue.";
+pub(crate) const GONE: &str =
+    "This proposal is no longer pending. Refresh to see the current queue.";
 #[cfg(feature = "server-deps")]
 pub(crate) const REFUSED: &str = "This proposal can't be booked: it failed validation, was \
                                   already rejected, conflicts with another open proposal for \

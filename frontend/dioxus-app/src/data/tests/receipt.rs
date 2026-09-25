@@ -11,10 +11,16 @@ use serde_json::{json, Value};
 
 use super::support::{fresh_db, money, server_error, today};
 use crate::data::approvals::approve_proposal_with;
-use crate::data::receipt::{upload_receipt_with, IntakeStatus, ReceiptIntakeDto, MAX_UPLOAD_BYTES};
+use crate::data::receipt::{
+    read_capped, upload_receipt_with, IntakeStatus, ReceiptIntakeDto, MAX_UPLOAD_BYTES,
+};
 
-const REFUSED: &str = "This file could not be read as a receipt photo. Nothing was staged. \
-                       Upload a clear JPEG or PNG photo of one receipt.";
+const NOT_JPEG_PNG: &str = "This file is not a JPEG or PNG photo. Nothing was staged. \
+                            Upload a JPEG or PNG photo of one receipt.";
+const UNREADABLE: &str = "Could not read a receipt from this photo. Nothing was staged. \
+                          Try a clearer photo or try again later.";
+const TOO_LARGE: &str = "This photo is larger than 12 MB. Take a smaller photo and try again.";
+const CUT: &str = "The upload failed or went over 12 MB. Try again with a smaller photo.";
 const NO_PHOTO: &str = "No photo was received. Pick a photo and try again.";
 
 /// An LLM that answers every structured call with one fixed value (the fake's
@@ -38,6 +44,30 @@ impl LlmAdapter for ScriptedLlm {
         _schema: &Value,
     ) -> Result<Value, PhoskError> {
         Ok(self.0.clone())
+    }
+}
+
+/// An LLM that is down: every call fails the way the Ollama adapter reports
+/// a transport failure (`Invalid`).
+struct DownLlm;
+
+#[async_trait::async_trait]
+impl LlmAdapter for DownLlm {
+    fn model(&self) -> &str {
+        "down-test"
+    }
+    async fn health(&self) -> Result<bool, PhoskError> {
+        Ok(false)
+    }
+    async fn complete(&self, _prompt: &str) -> Result<String, PhoskError> {
+        Err(PhoskError::Invalid("model request failed".into()))
+    }
+    async fn generate_structured(
+        &self,
+        _prompt: &str,
+        _schema: &Value,
+    ) -> Result<Value, PhoskError> {
+        Err(PhoskError::Invalid("model request failed".into()))
     }
 }
 
@@ -135,10 +165,7 @@ async fn an_oversize_upload_is_refused_before_intake() {
 
     let err = upload(&p, &receipt_llm(), &big).await;
 
-    assert_eq!(
-        server_error(err),
-        "This photo is larger than 12 MB. Take a smaller photo and try again."
-    );
+    assert_eq!(server_error(err), TOO_LARGE);
     assert_eq!(open_receipt_suggestions(&p.db).await, 0);
     assert!(p.storage.is_empty().expect("len"), "nothing stored");
 }
@@ -149,7 +176,7 @@ async fn non_image_bytes_are_refused_with_a_fixed_text() {
     for bytes in [b"%PDF-1.7 synthetic".as_slice(), b"just text".as_slice()] {
         assert_eq!(
             server_error(upload(&p, &receipt_llm(), bytes).await),
-            REFUSED
+            NOT_JPEG_PNG
         );
     }
     assert_eq!(
@@ -166,8 +193,110 @@ async fn unusable_model_output_is_refused_without_staging() {
 
     let err = upload(&p, &hostile, &jpeg(3)).await;
 
-    assert_eq!(server_error(err), REFUSED);
+    assert_eq!(server_error(err), UNREADABLE);
     assert_eq!(open_receipt_suggestions(&p.db).await, 0);
+}
+
+#[tokio::test]
+async fn a_model_outage_does_not_blame_the_photo() {
+    let p = ports();
+
+    let err = upload(&p, &DownLlm, &jpeg(6)).await;
+
+    assert_eq!(server_error(err), UNREADABLE);
+    assert_eq!(open_receipt_suggestions(&p.db).await, 0);
+}
+
+/// A little-endian TIFF whose IFD0 points at an Exif IFD holding a GPS tag.
+fn tiff_with_exif() -> Vec<u8> {
+    let mut v = b"II*\0".to_vec();
+    v.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset
+    v.extend_from_slice(&1u16.to_le_bytes()); // one entry
+    v.extend_from_slice(&0x8825u16.to_le_bytes()); // GPSInfo IFD pointer
+    v.extend_from_slice(&4u16.to_le_bytes()); // LONG
+    v.extend_from_slice(&1u32.to_le_bytes());
+    v.extend_from_slice(&26u32.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+    v.extend_from_slice(b"GPS 47.3769N 8.5417E synthetic");
+    v
+}
+
+/// A RIFF/WebP container carrying an `EXIF` chunk.
+fn webp_with_exif() -> Vec<u8> {
+    let exif = b"Exif\0\0MM\0*GPS 47.3769N 8.5417E synthetic";
+    let mut body = b"WEBPVP8X".to_vec();
+    body.extend_from_slice(&10u32.to_le_bytes());
+    body.extend_from_slice(&[0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // EXIF flag
+    body.extend_from_slice(b"EXIF");
+    body.extend_from_slice(&u32::try_from(exif.len()).expect("len").to_le_bytes());
+    body.extend_from_slice(exif);
+    let mut v = b"RIFF".to_vec();
+    v.extend_from_slice(&u32::try_from(body.len()).expect("len").to_le_bytes());
+    v.extend_from_slice(&body);
+    v
+}
+
+#[tokio::test]
+async fn images_intake_cannot_strip_are_refused_before_storage() {
+    let p = ports();
+    for (kind, bytes) in [("tiff", tiff_with_exif()), ("webp", webp_with_exif())] {
+        assert_eq!(
+            server_error(upload(&p, &receipt_llm(), &bytes).await),
+            NOT_JPEG_PNG,
+            "{kind}"
+        );
+    }
+    assert!(p.storage.is_empty().expect("len"), "nothing stored");
+    assert_eq!(open_receipt_suggestions(&p.db).await, 0);
+}
+
+#[tokio::test]
+async fn the_review_shows_the_amount_each_line_books() {
+    let p = ports();
+    let llm = ScriptedLlm(json!({
+        "shop": "Synthetic Market",
+        "category": "Groceries",
+        "lineItems": [
+            {"name": "Cheese", "qty": 1.5, "unitPriceCentimes": 101, "confidence": 0.9},
+            {"name": "Eggs", "qty": 2.0, "unitPriceCentimes": 245, "confidence": 0.9}
+        ]
+    }));
+
+    let out = upload(&p, &llm, &jpeg(7)).await.expect("staged");
+
+    let r = out.proposal.expect("review").receipt.expect("receipt");
+    let totals: Vec<_> = r.lines.iter().map(|l| l.line_total).collect();
+    assert_eq!(totals, [money(152), money(490)]);
+    assert!(
+        r.lines.iter().all(|l| !l.mismatch),
+        "backend-derived totals"
+    );
+    assert_eq!(r.total, money(642));
+    assert!(!out.conflicting);
+}
+
+#[tokio::test]
+async fn a_rival_open_proposal_marks_the_review_conflicting() {
+    let p = ports();
+    let first = upload(&p, &receipt_llm(), &jpeg(8)).await.expect("staged");
+    let mine =
+        p.db.ai_suggestions()
+            .await
+            .expect("suggestions")
+            .into_iter()
+            .find(|s| s.id.to_string() == first.suggestion_id)
+            .expect("own suggestion");
+    p.db.enqueue_suggestion(phosk_model::AiSuggestion {
+        id: Default::default(),
+        ..mine
+    })
+    .await
+    .expect("rival");
+
+    let again = upload(&p, &receipt_llm(), &jpeg(8)).await.expect("dedup");
+
+    assert!(again.proposal.is_some());
+    assert!(again.conflicting);
 }
 
 #[tokio::test]
@@ -207,4 +336,33 @@ async fn approving_from_the_review_books_exactly_once() {
     assert_eq!(again.status, IntakeStatus::Duplicate);
     assert!(again.proposal.is_none());
     assert_eq!(ledger_len(&p.db).await, before + 1);
+}
+
+fn stream(declared: Option<u64>, body: Vec<u8>) -> dioxus::fullstack::FileStream {
+    use dioxus::fullstack::body::Body;
+    dioxus::fullstack::FileStream::from_raw(
+        "photo.jpg".into(),
+        declared,
+        "image/jpeg".into(),
+        Body::from(body).into_data_stream(),
+    )
+}
+
+#[tokio::test]
+async fn the_streaming_read_stops_at_the_cap() {
+    let ok = read_capped(stream(None, jpeg(9))).await.expect("small");
+    assert_eq!(ok.as_ref(), jpeg(9).as_slice());
+
+    let at_cap = read_capped(stream(None, vec![0; MAX_UPLOAD_BYTES])).await;
+    assert_eq!(at_cap.expect("at cap").len(), MAX_UPLOAD_BYTES);
+
+    let over = read_capped(stream(None, vec![0; MAX_UPLOAD_BYTES + 1])).await;
+    assert_eq!(server_error(over), CUT);
+}
+
+#[tokio::test]
+async fn a_declared_oversize_is_refused_before_reading() {
+    let declared = u64::try_from(MAX_UPLOAD_BYTES + 1).expect("fits");
+    let err = read_capped(stream(Some(declared), jpeg(10))).await;
+    assert_eq!(server_error(err), TOO_LARGE);
 }
