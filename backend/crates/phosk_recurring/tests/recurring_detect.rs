@@ -40,10 +40,11 @@ use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_db_memory::MemoryDb;
+use phosk_recurring::lifecycle::resume_subscription;
 use phosk_recurring::recurring_detect::{
     DetectionDto, RecurringCandidateDto, confirm_candidate, detect, dismiss_candidate,
 };
-use phosk_recurring::subscriptions::{SubFilter, list_subscriptions};
+use phosk_recurring::subscriptions::{SubFilter, list_subscriptions, subscription_detail};
 
 /// The seeded demo clock: day 18 of the June 2026 cycle.
 fn as_of() -> NaiveDate {
@@ -290,6 +291,27 @@ async fn dismiss_unknown_candidate_is_not_found() {
         "unknown candidate ⇒ NotFound, got {err:?}"
     );
     assert_eq!(err.http_status(), 404);
+}
+
+/// Dismissing then resuming a candidate un-dismisses it: it is an open
+/// candidate again in the inspector, per [`recurring_detect::is_open_candidate`]
+/// (a resumed record's status is no longer `"paused"`).
+#[tokio::test]
+async fn dismiss_then_resume_makes_it_an_open_candidate_again() {
+    let db = seeded();
+    dismiss_candidate(&db, "icloud").await.expect("dismiss ok");
+
+    resume_subscription(&db, "icloud", as_of())
+        .await
+        .expect("resume ok");
+
+    let detail = subscription_detail(&db, as_of(), "icloud")
+        .await
+        .expect("detail ok");
+    assert!(
+        detail.candidate,
+        "a resumed candidate is open again, not stuck dismissed"
+    );
 }
 
 // ── usage-based review flags ──────────────────────────────────────────────────
