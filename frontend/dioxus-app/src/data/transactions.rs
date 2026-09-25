@@ -491,15 +491,15 @@ pub(crate) async fn correct_transaction_line_with(
 /// magnitude caps. Every message here is written for the user; store errors are
 /// mapped by kind and never echo their internal detail.
 #[cfg(feature = "server-deps")]
-mod line_fix {
+pub(crate) mod line_fix {
     use dioxus::prelude::ServerFnError;
     use phosk_core::error::PhoskError;
     use phosk_model::LineItem;
 
     /// Longest accepted item name, in characters.
-    const MAX_NAME_CHARS: usize = 120;
+    pub(crate) const MAX_NAME_CHARS: usize = 120;
     /// Longest accepted category, in characters.
-    const MAX_CATEGORY_CHARS: usize = 60;
+    pub(crate) const MAX_CATEGORY_CHARS: usize = 60;
     /// Largest accepted quantity (pieces or weighed units).
     const MAX_QTY: f64 = 100_000.0;
     /// Largest accepted unit price: CHF 1'000'000, in centimes.
@@ -567,7 +567,7 @@ mod line_fix {
     }
 
     /// A trimmed, non-empty, bounded, control-character-free label.
-    fn label(raw: &str, what: &str, max_chars: usize) -> Result<String, PhoskError> {
+    pub(crate) fn label(raw: &str, what: &str, max_chars: usize) -> Result<String, PhoskError> {
         let value = raw.trim();
         if value.is_empty() {
             return Err(invalid(format!("{what} cannot be empty.")));
@@ -587,7 +587,7 @@ mod line_fix {
 
     /// A typed quantity: plain digits with an optional `.`/`,` decimal part (no
     /// sign, exponent, `inf` or `NaN`). The bounds are [`check_qty`]'s job.
-    fn parse_qty(raw: &str) -> Result<f64, PhoskError> {
+    pub(crate) fn parse_qty(raw: &str) -> Result<f64, PhoskError> {
         const SHAPE: &str = "Quantity must be a number such as 2 or 0.5.";
         let text = raw.trim().replace(',', ".");
         let (whole, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
@@ -598,7 +598,7 @@ mod line_fix {
     }
 
     /// A new quantity must be greater than zero and at most [`MAX_QTY`].
-    fn check_qty(qty: f64) -> Result<f64, PhoskError> {
+    pub(crate) fn check_qty(qty: f64) -> Result<f64, PhoskError> {
         if qty <= 0.0 {
             return Err(invalid("Quantity must be greater than zero."));
         }
@@ -661,7 +661,7 @@ mod line_fix {
     }
 
     /// A new unit price must be at most [`MAX_UNIT_PRICE_CENTIMES`].
-    fn check_unit_price(centimes: i64) -> Result<i64, PhoskError> {
+    pub(crate) fn check_unit_price(centimes: i64) -> Result<i64, PhoskError> {
         if centimes > MAX_UNIT_PRICE_CENTIMES {
             return Err(unit_price_too_large());
         }

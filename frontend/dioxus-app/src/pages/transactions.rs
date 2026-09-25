@@ -25,6 +25,10 @@
 //!   * Low-confidence lines (< 0.7) wear the design system's CAUTION treatment
 //!     (`--warn`): a flagged row rule, an amber dot and name. Coral stays the
 //!     page's single signal moment.
+//!   * NEW (page header) opens the manual-entry form (`NewTransactionForm`),
+//!     which saves through `create_transaction`; on success the form closes
+//!     and the list refetches. The design export has no NEW control; it sits
+//!     next to the CSV export as an indigo `gbtn`.
 //!   * The AI RE-READ nudge button still has no server fn (it POSTed the dead
 //!     REST layer), so its handler only `stop_propagation`s.
 //!   * F3's `TxnLineDto` always carries a concrete `line_total`/`confidence`
@@ -37,6 +41,7 @@
 use dioxus::prelude::*;
 use phosk_core::money::Money;
 
+use crate::components::new_transaction::NewTransactionForm;
 use crate::components::prims::{Dot, ScannerBg};
 use crate::components::shell::{AiPanel, Sig, SigOcc, SignalPanel, TopBar};
 use crate::components::states::Awaiting;
@@ -1164,6 +1169,7 @@ pub fn TransactionsPage() -> Element {
     let mut detail = use_signal(|| Option::<TransactionDto>::None);
     let mut sel = use_signal(|| Option::<String>::None);
     let mut drawer_sig = use_signal(|| false);
+    let mut adding = use_signal(|| false);
 
     // ---- filters → list params (changing any re-fetches the list) ----
     let mut horizon = use_signal(|| "MONTH".to_string());
@@ -1292,7 +1298,26 @@ pub fn TransactionsPage() -> Element {
                                         " · {period_label}"
                                     }
                                 }
-                                crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Transactions }
+                                div { class: "txn-acts",
+                                    button {
+                                        class: "gbtn p",
+                                        disabled: adding(),
+                                        onclick: move |_| adding.set(true),
+                                        "+ NEW"
+                                    }
+                                    crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Transactions }
+                                }
+                            }
+
+                            if adding() {
+                                NewTransactionForm {
+                                    on_close: move |()| adding.set(false),
+                                    on_saved: move |()| {
+                                        adding.set(false);
+                                        txns.restart();
+                                        lines_rev += 1;
+                                    },
+                                }
                             }
 
                             FilterBar {
