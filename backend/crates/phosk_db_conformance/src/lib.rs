@@ -67,6 +67,7 @@ macro_rules! database_adapter_conformance {
             ledger::insert_receipt_appends_and_reads_back,
             ledger::insert_receipt_binds_lines_to_the_receipt,
             ledger::insert_receipt_same_slug_replaces_in_place,
+            ledger::insert_receipt_same_rows_twice_is_one_booking,
             ledger::insert_receipt_projects_a_dashboard_transaction,
             ledger::insert_receipt_same_slug_replaces_the_projection,
             ledger::delete_receipt_removes_it_its_lines_and_its_projection,
@@ -112,6 +113,7 @@ macro_rules! database_adapter_conformance {
             ai::clear_chat_empties_only_that_chat,
             ai::enqueue_suggestion_appends_it,
             ai::update_suggestion_status_changes_only_the_target,
+            ai::stage_receipt_proposal_round_trips_off_ledger,
         );
     };
     (@each $factory:expr; $($module:ident :: $check:ident),+ $(,)?) => {

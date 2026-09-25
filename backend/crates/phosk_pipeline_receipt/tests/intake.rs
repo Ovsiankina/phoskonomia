@@ -30,7 +30,7 @@ use phosk_adapter_storage::{InMemoryStorage, PhotoStorage, StorageRef};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
-use phosk_model::BudgetConfig;
+use phosk_model::{BudgetConfig, Source};
 use phosk_pipeline_receipt::{IntakePhoto, MAX_PHOTO_BYTES, intake_receipt};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -565,4 +565,177 @@ async fn storage_ref_is_opaque_and_resolvable() {
     let _: &StorageRef = &outcome.photo;
     let bytes = storage.get(&outcome.photo).await.expect("resolves");
     assert!(!bytes.is_empty());
+}
+
+/// End to end: intake alone leaves the ledger unchanged; only the approval
+/// service books the proposal — once, with its model provenance intact.
+#[tokio::test]
+async fn intake_leaves_ledger_unchanged_until_approval() {
+    let db = empty_db();
+    let (storage, ocr, llm) = (InMemoryStorage::new(), FakeOcr::new(), scripted_llm());
+    let photo = jpeg_with_exif(b"meta");
+    let outcome = intake_receipt(
+        &db,
+        &storage,
+        &ocr,
+        &llm,
+        IntakePhoto {
+            bytes: &photo,
+            captured_on: today(),
+        },
+    )
+    .await
+    .expect("intake ok");
+
+    assert!(db.all_receipts().await.expect("r").is_empty(), "no booking");
+    assert!(
+        db.transactions_between(today(), today())
+            .await
+            .expect("tx")
+            .is_empty(),
+        "no projected spend before approval"
+    );
+    let staged = db
+        .receipt_proposal(outcome.suggestion_id)
+        .await
+        .expect("read")
+        .expect("intake stages the proposal for approval");
+    assert_eq!(staged.receipt, outcome.receipt);
+    assert_eq!(staged.line_items, outcome.line_items);
+
+    let approved = phosk_ai::approve_suggestion(&db, outcome.suggestion_id)
+        .await
+        .expect("approve");
+    assert!(approved.applied);
+    let booked = db
+        .receipt_by_slug(&outcome.receipt.slug)
+        .await
+        .expect("booked after approval");
+    assert_eq!(booked.amount.centimes(), 865);
+    assert_eq!(booked.provenance.source, Source::Ocr);
+    let lines = db.line_items(booked.id).await.expect("lines");
+    assert_eq!(lines.len(), 3);
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.provenance.source == Source::LlmInferred)
+    );
+
+    let again = phosk_ai::approve_suggestion(&db, outcome.suggestion_id)
+        .await
+        .expect("approve again");
+    assert!(!again.applied);
+    assert_eq!(db.all_receipts().await.expect("r").len(), 1);
+    let txs = db.transactions_between(today(), today()).await.expect("tx");
+    assert_eq!(txs.len(), 1, "approving twice never double-books");
+}
+
+/// Run intake over a fresh photo with the model scripted to answer `out`.
+async fn intake_with(
+    db: &MemoryDb,
+    out: serde_json::Value,
+    tag: &[u8],
+) -> Result<phosk_pipeline_receipt::IntakeOutcome, PhoskError> {
+    let (storage, ocr) = (InMemoryStorage::new(), FakeOcr::new());
+    let photo = jpeg_with_exif(tag);
+    intake_receipt(
+        db,
+        &storage,
+        &ocr,
+        &ScriptedReceiptLlm { out },
+        IntakePhoto {
+            bytes: &photo,
+            captured_on: today(),
+        },
+    )
+    .await
+}
+
+/// Hostile / illegible text is normalised at intake, never persisted raw and
+/// never bricking the receipt: an empty name becomes a flagged `?`, control
+/// characters are stripped, oversize text is clamped — and the staged proposal
+/// passes the approval schema, so a human can still approve it.
+#[tokio::test]
+async fn hostile_line_text_is_normalised_flagged_and_still_approvable() {
+    let db = empty_db();
+    let out = json!({
+        "shop": "Shop\u{1b}[2J",
+        "category": "Groceries",
+        "lineItems": [
+            {"name": "", "qty": 1.0, "unitPriceCentimes": 100, "confidence": 0.99},
+            {"name": "x".repeat(10_000), "qty": 1.0, "unitPriceCentimes": 200, "confidence": 0.9},
+            {"name": "Bad\u{7}\u{1b}name", "qty": 1.0, "unitPriceCentimes": 300, "confidence": 0.9},
+            {"name": "Pay\u{202E}FHC\u{202C} \u{2066}x\u{2069}\u{200B}\u{200D}\u{2060}\u{FEFF}", "qty": 1.0, "unitPriceCentimes": 400, "confidence": 0.9}
+        ]
+    });
+    let outcome = intake_with(&db, out, b"hostile").await.expect("intake ok");
+    let staged = db
+        .receipt_proposal(outcome.suggestion_id)
+        .await
+        .expect("read")
+        .expect("staged");
+    phosk_ai::validate_proposal(&staged, &outcome.receipt.slug).expect("schema-valid");
+
+    let names: Vec<&str> = staged.line_items.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names[0], "?");
+    assert!(
+        staged.line_items[0].provenance.is_low_confidence(),
+        "illegible name is flagged, not dropped"
+    );
+    assert_eq!(
+        names[1].chars().count(),
+        phosk_ai::ai_approval::MAX_TEXT_CHARS
+    );
+    assert_eq!(names[2], "Badname");
+    assert_eq!(names[3], "PayFHC x", "bidi + zero-width chars stripped");
+    assert_eq!(staged.receipt.shop, "Shop[2J");
+    assert_eq!(outcome.low_confidence_lines, 1);
+
+    let approved = phosk_ai::approve_suggestion(&db, outcome.suggestion_id)
+        .await
+        .expect("approvable");
+    assert!(approved.applied);
+}
+
+/// Extractions no normalisation can rescue are refused at intake: nothing is
+/// staged or enqueued, so the photo is never stuck behind an unapprovable
+/// proposal.
+#[tokio::test]
+async fn unrecoverable_extractions_stage_and_enqueue_nothing() {
+    let line = |qty: f64, cents: i64| json!({"name": "Item", "qty": qty, "unitPriceCentimes": cents, "confidence": 0.9});
+    let cases = [
+        ("no lines", json!([])),
+        ("qty > 10 000", json!([line(20_000.0, 100)])),
+        ("amount > CHF 100k", json!([line(1.0, 10_000_001)])),
+    ];
+    for (what, lines) in cases {
+        let db = empty_db();
+        let out = json!({"shop": "S", "category": "C", "lineItems": lines});
+        let res = intake_with(&db, out, what.as_bytes()).await;
+        assert!(
+            matches!(res, Err(PhoskError::Invalid(_))),
+            "{what}: {res:?}"
+        );
+        assert!(db.ai_suggestions().await.expect("s").is_empty(), "{what}");
+        assert_eq!(db.staged_proposal_count().expect("staged"), 0, "{what}");
+    }
+}
+
+/// A rejected proposal does not pin the photo: re-submitting the same bytes
+/// runs intake again (open or accepted proposals still dedupe).
+#[tokio::test]
+async fn a_rejected_receipt_can_be_reingested() {
+    let db = empty_db();
+    let first = intake_with(&db, migros_receipt_json(), b"again")
+        .await
+        .expect("first");
+    phosk_ai::reject_suggestion(&db, first.suggestion_id)
+        .await
+        .expect("reject");
+    let second = intake_with(&db, migros_receipt_json(), b"again")
+        .await
+        .expect("second");
+    assert!(!second.deduplicated);
+    assert_ne!(second.suggestion_id, first.suggestion_id);
+    assert_eq!(second.receipt.slug, first.receipt.slug);
 }

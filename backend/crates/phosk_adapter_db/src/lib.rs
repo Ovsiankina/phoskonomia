@@ -36,7 +36,8 @@ use phosk_id::{
 use phosk_model::{
     AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
     CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
-    PersonalIou, Preference, Receipt, Signal, SignalOccurrence, Subscription, Transaction,
+    PersonalIou, Preference, Receipt, ReceiptProposal, Signal, SignalOccurrence, Subscription,
+    Transaction,
 };
 
 /// The single fat database port (ADR-000): one async, object-safe trait covering
@@ -628,11 +629,13 @@ pub trait DatabaseAdapter: Send + Sync {
 
     /// Append a machine-proposed [`AiSuggestion`] to the approval queue.
     ///
-    /// This is the ONLY write path AI-derived proposals take: the receipt-intake
-    /// pipeline and the AI write-tools build a candidate suggestion (always
-    /// `status == "open"`) and enqueue it here for human approval — they never
-    /// mutate domain state directly. Idempotency is the caller's concern (the
-    /// pipeline keys off a content hash); this method appends what it is given.
+    /// AI-derived proposals only ever reach the store through the approval queue
+    /// — this method, plus [`Self::stage_receipt_proposal`] for a receipt
+    /// suggestion's payload: the receipt-intake pipeline and the AI write-tools
+    /// build a candidate suggestion (always `status == "open"`) and enqueue it
+    /// here for human approval — they never mutate domain state directly.
+    /// Idempotency is the caller's concern (the pipeline keys off a content
+    /// hash); this method appends what it is given.
     ///
     /// # Errors
     /// [`PhoskError`] if the store rejects the write.
@@ -647,6 +650,24 @@ pub trait DatabaseAdapter: Send + Sync {
         id: SuggestionId,
         status: &str,
     ) -> Result<(), PhoskError>;
+
+    /// Stage the payload of a `kind == "receipt"` suggestion, keyed by its
+    /// `suggestion_id`. Staging is NOT a ledger write: the receipt only reaches
+    /// the ledger when the approval service applies it. Re-staging the same
+    /// suggestion id replaces the stored payload.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store rejects the write.
+    async fn stage_receipt_proposal(&self, p: ReceiptProposal) -> Result<(), PhoskError>;
+
+    /// The staged [`ReceiptProposal`] of a suggestion, or `None` if none was staged.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store fails to answer.
+    async fn receipt_proposal(
+        &self,
+        id: SuggestionId,
+    ) -> Result<Option<ReceiptProposal>, PhoskError>;
 }
 
 #[cfg(test)]
@@ -917,6 +938,15 @@ mod tests {
             _status: &str,
         ) -> Result<(), PhoskError> {
             Ok(())
+        }
+        async fn stage_receipt_proposal(&self, _p: ReceiptProposal) -> Result<(), PhoskError> {
+            Ok(())
+        }
+        async fn receipt_proposal(
+            &self,
+            _id: SuggestionId,
+        ) -> Result<Option<ReceiptProposal>, PhoskError> {
+            Ok(None)
         }
     }
 

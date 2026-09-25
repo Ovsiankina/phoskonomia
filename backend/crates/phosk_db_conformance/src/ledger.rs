@@ -80,6 +80,34 @@ pub async fn insert_receipt_same_slug_replaces_in_place(db: &dyn DatabaseAdapter
     ensure(orphans.is_empty(), "no lines under the discarded id")
 }
 
+/// Writing the SAME rows (same ids, same slug) twice — what a concurrent
+/// double-approve of one proposal degrades to — is one booking: one receipt,
+/// one projected transaction, one set of lines.
+pub async fn insert_receipt_same_rows_twice_is_one_booking(db: &dyn DatabaseAdapter) -> Outcome {
+    let (id, day) = (ReceiptId::new(), date(2027, 1, 12)?);
+    let r = receipt(id, "conf-twice", day, 2_500);
+    let lines = vec![line(id, "A", 1_000), line(id, "B", 1_500)];
+    let count = db.all_receipts().await?.len();
+    db.insert_receipt(r.clone(), lines.clone()).await?;
+    let again = db.insert_receipt(r, lines.clone()).await?;
+    ensure_eq(&again, &id, "same id")?;
+    ensure_eq(&db.all_receipts().await?.len(), &(count + 1), "one receipt")?;
+    let projected = db.transactions_between(day, day).await?;
+    ensure_eq(&projected.len(), &1, "one projected transaction")?;
+    let stored: Vec<String> = db
+        .line_items(id)
+        .await?
+        .iter()
+        .map(|l| l.id.to_string())
+        .collect();
+    let written: Vec<String> = lines.iter().map(|l| l.id.to_string()).collect();
+    ensure_eq(
+        &sorted(stored, Clone::clone),
+        &sorted(written, Clone::clone),
+        "one set of lines",
+    )
+}
+
 /// A stored receipt is projected into the dashboard `Transaction` view, so a
 /// written spend is visible to the cycle aggregates (`transactions_between`).
 pub async fn insert_receipt_projects_a_dashboard_transaction(db: &dyn DatabaseAdapter) -> Outcome {

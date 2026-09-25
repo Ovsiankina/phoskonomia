@@ -67,6 +67,7 @@ pub enum Bucket {
     Chat,
     Message,
     AiSuggestion,
+    ReceiptProposal,
 }
 
 impl Bucket {
@@ -95,6 +96,7 @@ impl Bucket {
             Self::Chat => "phosk_chat",
             Self::Message => "phosk_message",
             Self::AiSuggestion => "phosk_ai_suggestion",
+            Self::ReceiptProposal => "phosk_receipt_proposal",
         }
     }
 
@@ -122,6 +124,7 @@ impl Bucket {
         Self::Chat,
         Self::Message,
         Self::AiSuggestion,
+        Self::ReceiptProposal,
     ];
 }
 

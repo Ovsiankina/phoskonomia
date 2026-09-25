@@ -29,7 +29,7 @@ pub mod provenance;
 pub use entities::{
     AiSuggestion, Alert, AlertAction, AlertSnooze, Budget, BudgetChange, BudgetHistory,
     CategoryCap, Charge, Chat, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou,
-    Preference, Receipt, Signal, SignalOccurrence, Subscription,
+    Preference, Receipt, ReceiptProposal, Signal, SignalOccurrence, Subscription,
 };
 pub use provenance::{
     CorrectionEvent, LOW_CONFIDENCE_THRESHOLD, Provenance, Source, is_low_confidence,

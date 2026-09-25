@@ -47,8 +47,8 @@ use phosk_id::{
 use phosk_model::{
     AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
     CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
-    PersonalIou, Preference, Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription,
-    Transaction,
+    PersonalIou, Preference, Provenance, Receipt, ReceiptProposal, Signal, SignalOccurrence,
+    Source, Subscription, Transaction,
 };
 
 mod seed;
@@ -91,6 +91,7 @@ pub struct MemoryDb {
     chats: Vec<Chat>,
     messages: Mutex<Vec<Message>>,
     ai_suggestions: Mutex<Vec<AiSuggestion>>,
+    receipt_proposals: Mutex<Vec<ReceiptProposal>>,
 }
 
 impl MemoryDb {
@@ -127,6 +128,7 @@ impl MemoryDb {
             chats: Vec::new(),
             messages: Mutex::new(Vec::new()),
             ai_suggestions: Mutex::new(Vec::new()),
+            receipt_proposals: Mutex::new(Vec::new()),
         }
     }
 
@@ -186,6 +188,7 @@ impl MemoryDb {
             chats,
             messages: Mutex::new(messages),
             ai_suggestions: Mutex::new(ai_suggestions),
+            receipt_proposals: Mutex::new(Vec::new()),
         })
     }
 }
@@ -210,6 +213,16 @@ impl MemoryDb {
             return Ok(true);
         }
         Ok(lock(&self.signals)?.iter().any(|s| s.parent == category))
+    }
+
+    /// How many receipt proposals are staged (test inspection: the port only
+    /// reads a proposal by its suggestion id, so "nothing was staged" is not
+    /// observable through it).
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store lock is poisoned.
+    pub fn staged_proposal_count(&self) -> Result<usize, PhoskError> {
+        Ok(lock(&self.receipt_proposals)?.len())
     }
 }
 
@@ -1005,6 +1018,23 @@ impl DatabaseAdapter for MemoryDb {
             .ok_or_else(|| PhoskError::NotFound(format!("suggestion {id}")))?;
         s.status = status.to_owned();
         Ok(())
+    }
+
+    async fn stage_receipt_proposal(&self, p: ReceiptProposal) -> Result<(), PhoskError> {
+        let mut staged = lock(&self.receipt_proposals)?;
+        staged.retain(|s| s.suggestion_id != p.suggestion_id);
+        staged.push(p);
+        Ok(())
+    }
+
+    async fn receipt_proposal(
+        &self,
+        id: SuggestionId,
+    ) -> Result<Option<ReceiptProposal>, PhoskError> {
+        Ok(lock(&self.receipt_proposals)?
+            .iter()
+            .find(|p| p.suggestion_id == id)
+            .cloned())
     }
 }
 

@@ -477,6 +477,20 @@ pub struct AiSuggestion {
     pub status: String,
 }
 
+/// The staged payload of a `kind == "receipt"` [`AiSuggestion`]: the proposed
+/// [`Receipt`] + [`LineItem`]s exactly as the intake pipeline assembled them
+/// (model-derived provenance intact). It is NOT ledger state — only the
+/// approval service reads it, validates it and applies it via `insert_receipt`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReceiptProposal {
+    /// The approval-queue suggestion this payload belongs to (its key).
+    pub suggestion_id: SuggestionId,
+    /// The proposed receipt.
+    pub receipt: Receipt,
+    /// The proposed line items.
+    pub line_items: Vec<LineItem>,
+}
+
 /// An entry in the AI activity feed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeedItem {
