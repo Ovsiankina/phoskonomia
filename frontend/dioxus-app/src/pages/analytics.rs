@@ -893,9 +893,9 @@ pub fn AnalyticsPage() -> Element {
     let sorted_signals: Vec<SignalDto> = {
         let mut arr = tracked_raw.clone();
         match sig_sort().as_str() {
-            "spend" => arr.sort_by(|a, b| b.cycle_spend.centimes().cmp(&a.cycle_spend.centimes())),
+            "spend" => arr.sort_by_key(|s| std::cmp::Reverse(s.cycle_spend.centimes())),
             "az" => arr.sort_by(|a, b| a.label.cmp(&b.label)),
-            _ => arr.sort_by(|a, b| b.delta_pct.cmp(&a.delta_pct)),
+            _ => arr.sort_by_key(|s| std::cmp::Reverse(s.delta_pct)),
         }
         arr
     };
@@ -904,7 +904,7 @@ pub fn AnalyticsPage() -> Element {
     let sorted_cats: Vec<MomentumDto> = {
         let mut arr = momentum_v.clone().unwrap_or_default();
         match momentum_sort().as_str() {
-            "spend" => arr.sort_by(|a, b| b.now.centimes().cmp(&a.now.centimes())),
+            "spend" => arr.sort_by_key(|m| std::cmp::Reverse(m.now.centimes())),
             "az" => arr.sort_by(|a, b| a.name.cmp(&b.name)),
             _ => arr.sort_by(|a, b| {
                 let ka = if a.fixed { -999 } else { a.delta_pct.abs() };
