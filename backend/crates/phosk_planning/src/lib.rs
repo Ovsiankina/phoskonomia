@@ -130,10 +130,8 @@ pub async fn totals(
     // actually been spent so far; the full-window picture lives in the separate
     // spend-series. For a cycle whose `as_of == end` the two coincide.
     let spent = sum_window(db, window.start, window.as_of).await?;
-    tracing::debug!(spent = %spent, "summed current-cycle spend to date");
 
     let last_cycle_spent = last_cycle_spend(db, window).await?;
-    tracing::debug!(last_cycle_spent = %last_cycle_spent, "summed last-cycle spend");
 
     let allocated = allocated_caps(db).await?;
 
@@ -190,12 +188,6 @@ pub async fn totals(
         vs_last_cycle_pct,
         per_day_to_stay_on_budget,
     };
-    tracing::debug!(
-        spent_pct,
-        vs_last_cycle_pct,
-        savings_rate,
-        "computed cycle totals"
-    );
     Ok(result)
 }
 

@@ -136,7 +136,7 @@ async fn category_spend_receipts(
 /// Returns [`PhoskError::NotFound`] if no alert matches `alert`; returns
 /// [`PhoskError::Invalid`] for an unknown `action`; propagates any adapter
 /// [`PhoskError`].
-#[tracing::instrument(level = "debug", skip_all, fields(alert = %alert, action = %action))]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn act_on_alert(
     db: &dyn DatabaseAdapter,
     alert: &str,
