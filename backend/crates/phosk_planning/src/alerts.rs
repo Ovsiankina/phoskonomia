@@ -208,7 +208,7 @@ pub enum SnoozeUntil {
 /// [`PhoskError::NotFound`] if no alert matches `alert`;
 /// [`PhoskError::Invalid`] if the alert is dismissed or the term does not end
 /// after `as_of`; otherwise any port error.
-#[tracing::instrument(level = "debug", skip_all, fields(alert = %alert, as_of = %as_of))]
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn snooze_alert(
     db: &dyn DatabaseAdapter,
     alert: &str,
