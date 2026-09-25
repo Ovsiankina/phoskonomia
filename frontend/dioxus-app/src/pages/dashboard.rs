@@ -112,15 +112,14 @@ fn rec_of(r: &RecurringDto) -> Rec {
     }
 }
 
-/// The text to show for a failed signal track/dismiss press: the server's own
-/// message (`track_signal_with`/`dismiss_signal_with` already keep it
-/// page-safe — see their tests) or a generic line if the call failed before
-/// the server could answer.
-fn signal_action_error_text(err: &ServerFnError) -> String {
-    match err {
-        ServerFnError::ServerError { message, .. } if !message.is_empty() => message.clone(),
-        _ => "could not reach the server, try again".to_string(),
-    }
+/// Shown for any failed signal track/dismiss press: a fixed, generic line.
+const SIGNAL_ACTION_FAILED: &str = "could not update this signal, try again";
+
+/// The text to show for a failed signal track/dismiss press: always
+/// [`SIGNAL_ACTION_FAILED`], never the server's message, which can carry a
+/// `PhoskError` or session-build detail (a data path, driver text).
+fn signal_action_error_text(_err: &ServerFnError) -> String {
+    SIGNAL_ACTION_FAILED.to_string()
 }
 
 /// `AlertDto` → the `Alert` row consumed by `AlertItem`. The per-tone action
@@ -257,8 +256,11 @@ pub fn DashboardPage() -> Element {
     let mut sel = use_signal(|| Option::<String>::None);
     let mut drawer_sig = use_signal(|| false);
     // The fixed, page-safe message from a rejected alert-action press; cleared
-    // on the next attempt or once it succeeds.
+    // when the next press starts.
     let alert_error = use_signal(|| Option::<String>::None);
+    // `true` while an alert-action call is in flight: the alert buttons are
+    // disabled so a second press can't repeat it.
+    let alert_busy = use_signal(|| false);
     // Same, for a rejected signal track/dismiss press from the signal panel.
     let signal_error = use_signal(|| Option::<String>::None);
     // Programmatic navigation for the alert VIEW deep-link (React's navigate()).
@@ -876,25 +878,35 @@ pub fn DashboardPage() -> Element {
                                                 AlertItem {
                                                     key: "{a.id}",
                                                     a: alert_of(a),
+                                                    busy: alert_busy(),
                                                     on_action: move |(id, kind): (String, String)| {
                                                         // VIEW navigates to the alert's deep-link target
                                                         // (React resolved /alerts/{id}/target → /transactions);
-                                                        // every other kind POSTs then re-fetches the list.
+                                                        // every other kind POSTs then re-fetches the list
+                                                        // (and, after RAISE CAP, the caps it changed).
                                                         if kind == "navigate" {
                                                             let _ = nav.push(Route::TransactionsPage {});
-                                                        } else {
+                                                        } else if !alert_busy() {
                                                             let mut alerts = alerts;
+                                                            let mut cats = cats;
                                                             let mut alert_error = alert_error;
+                                                            let mut alert_busy = alert_busy;
+                                                            alert_busy.set(true);
+                                                            alert_error.set(None);
                                                             spawn(async move {
+                                                                let raised_cap = kind == "apply";
                                                                 match act_on_alert(id, kind).await {
                                                                     Ok(()) => {
-                                                                        alert_error.set(None);
                                                                         alerts.restart();
+                                                                        if raised_cap {
+                                                                            cats.restart();
+                                                                        }
                                                                     }
                                                                     Err(_) => {
                                                                         alert_error.set(Some(ALERT_ACTION_FAILED.to_string()));
                                                                     }
                                                                 }
+                                                                alert_busy.set(false);
                                                             });
                                                         }
                                                     },
@@ -1084,6 +1096,27 @@ fn AiPanelDash(
             collapsed,
             on_toggle: move |()| on_toggle.call(()),
             on_track: move |id: String| on_track.call(id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dioxus::prelude::ServerFnError;
+
+    use super::{signal_action_error_text, SIGNAL_ACTION_FAILED};
+
+    /// A failed signal track/dismiss shows one fixed line, never the server's
+    /// message (a `PhoskError` or session error can embed a data path or
+    /// driver text).
+    #[test]
+    fn signal_action_errors_never_echo_the_server_message() {
+        for err in [
+            ServerFnError::new("surreal: IO error at /some/data/path"),
+            ServerFnError::new(""),
+            ServerFnError::StreamError("connection reset".to_string()),
+        ] {
+            assert_eq!(signal_action_error_text(&err), SIGNAL_ACTION_FAILED);
         }
     }
 }

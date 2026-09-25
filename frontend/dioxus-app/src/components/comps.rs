@@ -731,10 +731,13 @@ pub struct Alert {
 /// Faithful port of `comps.jsx` `AlertItem`. `on_action` receives `(alert id,
 /// action kind)` when a button is pressed (the page routes it to an F3 server
 /// fn — the React DISMISS / SNOOZE / APPLY / VIEW / MARK-PAID logic moves there).
+/// `busy` disables every button while a press is in flight, so a second press
+/// can't repeat it (e.g. RAISE CAP raising the cap twice).
 #[component]
 pub fn AlertItem(
     a: Alert,
     #[props(default)] on_action: Option<EventHandler<(String, String)>>,
+    #[props(default)] busy: bool,
 ) -> Element {
     let ic = match a.tone.as_str() {
         "llm" => "⌁",
@@ -757,6 +760,7 @@ pub fn AlertItem(
                         button {
                             key: "{i}",
                             class: if i == 0 { "btn p" } else { "btn" },
+                            disabled: busy,
                             onclick: {
                                 let id = id.clone();
                                 let kind = act.kind.clone();
