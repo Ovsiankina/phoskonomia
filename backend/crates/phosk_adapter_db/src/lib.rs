@@ -86,12 +86,19 @@ pub trait DatabaseAdapter: Send + Sync {
     async fn budget_config(&self) -> Result<BudgetConfig, PhoskError>;
 
     /// Replace the global [`BudgetConfig`] with `cfg` and append `change` to
-    /// the budget-change history, as one operation.
+    /// the budget-change history, in one call (two writes, not a transaction).
     ///
     /// The history entry is written first and keyed by its id, so a fault
     /// between the two writes leaves an entry the caller can re-send unchanged
-    /// (re-appending the same id replaces it rather than duplicating it) —
-    /// the history never misses a config it did not record.
+    /// (re-appending the same id replaces it where it stands rather than
+    /// duplicating or moving it) — the history never misses a config it did
+    /// not record.
+    ///
+    /// `cfg` is a whole record the caller built from an earlier
+    /// [`budget_config`](Self::budget_config) read; nothing here checks that
+    /// read is still current. Two concurrent read-modify-writes of different
+    /// fields can therefore lose one field's value while the history records
+    /// both changes.
     ///
     /// # Errors
     /// [`PhoskError`] if the store rejects either write.

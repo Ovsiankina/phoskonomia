@@ -13,6 +13,10 @@
 //! - Setting the current value is a successful no-op with no history entry,
 //!   mirroring how a same-name rename or an unchanged subscription field
 //!   records nothing.
+//! - Each setter reads the config, then writes it back whole: two setters
+//!   running at once can lose one field while the history records both (see
+//!   [`DatabaseAdapter::set_budget_config`]). The app has a single local
+//!   user, so this is not guarded yet.
 
 use chrono::NaiveDate;
 
