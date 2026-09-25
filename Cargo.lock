@@ -5431,6 +5431,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "phosk_core",
+ "phosk_model",
  "serde",
  "serde_json",
  "tokio",

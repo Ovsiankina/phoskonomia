@@ -31,7 +31,9 @@ pub use entities::{
     DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference, Receipt, Signal,
     SignalOccurrence, Subscription,
 };
-pub use provenance::{CorrectionEvent, Provenance, Source};
+pub use provenance::{
+    CorrectionEvent, LOW_CONFIDENCE_THRESHOLD, Provenance, Source, is_low_confidence,
+};
 
 /// A single dated spend: an `amount` of [`Money`] at a `shop`, classified into a
 /// spending `category`. Identity is the human `shop` / `category` *names*

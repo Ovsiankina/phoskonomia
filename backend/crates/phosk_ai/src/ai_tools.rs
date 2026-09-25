@@ -21,9 +21,9 @@
 //!   pipeline). A write tool that wrote to the DB would be a bug; the type makes
 //!   that impossible to do by accident — these fns hand back data, never a commit.
 //!
-//! Low-confidence (`< 0.7`) proposals are still returned, but carry
-//! [`ProposedWrite::low_confidence`] `== true` so the approval UI can coral-flag
-//! them (ADR confidence rule).
+//! Low-confidence (`< 0.7`, or NaN/out-of-range — see [`is_low_confidence`])
+//! proposals are still returned, but carry [`ProposedWrite::low_confidence`]
+//! `== true` so the approval UI can coral-flag them (ADR confidence rule).
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -33,14 +33,15 @@ use phosk_adapter_llm::LlmAdapter;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{MessageId, SuggestionId};
-use phosk_model::{AiSuggestion, Message};
+use phosk_model::{AiSuggestion, Message, is_low_confidence};
 
 use crate::ai_features::InsightDto;
 use crate::ai_spine::AiChatMsgDto;
 
 /// The ADR confidence threshold: proposals below this are flagged (coral),
-/// never silently dropped.
-pub const CONFIDENCE_THRESHOLD: f64 = 0.7;
+/// never silently dropped. A re-export, not a second definition — the
+/// canonical value lives at [`phosk_model::LOW_CONFIDENCE_THRESHOLD`].
+pub use phosk_model::LOW_CONFIDENCE_THRESHOLD as CONFIDENCE_THRESHOLD;
 
 /// Longest model chat reply (in characters) that [`chat_reply`] saves and
 /// returns; a longer completion is cut and the cut marked with `…`.
@@ -90,7 +91,7 @@ impl ProposedWrite {
 /// the low-confidence flag from the ADR threshold. Forces `status = "open"`.
 fn enqueue(mut suggestion: AiSuggestion, model: &str) -> ProposedWrite {
     "open".clone_into(&mut suggestion.status);
-    let low_confidence = suggestion.confidence < CONFIDENCE_THRESHOLD;
+    let low_confidence = is_low_confidence(suggestion.confidence);
     ProposedWrite {
         suggestion,
         model: model.to_owned(),
