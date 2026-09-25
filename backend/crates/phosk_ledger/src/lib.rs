@@ -9,7 +9,8 @@
 //!
 //! The rest of the context lives in the feature modules declared below —
 //! including the write side ([`transactions::create_transaction`] for manual
-//! entry, and the category create/rename/delete-if-empty in [`categories`]).
+//! entry, the category create/rename/delete-if-empty in [`categories`], and
+//! the CSV bank-export import in [`import`]).
 //!
 //! **Layering (ADR-010).** The service takes `&dyn DatabaseAdapter` and depends
 //! only on the PORT trait crate (`phosk_adapter_db`) plus the domain/foundation
@@ -37,6 +38,7 @@ use phosk_core::money::Money;
 //    shops · signals). Each owns its DTOs + service fns; the existing dashboard
 //    spend-aggregation reads (`top_shops`, `daily_spend`) stay in this file.
 pub mod categories;
+pub mod import;
 pub mod line_items;
 pub mod shops;
 pub mod signals;

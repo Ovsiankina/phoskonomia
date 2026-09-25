@@ -21,6 +21,9 @@ phosk_id = { path = "../phosk_id" }
 serde = { workspace = true }
 # chrono: NaiveDate is the `as_of` parameter of the list/signal service fns.
 chrono = { workspace = true }
+# sha2: SHA-256 content hash of a normalised imported CSV row = its dedupe key
+# (already a workspace dependency, used the same way by phosk_pipeline_receipt).
+sha2 = { workspace = true }
 # tracing (debug-only): instrument the service + its compute steps. The
 # release_max_level_off feature keys off debug_assertions, so spans/events vanish
 # in release builds (the project's "tracing only in debug" rule). Never installs
