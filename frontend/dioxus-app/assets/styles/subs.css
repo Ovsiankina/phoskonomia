@@ -170,3 +170,21 @@ body.hl-auto [data-src="llm"] .sub:hover { box-shadow: inset 2.5px 0 0 var(--ind
 .cand-conf.low { color: var(--warn); }
 .cand-acts { display: flex; gap: var(--s-2); }
 .cand-acts .gbtn:disabled, .insp-acts .gbtn:disabled { opacity: .45; cursor: progress; }
+
+/* ---- subscription create / edit / record-charge forms — tokens only ---- */
+.sub-form { --legend-bg: var(--bg); margin-bottom: var(--s-5); padding: var(--s-5) var(--s-4) var(--s-3);
+  background: var(--glass-fill); }
+.sub-form-grid { display: grid; gap: var(--s-2) var(--s-3);
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--grid-unit) * 3), 1fr)); }
+.sub-f { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+.sub-f.wide { grid-column: 1 / -1; }
+.sub-f .k { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag);
+  text-transform: uppercase; color: var(--ink-3); }
+.sub-f input, .sub-f select { min-width: 0; padding: var(--s-2); font-family: var(--font-body);
+  font-size: var(--t-sm); color: var(--ink); background: var(--bg-inset);
+  border: var(--bw-hair) solid var(--hairline); border-radius: var(--r-0); }
+.sub-f input.num { font-family: var(--font-display); }
+.sub-f input:focus, .sub-f select:focus { outline: none; border-color: var(--indigo-neon); box-shadow: var(--glow-indigo); }
+.sub-f input:disabled, .sub-f select:disabled { color: var(--ink-3); }
+.sub-form-acts { display: flex; justify-content: flex-end; gap: var(--s-2); margin-top: var(--s-3); }
+.subs-controls .m:disabled, .sub-form .gbtn:disabled { opacity: .45; cursor: progress; }
