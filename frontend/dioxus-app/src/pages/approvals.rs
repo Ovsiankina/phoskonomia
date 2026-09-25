@@ -63,6 +63,8 @@ pub fn ApprovalsPage() -> Element {
     let mut failed = use_signal(|| Option::<(String, String)>::None);
     // The receipt slug whose APPROVE ALL awaits confirmation.
     let mut confirming = use_signal(|| Option::<String>::None);
+    // Set when the last approval wrote nothing new (already booked).
+    let mut unchanged = use_signal(|| false);
 
     let on_decide = use_callback(move |d: Decision| {
         // One decision at a time, never against a stale list.
@@ -72,17 +74,20 @@ pub fn ApprovalsPage() -> Element {
         pending.set(Some(d.clone()));
         failed.set(None);
         confirming.set(None);
+        unchanged.set(false);
         let mut queue = queue;
         spawn(async move {
+            // `Ok(true)`: the call wrote nothing new to the ledger.
             let result = match &d {
-                Decision::Approve(id) => approve_proposal(id.clone()).await.map(|_| ()),
-                Decision::Reject(id) => reject_proposal(id.clone()).await,
-                Decision::ApproveAll(slug) => {
-                    approve_receipt_proposals(slug.clone()).await.map(|_| ())
-                }
+                Decision::Approve(id) => approve_proposal(id.clone()).await.map(|o| !o.applied),
+                Decision::Reject(id) => reject_proposal(id.clone()).await.map(|()| false),
+                Decision::ApproveAll(slug) => approve_receipt_proposals(slug.clone())
+                    .await
+                    .map(|os| !os.is_empty() && os.iter().all(|o| !o.applied)),
             };
-            if let Err(e) = result {
-                failed.set(Some((d.target().to_string(), error_text(&e))));
+            match result {
+                Ok(nothing_new) => unchanged.set(nothing_new),
+                Err(e) => failed.set(Some((d.target().to_string(), error_text(&e)))),
             }
             // `restart` flips the list to pending synchronously, so every
             // button stays disabled until the fresh queue lands.
@@ -148,6 +153,11 @@ pub fn ApprovalsPage() -> Element {
                                         b { "{count}" }
                                         " receipt proposals read by the model · nothing is booked until you approve"
                                     }
+                                }
+                            }
+                            if unchanged() {
+                                span { role: "status", class: "cand-ev",
+                                    "Already booked · nothing new was written to the ledger"
                                 }
                             }
                             div { class: "subs-sec",
@@ -229,6 +239,7 @@ fn ReceiptCard(
                 ProposalRow {
                     key: "{p.suggestion_id}",
                     busy,
+                    conflicting,
                     pending: pending.clone(),
                     error: failed.as_ref().filter(|(t, _)| *t == p.suggestion_id).map(|(_, m)| m.clone()),
                     on_decide: move |d| on_decide.call(d),
@@ -287,6 +298,7 @@ fn ReceiptCard(
 fn ProposalRow(
     proposal: ProposalDto,
     busy: bool,
+    conflicting: bool,
     pending: Option<Decision>,
     error: Option<String>,
     on_decide: EventHandler<Decision>,
@@ -296,6 +308,17 @@ fn ProposalRow(
     let rejecting = pending == Some(Decision::Reject(id.clone()));
     let (id_ok, id_no) = (id.clone(), id);
     let bookable = proposal.bookable;
+    let mismatch = proposal
+        .receipt
+        .as_ref()
+        .is_some_and(|r| r.lines.iter().any(|l| l.mismatch));
+    let approve_title = if !bookable {
+        "This proposal failed validation · reject it"
+    } else if conflicting {
+        "Another open proposal targets this receipt · reject all but one"
+    } else {
+        ""
+    };
 
     rsx! {
         div { class: "cand-row",
@@ -311,8 +334,8 @@ fn ProposalRow(
             div { class: "cand-acts",
                 button {
                     class: "gbtn p",
-                    disabled: busy || !bookable,
-                    title: if bookable { "" } else { "This proposal failed validation · reject it" },
+                    disabled: busy || !bookable || conflicting,
+                    title: approve_title,
                     onclick: move |_| on_decide.call(Decision::Approve(id_ok.clone())),
                     if approving { "BOOKING…" } else { "APPROVE" }
                 }
@@ -328,6 +351,11 @@ fn ProposalRow(
                     "INVALID · this proposal can't be booked as read · reject it"
                 }
             }
+            if mismatch {
+                span { class: "cand-conf low", style: "flex-basis:100%",
+                    "CHECK TOTALS · a line books a different amount than qty × unit price"
+                }
+            }
             if approving || rejecting || error.is_some() {
                 span { style: "flex-basis:100%",
                     InlineStatus {
@@ -341,7 +369,8 @@ fn ProposalRow(
     }
 }
 
-/// Shop, date, total, then one line per proposed item.
+/// Shop, date, total, then one line per proposed item with the amount it
+/// books (`line_total`), flagged when that is not `qty × unit`.
 #[component]
 fn ReceiptHead(receipt: ProposedReceiptDto) -> Element {
     let total = chf2(receipt.total);
@@ -349,13 +378,15 @@ fn ReceiptHead(receipt: ProposedReceiptDto) -> Element {
         div { class: "cand-id", style: "cursor:default",
             span { class: "cand-nm", "{receipt.shop}" }
             span { class: "cand-ev",
-                "{receipt.date} · {receipt.category} · CHF "
+                b { "{receipt.date}" }
+                " · {receipt.category} · CHF "
                 b { "{total}" }
             }
             for (i, l) in receipt.lines.into_iter().enumerate() {
                 {
                     let conf = format!("{:.0}", l.confidence * 100.0);
                     let unit = chf2(l.unit_price);
+                    let booked = chf2(l.line_total);
                     let (cls, tag) = if l.low_confidence {
                         ("cand-conf low", "LOW CONF · REVIEW")
                     } else {
@@ -369,6 +400,11 @@ fn ReceiptHead(receipt: ProposedReceiptDto) -> Element {
                                 b { "{l.qty}" }
                                 " × CHF "
                                 b { "{unit}" }
+                                " = CHF "
+                                b { "{booked}" }
+                            }
+                            if l.mismatch {
+                                span { class: "cand-conf low", "≠ QTY × UNIT" }
                             }
                             span { class: "{cls}", "{tag} " b { "{conf}%" } }
                         }
