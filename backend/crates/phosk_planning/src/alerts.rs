@@ -47,6 +47,17 @@ use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_model::{Alert, AlertSnooze};
 
+/// One action button on an [`AlertDto`] (`GET /alerts` element).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertActionDto {
+    /// Button label, e.g. `"VIEW"`, `"RAISE CAP"`, `"DISMISS"`, `"SNOOZE"`.
+    pub label: String,
+    /// The backend verb [`act_on_alert`] accepts for this button:
+    /// `"navigate" | "dismiss" | "snooze" | "apply"`.
+    pub kind: String,
+}
+
 /// One attention item (`GET /alerts` element).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,9 +72,10 @@ pub struct AlertDto {
     pub head: String,
     /// Supporting body line.
     pub body: String,
-    /// Action button labels (first is the primary), e.g. `VIEW` / `RAISE CAP` /
-    /// `DISMISS` / `SNOOZE` / `MARK PAID`.
-    pub actions: Vec<String>,
+    /// Action buttons (first is the primary), e.g. `VIEW` / `RAISE CAP` /
+    /// `DISMISS` / `SNOOZE` / `MARK PAID`, each carrying the verb kind
+    /// [`act_on_alert`] expects back.
+    pub actions: Vec<AlertActionDto>,
 }
 
 /// The dashboard alerts list (`GET /alerts`), generated from cap/spend data.
@@ -94,7 +106,14 @@ pub async fn alerts(
                 tag: a.tag,
                 head: a.head,
                 body: a.body,
-                actions: a.actions.into_iter().map(|act| act.label).collect(),
+                actions: a
+                    .actions
+                    .into_iter()
+                    .map(|act| AlertActionDto {
+                        label: act.label,
+                        kind: act.kind,
+                    })
+                    .collect(),
             });
         }
     }
@@ -163,7 +182,9 @@ async fn category_spend_receipts(
 ///
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if no alert matches `alert`; returns
-/// [`PhoskError::Invalid`] for an unknown `action`; propagates any adapter
+/// [`PhoskError::Invalid`] for an `action` this alert does not itself offer
+/// (an unknown verb, or a legal verb behind a button this alert doesn't show —
+/// e.g. `apply` on an alert with no RAISE CAP action); propagates any adapter
 /// [`PhoskError`].
 #[tracing::instrument(level = "debug", skip_all, fields(alert = %alert, action = %action, as_of = %as_of))]
 pub async fn act_on_alert(
@@ -179,6 +200,14 @@ pub async fn act_on_alert(
         .into_iter()
         .find(|a| a.slug == alert)
         .ok_or_else(|| PhoskError::NotFound(format!("alert {alert}")))?;
+
+    // The client sends the pressed button's verb `kind`, never its label; only
+    // accept a verb this alert's own action list actually offers.
+    if !entity.actions.iter().any(|act| act.kind == action) {
+        return Err(PhoskError::Invalid(format!(
+            "alert {alert} does not offer action {action}"
+        )));
+    }
 
     match action {
         "dismiss" => db.update_alert_status(entity.id, "dismissed").await,
@@ -336,9 +365,18 @@ fn eval_category_rules(
             head: format!("{name} over budget"),
             body: format!("{name} spend has crossed its cap this cycle."),
             actions: vec![
-                "VIEW".to_owned(),
-                "RAISE CAP".to_owned(),
-                "DISMISS".to_owned(),
+                AlertActionDto {
+                    label: "VIEW".to_owned(),
+                    kind: "navigate".to_owned(),
+                },
+                AlertActionDto {
+                    label: "RAISE CAP".to_owned(),
+                    kind: "apply".to_owned(),
+                },
+                AlertActionDto {
+                    label: "DISMISS".to_owned(),
+                    kind: "dismiss".to_owned(),
+                },
             ],
         });
     } else if level == LEVEL_AT_RISK {
@@ -348,7 +386,16 @@ fn eval_category_rules(
             tag,
             head: format!("{name} run-rate above cap"),
             body: format!("{name} is on pace to exceed its cap by month-end."),
-            actions: vec!["VIEW".to_owned(), "DISMISS".to_owned()],
+            actions: vec![
+                AlertActionDto {
+                    label: "VIEW".to_owned(),
+                    kind: "navigate".to_owned(),
+                },
+                AlertActionDto {
+                    label: "DISMISS".to_owned(),
+                    kind: "dismiss".to_owned(),
+                },
+            ],
         });
     }
 }

@@ -231,9 +231,12 @@ async fn the_snooze_action_snoozes_until_the_next_cycle() {
 async fn the_snooze_action_keeps_an_at_risk_alert_hidden_at_as_of() {
     let db = seeded();
     // a1 targets Going out; put it at risk (under the cap) on the demo day.
+    // a1's seeded actions are VIEW/RAISE CAP/DISMISS (no SNOOZE button), so this
+    // exercises `snooze_alert` directly rather than through `act_on_alert`,
+    // which now rejects a kind the alert doesn't offer (F1).
     let (spent, cap) = envelope(&db, "Going out").await;
     spend(&db, "t-risk", "Going out", cap - spent - 100).await;
-    act_on_alert(&db, "a1", "snooze", today())
+    snooze_alert(&db, "a1", SnoozeUntil::NextCycle, today())
         .await
         .expect("snooze ok");
     let all = db.alerts().await.expect("alerts");
