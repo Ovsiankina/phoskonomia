@@ -461,6 +461,16 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError`] if the store rejects the write.
     async fn upsert_debt(&self, d: Debt) -> Result<DebtId, PhoskError>;
 
+    /// Delete a [`Debt`] **and every [`DebtPayment`] recorded against it** — a
+    /// payment has no meaning without the debt it reduced, so the cascade is
+    /// part of the port contract rather than the caller's job (mirrors
+    /// [`delete_subscription`](Self::delete_subscription)).
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no debt has that id (so a second delete of
+    /// the same id reports it), or any store failure.
+    async fn delete_debt(&self, id: DebtId) -> Result<(), PhoskError>;
+
     /// Record a [`DebtPayment`].
     ///
     /// # Errors
@@ -770,6 +780,9 @@ mod tests {
         }
         async fn upsert_debt(&self, _d: Debt) -> Result<DebtId, PhoskError> {
             Ok(DebtId::new())
+        }
+        async fn delete_debt(&self, _id: DebtId) -> Result<(), PhoskError> {
+            Ok(())
         }
         async fn record_debt_payment(&self, _p: DebtPayment) -> Result<(), PhoskError> {
             Ok(())

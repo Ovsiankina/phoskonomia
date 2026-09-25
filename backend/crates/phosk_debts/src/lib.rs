@@ -6,10 +6,12 @@
 //! right-dock inspector (balance decay series + payment history), and the
 //! personal-IOU net-position beam.
 //!
-//! Two feature modules, mirroring the dioxus wire structs in
+//! Three feature modules; the read DTOs mirror the dioxus wire structs in
 //! `frontend/dioxus-app/src/data/debts.rs`:
 //!
 //! - [`debts`] — institutional debts: list, stats, trajectory, detail, payments.
+//! - [`debt_write`] — the debt write path: create / edit / delete, record a
+//!   scheduled instalment, record an extra (principal-only) payment.
 //! - [`personal_ious`] — personal IOUs: list + net-position stats.
 //!
 //! **Layering (ADR-010).** Every service fn takes `&dyn DatabaseAdapter` (the
@@ -30,8 +32,12 @@
 //! [`DatabaseAdapter`]: phosk_adapter_db::DatabaseAdapter
 //! [`PhoskError`]: phosk_core::error::PhoskError
 
+pub mod debt_write;
 pub mod debts;
 pub mod personal_ious;
+
+pub use debt_write::{DebtEdit, NewDebt, NewDebtPayment};
+pub use debt_write::{create_debt, delete_debt, edit_debt, extra_payment, record_payment};
 
 pub use debts::{
     DebtDetailDto, DebtDto, DebtPaymentDto, DebtStatsDto, DecaySeriesDto, TrajPointDto,

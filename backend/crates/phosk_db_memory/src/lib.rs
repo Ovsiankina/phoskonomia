@@ -786,6 +786,18 @@ impl DatabaseAdapter for MemoryDb {
         Ok(id)
     }
 
+    async fn delete_debt(&self, id: DebtId) -> Result<(), PhoskError> {
+        let mut debts = lock(&self.debts)?;
+        let before = debts.len();
+        debts.retain(|d| d.id != id);
+        if debts.len() == before {
+            return Err(PhoskError::NotFound(format!("debt {id}")));
+        }
+        // Cascade: a payment without its debt is an orphan.
+        lock(&self.debt_payments)?.retain(|p| p.debt_id != id);
+        Ok(())
+    }
+
     async fn record_debt_payment(&self, p: DebtPayment) -> Result<(), PhoskError> {
         lock(&self.debt_payments)?.push(p);
         Ok(())

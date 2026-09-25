@@ -764,6 +764,21 @@ impl DatabaseAdapter for SurrealDb {
         Ok(id)
     }
 
+    async fn delete_debt(&self, id: DebtId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self.store.get::<Debt>(Bucket::Debt, &key).await?.is_none() {
+            return Err(PhoskError::NotFound(format!("debt {id}")));
+        }
+        // Cascade: a payment without its debt is an orphan.
+        let payments: Vec<DebtPayment> = self.store.list(Bucket::DebtPayment).await?;
+        for p in payments.iter().filter(|p| p.debt_id == id) {
+            self.store
+                .delete(Bucket::DebtPayment, &p.id.to_string())
+                .await?;
+        }
+        self.store.delete(Bucket::Debt, &key).await
+    }
+
     async fn record_debt_payment(&self, p: DebtPayment) -> Result<(), PhoskError> {
         self.store
             .put(Bucket::DebtPayment, &p.id.to_string(), &p)
