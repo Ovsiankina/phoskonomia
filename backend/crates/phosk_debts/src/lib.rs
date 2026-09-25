@@ -6,7 +6,7 @@
 //! right-dock inspector (balance decay series + payment history), and the
 //! personal-IOU net-position beam.
 //!
-//! Four feature modules; the read DTOs mirror the dioxus wire structs in
+//! Five feature modules; the read DTOs mirror the dioxus wire structs in
 //! `frontend/dioxus-app/src/data/debts.rs`:
 //!
 //! - [`debts`] — institutional debts: list, stats, trajectory, detail, payments.
