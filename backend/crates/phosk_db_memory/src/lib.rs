@@ -45,9 +45,10 @@ use phosk_id::{
     SubscriptionId, SuggestionId,
 };
 use phosk_model::{
-    AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
-    CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription, Transaction,
+    AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
+    CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
+    PersonalIou, Preference, Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription,
+    Transaction,
 };
 
 mod seed;
@@ -65,7 +66,8 @@ pub struct MemoryDb {
     // its row. Read back alongside `transactions` by `transactions_between`.
     receipt_transactions: Mutex<Vec<(ReceiptId, Transaction)>>,
     categories: Vec<Category>,
-    budget: BudgetConfig,
+    budget: Mutex<BudgetConfig>,
+    budget_changes: Mutex<Vec<BudgetChange>>,
     // Richer write-side entities (ADR-008 / locked decision #3). Mutable
     // collections sit behind a `Mutex` so the `&self` async port methods can
     // record writes without an `&mut self` (the trait is `&self`-only).
@@ -105,7 +107,8 @@ impl MemoryDb {
             transactions,
             receipt_transactions: Mutex::new(Vec::new()),
             categories,
-            budget,
+            budget: Mutex::new(budget),
+            budget_changes: Mutex::new(Vec::new()),
             receipts: Mutex::new(Vec::new()),
             line_items: Mutex::new(Vec::new()),
             corrections: Mutex::new(Vec::new()),
@@ -163,7 +166,8 @@ impl MemoryDb {
             transactions,
             receipt_transactions: Mutex::new(Vec::new()),
             categories,
-            budget,
+            budget: Mutex::new(budget),
+            budget_changes: Mutex::new(Vec::new()),
             receipts: Mutex::new(receipts),
             line_items: Mutex::new(line_items),
             corrections: Mutex::new(Vec::new()),
@@ -256,7 +260,26 @@ impl DatabaseAdapter for MemoryDb {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn budget_config(&self) -> Result<BudgetConfig, PhoskError> {
         tracing::debug!("returning budget config");
-        Ok(self.budget.clone())
+        Ok(lock(&self.budget)?.clone())
+    }
+
+    async fn set_budget_config(
+        &self,
+        cfg: BudgetConfig,
+        change: BudgetChange,
+    ) -> Result<(), PhoskError> {
+        let mut changes = lock(&self.budget_changes)?;
+        match changes.iter_mut().find(|c| c.id == change.id) {
+            Some(existing) => *existing = change,
+            None => changes.push(change),
+        }
+        drop(changes);
+        *lock(&self.budget)? = cfg;
+        Ok(())
+    }
+
+    async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError> {
+        Ok(lock(&self.budget_changes)?.clone())
     }
 
     // ── Ledger ───────────────────────────────────────────────────────────────
@@ -682,6 +705,17 @@ impl DatabaseAdapter for MemoryDb {
             .find(|a| a.id == id)
             .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
         a.status = status.to_owned();
+        Ok(())
+    }
+
+    async fn snooze_alert(&self, id: AlertId, snooze: AlertSnooze) -> Result<(), PhoskError> {
+        let mut alerts = lock(&self.alerts)?;
+        let a = alerts
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
+        a.status = "snoozed".to_owned();
+        a.snooze = Some(snooze);
         Ok(())
     }
 

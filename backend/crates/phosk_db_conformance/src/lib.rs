@@ -16,9 +16,9 @@
 //! ## The store contract
 //!
 //! The factory must yield a store holding the shared deterministic Swiss seed
-//! (the one `MemoryDb::seeded` and `SurrealDb::seeded` load). The port has no
-//! write path for the budget config, caps, history, alerts or feed items, so
-//! those checks read seeded values. Dashboard transactions are never written
+//! (the one `MemoryDb::seeded` and `SurrealDb::seeded` load). The port cannot
+//! create budget-history rows, alerts or feed items, so those checks read
+//! seeded values. Dashboard transactions are never written
 //! directly either — only as the projection `insert_receipt` maintains. Write
 //! checks create their own records with fresh ids and `conf-*` slugs (the
 //! category checks are the exception: renaming and delete-if-empty are about
@@ -90,6 +90,8 @@ macro_rules! database_adapter_conformance {
             planning::budget_history_is_oldest_to_newest,
             planning::spend_history_returns_the_recorded_cycles,
             planning::alerts_lookup_and_status_update,
+            planning::set_budget_config_replaces_it_and_appends_history,
+            planning::snooze_alert_sets_status_and_term,
             recurring::subscriptions_lookup_by_id_and_slug_agree,
             recurring::upsert_subscription_inserts_then_replaces,
             recurring::subscription_charges_are_scoped_and_oldest_first,

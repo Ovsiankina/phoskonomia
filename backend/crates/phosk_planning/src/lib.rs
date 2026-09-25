@@ -44,6 +44,7 @@
 //! [`PhoskError::Overflow`]: phosk_core::error::PhoskError::Overflow
 
 pub mod alerts;
+pub mod budget_config;
 pub mod budgets;
 
 use phosk_adapter_db::DatabaseAdapter;

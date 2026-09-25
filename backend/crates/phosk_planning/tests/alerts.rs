@@ -209,7 +209,7 @@ async fn snoozed_alert_is_filtered_out_of_the_list() {
 #[tokio::test]
 async fn act_on_alert_dismiss_removes_it_from_the_list() {
     let db = seeded();
-    act_on_alert(&db, "a1", "dismiss")
+    act_on_alert(&db, "a1", "dismiss", today())
         .await
         .expect("dismiss ok");
 
@@ -230,7 +230,9 @@ async fn act_on_alert_dismiss_removes_it_from_the_list() {
 #[tokio::test]
 async fn act_on_alert_snooze_sets_snoozed_status() {
     let db = seeded();
-    act_on_alert(&db, "a3", "snooze").await.expect("snooze ok");
+    act_on_alert(&db, "a3", "snooze", today())
+        .await
+        .expect("snooze ok");
 
     let seed_alerts = db.alerts().await.expect("alerts");
     let a3 = seed_alerts
@@ -251,7 +253,9 @@ async fn act_on_alert_apply_raises_the_targeted_cap() {
         .expect("cap before");
     let before_cap = before.cap.expect("Going out has a cap");
 
-    act_on_alert(&db, "a1", "apply").await.expect("apply ok");
+    act_on_alert(&db, "a1", "apply", today())
+        .await
+        .expect("apply ok");
 
     let after = db
         .category_cap_by_name("Going out")
@@ -270,7 +274,7 @@ async fn act_on_alert_apply_raises_the_targeted_cap() {
 #[tokio::test]
 async fn act_on_unknown_alert_is_not_found() {
     let db = seeded();
-    let err = act_on_alert(&db, "does-not-exist", "dismiss")
+    let err = act_on_alert(&db, "does-not-exist", "dismiss", today())
         .await
         .expect_err("unknown alert must error");
     assert!(
@@ -283,7 +287,7 @@ async fn act_on_unknown_alert_is_not_found() {
 #[tokio::test]
 async fn act_with_unknown_action_is_invalid() {
     let db = seeded();
-    let err = act_on_alert(&db, "a1", "frobnicate")
+    let err = act_on_alert(&db, "a1", "frobnicate", today())
         .await
         .expect_err("unknown action must error");
     assert!(

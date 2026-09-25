@@ -497,6 +497,7 @@ pub fn seed_alerts() -> Result<Vec<Alert>, PhoskError> {
             target: Some("going-out".to_owned()),
             actions: vec![view.clone(), raise, dismiss.clone()],
             created,
+            snooze: None,
         },
         Alert {
             id: AlertId::new(),
@@ -511,6 +512,7 @@ pub fn seed_alerts() -> Result<Vec<Alert>, PhoskError> {
             target: Some("groceries".to_owned()),
             actions: vec![view.clone(), dismiss.clone()],
             created,
+            snooze: None,
         },
         Alert {
             id: AlertId::new(),
@@ -525,6 +527,7 @@ pub fn seed_alerts() -> Result<Vec<Alert>, PhoskError> {
             target: None,
             actions: vec![view, snooze, dismiss],
             created,
+            snooze: None,
         },
     ])
 }
