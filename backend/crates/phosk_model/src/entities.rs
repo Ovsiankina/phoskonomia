@@ -19,8 +19,9 @@
 use chrono::NaiveDate;
 use phosk_core::money::Money;
 use phosk_id::{
-    AlertId, BudgetId, CategoryId, ChargeId, ChatId, DebtId, FeedItemId, LineItemId, MessageId,
-    PaymentId, PersonalIouId, PreferenceId, ReceiptId, SignalId, SubscriptionId, SuggestionId,
+    AlertId, BudgetChangeId, BudgetId, CategoryId, ChargeId, ChatId, DebtId, FeedItemId,
+    LineItemId, MessageId, PaymentId, PersonalIouId, PreferenceId, ReceiptId, SignalId,
+    SubscriptionId, SuggestionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +150,30 @@ pub struct Budget {
     pub savings_target: Money,
 }
 
+/// One entry of the global budget's change history: a single user edit of the
+/// monthly budget or the savings target, oldest→newest in append order.
+///
+/// The global [`BudgetConfig`](crate::BudgetConfig) is a singleton without a
+/// history of its own, so every accepted change appends one of these; the
+/// entry carries the [`Provenance`] of the edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetChange {
+    /// Identity of this history entry.
+    pub id: BudgetChangeId,
+    /// `"monthly_budget" | "savings_target"`.
+    pub field: String,
+    /// The value before the edit, exact centimes.
+    #[serde(with = "crate::money_centimes")]
+    pub old_value: Money,
+    /// The value after the edit, exact centimes.
+    #[serde(with = "crate::money_centimes")]
+    pub new_value: Money,
+    /// The day the change was made.
+    pub at: NaiveDate,
+    /// Who made it ([`Source::UserModified`] for a user edit).
+    pub provenance: Provenance,
+}
+
 /// A per-category spending envelope — richer than the dashboard's `Category`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CategoryCap {
@@ -214,6 +239,23 @@ pub struct Alert {
     pub actions: Vec<AlertAction>,
     /// When the alert was created.
     pub created: NaiveDate,
+    /// The snooze in force while `status` is `"snoozed"`; `None` for an alert
+    /// that was never snoozed (or was snoozed before snoozes carried a term).
+    #[serde(default)]
+    pub snooze: Option<AlertSnooze>,
+}
+
+/// How long an [`Alert`] stays snoozed, and how bad its condition was when it
+/// was snoozed — the two things that bring it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertSnooze {
+    /// The alert is hidden while the day is before this date and resurfaces
+    /// on it.
+    pub until: NaiveDate,
+    /// The rules-engine level of the alert's target at snooze time:
+    /// `0` no rule fires, `1` at risk, `2` over budget. A later, strictly
+    /// higher level resurfaces the alert early.
+    pub level: u8,
 }
 
 /// One action button on an [`Alert`].
