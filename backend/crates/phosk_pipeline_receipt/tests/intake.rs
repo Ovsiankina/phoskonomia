@@ -664,7 +664,8 @@ async fn hostile_line_text_is_normalised_flagged_and_still_approvable() {
         "lineItems": [
             {"name": "", "qty": 1.0, "unitPriceCentimes": 100, "confidence": 0.99},
             {"name": "x".repeat(10_000), "qty": 1.0, "unitPriceCentimes": 200, "confidence": 0.9},
-            {"name": "Bad\u{7}\u{1b}name", "qty": 1.0, "unitPriceCentimes": 300, "confidence": 0.9}
+            {"name": "Bad\u{7}\u{1b}name", "qty": 1.0, "unitPriceCentimes": 300, "confidence": 0.9},
+            {"name": "Pay\u{202E}FHC\u{202C} \u{2066}x\u{2069}\u{200B}\u{200D}\u{2060}\u{FEFF}", "qty": 1.0, "unitPriceCentimes": 400, "confidence": 0.9}
         ]
     });
     let outcome = intake_with(&db, out, b"hostile").await.expect("intake ok");
@@ -686,6 +687,7 @@ async fn hostile_line_text_is_normalised_flagged_and_still_approvable() {
         phosk_ai::ai_approval::MAX_TEXT_CHARS
     );
     assert_eq!(names[2], "Badname");
+    assert_eq!(names[3], "PayFHC x", "bidi + zero-width chars stripped");
     assert_eq!(staged.receipt.shop, "Shop[2J");
     assert_eq!(outcome.low_confidence_lines, 1);
 
@@ -715,6 +717,7 @@ async fn unrecoverable_extractions_stage_and_enqueue_nothing() {
             "{what}: {res:?}"
         );
         assert!(db.ai_suggestions().await.expect("s").is_empty(), "{what}");
+        assert_eq!(db.staged_proposal_count().expect("staged"), 0, "{what}");
     }
 }
 

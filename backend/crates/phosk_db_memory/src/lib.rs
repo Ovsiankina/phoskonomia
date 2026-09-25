@@ -211,6 +211,16 @@ impl MemoryDb {
         }
         Ok(lock(&self.signals)?.iter().any(|s| s.parent == category))
     }
+
+    /// How many receipt proposals are staged (test inspection: the port only
+    /// reads a proposal by its suggestion id, so "nothing was staged" is not
+    /// observable through it).
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store lock is poisoned.
+    pub fn staged_proposal_count(&self) -> Result<usize, PhoskError> {
+        Ok(lock(&self.receipt_proposals)?.len())
+    }
 }
 
 /// Lock a `Mutex` collection, mapping poisoning to a [`PhoskError`] (no panic).

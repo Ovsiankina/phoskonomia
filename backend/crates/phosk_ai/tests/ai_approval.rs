@@ -267,11 +267,17 @@ async fn conflicting_open_proposals_for_one_receipt_are_refused() {
     assert_eq!(outs[0].suggestion_id, a2.suggestion_id);
 }
 
+/// Validation runs before anything is written: the receipt's only open
+/// proposal fails the schema, so nothing is booked or marked (a dismissed
+/// proposal for the same slug is ignored, not applied instead).
 #[tokio::test]
 async fn bulk_approve_applies_nothing_when_one_open_proposal_is_invalid() {
     let db = empty_db();
     let (good, mut bad) = (proposal("rcpt:m"), proposal("rcpt:m"));
     enqueue(&db, &good).await;
+    reject_suggestion(&db, good.suggestion_id)
+        .await
+        .expect("reject");
     enqueue(&db, &bad).await;
     bad.receipt.amount = Money::from_centimes(1);
     db.stage_receipt_proposal(bad.clone())
@@ -280,8 +286,80 @@ async fn bulk_approve_applies_nothing_when_one_open_proposal_is_invalid() {
     let res = approve_receipt(&db, "rcpt:m").await;
     assert!(matches!(res, Err(PhoskError::Invalid(_))), "{res:?}");
     assert_eq!(ledger_len(&db).await, 0);
-    assert_eq!(status(&db, good.suggestion_id).await, "open");
+    assert_eq!(status(&db, good.suggestion_id).await, "dismissed");
     assert_eq!(status(&db, bad.suggestion_id).await, "open");
+}
+
+/// Book `p` on a fresh ledger; the booked receipt id and its sorted line ids.
+async fn booked_ids(p: &ReceiptProposal) -> (ReceiptId, Vec<String>) {
+    let db = empty_db();
+    enqueue(&db, p).await;
+    approve_suggestion(&db, p.suggestion_id)
+        .await
+        .expect("approve");
+    let r = db.receipt_by_slug(&p.receipt.slug).await.expect("booked");
+    let mut lines: Vec<String> = db
+        .line_items(r.id)
+        .await
+        .expect("lines")
+        .iter()
+        .map(|l| l.id.to_string())
+        .collect();
+    lines.sort_unstable();
+    (r.id, lines)
+}
+
+/// Two applications of one proposal (e.g. a double-clicked APPROVE racing past
+/// the booked-slug check) write the SAME rows, so the second overwrites the
+/// first instead of booking a duplicate. The ids depend on the suggestion id
+/// only — never on the staged (untrusted) ids.
+#[tokio::test]
+async fn the_same_proposal_always_books_the_same_ids() {
+    let p = proposal("rcpt:same");
+    let first = booked_ids(&p).await;
+    assert_eq!(booked_ids(&p).await, first, "deterministic");
+
+    let mut restaged = p.clone();
+    restaged.receipt.id = ReceiptId::new();
+    for l in &mut restaged.line_items {
+        l.id = LineItemId::new();
+        l.receipt_id = restaged.receipt.id;
+    }
+    assert_eq!(booked_ids(&restaged).await, first, "staged ids ignored");
+
+    let other = proposal("rcpt:same");
+    let (other_id, other_lines) = booked_ids(&other).await;
+    assert_ne!(other_id, first.0, "another suggestion, another receipt id");
+    assert!(other_lines.iter().all(|l| !first.1.contains(l)));
+}
+
+/// The losing call of a concurrent double-approve replays the same write:
+/// one receipt, one dashboard projection, one set of lines.
+#[tokio::test]
+async fn a_replayed_approval_write_is_one_booking() {
+    let db = empty_db();
+    let p = proposal("rcpt:race");
+    enqueue(&db, &p).await;
+    approve_suggestion(&db, p.suggestion_id)
+        .await
+        .expect("approve");
+    let r = db.receipt_by_slug("rcpt:race").await.expect("booked");
+    let lines = db.line_items(r.id).await.expect("lines");
+
+    let again = db
+        .insert_receipt(r.clone(), lines.clone())
+        .await
+        .expect("replay");
+    assert_eq!(again, r.id);
+    assert_eq!(ledger_len(&db).await, 1);
+    assert_eq!(
+        db.transactions_between(day(), day())
+            .await
+            .expect("tx")
+            .len(),
+        1
+    );
+    assert_eq!(db.line_items(r.id).await.expect("lines").len(), lines.len());
 }
 
 /// Once a receipt is booked (and possibly user-corrected), no proposal ever
@@ -337,8 +415,10 @@ async fn a_proposal_can_never_target_a_seeded_receipt() {
     assert_eq!(db.line_items(seeded.id).await.expect("lines"), seeded_lines);
 }
 
-/// Model-supplied ids and ledger flags are not trusted: ids are re-minted (so
-/// they cannot collide with a stored row) and `fixed` / `signal_id` dropped.
+/// Staged ids and ledger flags are not trusted: staged ids aimed at a stored
+/// receipt and line are ignored (the booked ids are derived from the
+/// suggestion id), the stored rows stay untouched, and `fixed` / `signal_id`
+/// are dropped.
 #[tokio::test]
 async fn model_supplied_ids_and_flags_are_not_trusted() {
     let db = MemoryDb::seeded().expect("seed");
@@ -437,6 +517,21 @@ async fn hostile_proposals_are_rejected_before_the_ledger() {
         }),
         ("control chars in shop", |p| {
             p.receipt.shop = "Shop\u{1b}[2J".to_owned();
+        }),
+        ("bidi override in a line name", |p| {
+            p.line_items[0].name = "Bananas \u{202E}FHC 01".to_owned();
+        }),
+        ("bidi isolate in category", |p| {
+            p.receipt.category = "Groc\u{2066}eries".to_owned();
+        }),
+        ("zero-width space in shop", |p| {
+            p.receipt.shop = "Synthetic\u{200B}Market".to_owned();
+        }),
+        ("zero-width joiner in a line name", |p| {
+            p.line_items[1].name = "Br\u{200D}ead".to_owned();
+        }),
+        ("byte-order mark in shop", |p| {
+            p.receipt.shop = "\u{FEFF}Synthetic Market".to_owned();
         }),
         ("empty shop", |p| p.receipt.shop = "  ".to_owned()),
         ("date in 1970", |p| {
