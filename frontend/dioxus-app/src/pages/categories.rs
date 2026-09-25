@@ -29,15 +29,32 @@ enum Op {
     Merge { from: String, into: String },
 }
 
+/// Where an op's "saving" state and error show: a panel, or one category's
+/// row. Typed, so no category name can collide with a panel.
+#[derive(Clone, PartialEq, Debug)]
+enum Target {
+    Create,
+    Merge,
+    Row(String),
+}
+
 impl Op {
-    /// The category the op is about (drives the per-row "saving" state).
-    fn target(&self) -> String {
+    /// Where the op's status belongs.
+    fn target(&self) -> Target {
         match self {
-            Self::Create { .. } => "+".to_string(),
-            Self::Rename { from, .. } => from.clone(),
-            Self::Colour { name, .. } | Self::Delete(name) => name.clone(),
-            Self::Merge { .. } => "⇢".to_string(),
+            Self::Create { .. } => Target::Create,
+            Self::Rename { from, .. } => Target::Row(from.clone()),
+            Self::Colour { name, .. } | Self::Delete(name) => Target::Row(name.clone()),
+            Self::Merge { .. } => Target::Merge,
         }
+    }
+}
+
+impl Target {
+    /// Whether a successful op on this target closes the rename draft opened
+    /// on `draft_from`: only the row's own draft, never another row's.
+    fn closes_draft(&self, draft_from: &str) -> bool {
+        matches!(self, Self::Row(name) if name == draft_from)
     }
 }
 
@@ -51,8 +68,8 @@ pub fn CategoriesPage() -> Element {
     // Every successful write answers with the refreshed view, which then wins
     // over the initial read.
     let live = use_signal(|| None::<CategoriesDto>);
-    let busy = use_signal(|| None::<String>);
-    let mut err = use_signal(|| None::<(String, String)>);
+    let busy = use_signal(|| None::<Target>);
+    let mut err = use_signal(|| None::<(Target, String)>);
 
     let mut new_name = use_signal(String::new);
     let mut new_colour = use_signal(|| DEFAULT_COLOUR.to_string());
@@ -78,14 +95,22 @@ pub fn CategoriesPage() -> Element {
             match res {
                 Ok(view) => {
                     live.set(Some(view));
-                    match target.as_str() {
-                        "+" => new_name.set(String::new()),
-                        "⇢" => {
+                    match &target {
+                        Target::Create => new_name.set(String::new()),
+                        Target::Merge => {
                             preview.set(None);
                             merge_from.set(String::new());
                             merge_into.set(String::new());
                         }
-                        _ => renaming.set(None),
+                        Target::Row(_) => {
+                            let closes = renaming
+                                .read()
+                                .as_ref()
+                                .is_some_and(|(f, _)| target.closes_draft(f));
+                            if closes {
+                                renaming.set(None);
+                            }
+                        }
                     }
                 }
                 Err(e) => err.set(Some((target, error_text(&e)))),
@@ -97,12 +122,12 @@ pub fn CategoriesPage() -> Element {
     let review_merge = move |_| {
         let (from, into) = (merge_from(), merge_into());
         let mut busy = busy;
-        busy.set(Some("⇢".to_string()));
+        busy.set(Some(Target::Merge));
         err.set(None);
         spawn(async move {
             match merge_preview(from, into).await {
                 Ok(p) => preview.set(Some(p)),
-                Err(e) => err.set(Some(("⇢".to_string(), error_text(&e)))),
+                Err(e) => err.set(Some((Target::Merge, error_text(&e)))),
             }
             busy.set(None);
         });
@@ -121,7 +146,7 @@ pub fn CategoriesPage() -> Element {
     };
     let busy_now = busy();
     let busy_any = busy_now.is_some();
-    let err_for = |t: &str| {
+    let err_for = |t: &Target| {
         err.read()
             .as_ref()
             .filter(|(target, _)| target == t)
@@ -145,8 +170,9 @@ pub fn CategoriesPage() -> Element {
             let used = v.rows.iter().filter(|r| r.uses > 0).count().to_string();
             let names: Vec<String> = v.rows.iter().map(|r| r.name.clone()).collect();
             let palette = v.palette.clone();
-            let create_err = err_for("+");
-            let merge_err = err_for("⇢");
+            let create_err = err_for(&Target::Create);
+            let merge_err = err_for(&Target::Merge);
+            let row_target = |name: &str| Target::Row(name.to_owned());
             rsx! {
                 div { class: "cfg-top",
                     div {
@@ -174,8 +200,8 @@ pub fn CategoriesPage() -> Element {
                                 row: r.clone(),
                                 palette: palette.clone(),
                                 disabled: busy_any,
-                                saving: busy_now.as_deref() == Some(r.name.as_str()),
-                                error: err_for(&r.name),
+                                saving: busy_now.as_ref() == Some(&row_target(&r.name)),
+                                error: err_for(&row_target(&r.name)),
                                 renaming: renaming.read().as_ref().filter(|(f, _)| *f == r.name).map(|(_, d)| d.clone()),
                                 on_rename_start: move |name: String| renaming.set(Some((name.clone(), name))),
                                 on_rename_draft: move |d: String| {
@@ -196,6 +222,9 @@ pub fn CategoriesPage() -> Element {
                             span { class: "nm", "New category" }
                         }
                         div { class: "cfg-panel-sub", "A name and a colour from the palette. Set its cap on Budgets." }
+                        if let Some(n) = v.notice.clone() {
+                            div { class: "cfg-panel-sub", role: "status", "{n}" }
+                        }
                         div { class: "cfg-row",
                             div { class: "rl", div { class: "lab", "Name" } }
                             div { class: "rc cfg-text",
@@ -222,7 +251,7 @@ pub fn CategoriesPage() -> Element {
                         }
                         div { class: "cfg-row",
                             div { class: "rl",
-                                InlineStatus { pending: busy_now.as_deref() == Some("+"), error: create_err }
+                                InlineStatus { pending: busy_now == Some(Target::Create), error: create_err }
                             }
                             div { class: "rc",
                                 button {
@@ -291,7 +320,7 @@ pub fn CategoriesPage() -> Element {
                                 }
                             }
                         }
-                        InlineStatus { pending: busy_now.as_deref() == Some("⇢"), error: merge_err }
+                        InlineStatus { pending: busy_now == Some(Target::Merge), error: merge_err }
                     }
                 }
             }
@@ -506,5 +535,37 @@ fn MergeConfirm(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn panel_targets_never_collide_with_a_category_name() {
+        for name in ["+", "⇢"] {
+            let t = Op::Delete(name.to_owned()).target();
+            assert_eq!(t, Target::Row(name.to_owned()));
+            assert_ne!(t, Target::Create);
+            assert_ne!(t, Target::Merge);
+        }
+        let create = Op::Create {
+            name: "+".to_owned(),
+            colour: DEFAULT_COLOUR.to_owned(),
+        };
+        assert_eq!(create.target(), Target::Create);
+    }
+
+    #[test]
+    fn a_row_op_closes_only_its_own_rename_draft() {
+        let colour = Op::Colour {
+            name: "Rent".to_owned(),
+            colour: DEFAULT_COLOUR.to_owned(),
+        };
+        assert!(colour.target().closes_draft("Rent"));
+        assert!(!colour.target().closes_draft("Groceries"));
+        assert!(!Target::Create.closes_draft("Rent"));
+        assert!(!Target::Merge.closes_draft("Rent"));
     }
 }
