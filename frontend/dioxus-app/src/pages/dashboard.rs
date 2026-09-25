@@ -26,14 +26,16 @@
 use dioxus::prelude::*;
 use phosk_core::money::Money;
 
-use crate::components::comps::{Alert, AlertItem, Cat, CatRows, Rec, RecRow, Txn, TxnTape};
+use crate::components::comps::{
+    Alert, AlertAction, AlertItem, Cat, CatRows, Rec, RecRow, Txn, TxnTape,
+};
 use crate::components::prims::{pct_tone, Dot, PhoskChart, SavingsDial, ScannerBg, Spark};
 use crate::components::shell::{Sig, SigOcc, SignalPanel, SignalStrip, TopBar};
-use crate::components::states::Awaiting;
+use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::budgets::{get_categories, CategoryDto};
 use crate::data::dashboard::{
     act_on_alert, get_alerts, get_insight, get_recurring, get_spend_series, get_top_shops,
-    get_totals, AlertDto, RecurringDto,
+    get_totals, AlertDto, RecurringDto, ALERT_ACTION_FAILED,
 };
 use crate::data::signals::{
     dismiss_signal, get_signal, get_signal_candidates, get_signals, track_signal, SignalDetailDto,
@@ -110,10 +112,21 @@ fn rec_of(r: &RecurringDto) -> Rec {
     }
 }
 
+/// Shown for any failed signal track/dismiss press: a fixed, generic line.
+const SIGNAL_ACTION_FAILED: &str = "could not update this signal, try again";
+
+/// The text to show for a failed signal track/dismiss press: always
+/// [`SIGNAL_ACTION_FAILED`], never the server's message, which can carry a
+/// `PhoskError` or session-build detail (a data path, driver text).
+fn signal_action_error_text(_err: &ServerFnError) -> String {
+    SIGNAL_ACTION_FAILED.to_string()
+}
+
 /// `AlertDto` → the `Alert` row consumed by `AlertItem`. The per-tone action
-/// labels (`VIEW` / `RAISE CAP` / `DISMISS` / `SNOOZE` / `MARK PAID`) carry through
-/// from the read so the `.acts` button row renders; the page wires `on_action`
-/// (the React DISMISS/SNOOZE/APPLY/VIEW round-trip).
+/// buttons (`VIEW` / `RAISE CAP` / `DISMISS` / `SNOOZE` / `MARK PAID`, each with
+/// its backend verb `kind`) carry through from the read so the `.acts` button
+/// row renders; the page wires `on_action` (the React DISMISS/SNOOZE/APPLY/VIEW
+/// round-trip), sending each button's `kind`, never its label.
 fn alert_of(a: &AlertDto) -> Alert {
     let tone = if a.tone == "info" {
         "llm".to_string()
@@ -126,7 +139,14 @@ fn alert_of(a: &AlertDto) -> Alert {
         tag: a.tag.clone(),
         head: a.head.clone(),
         body: a.body.clone(),
-        actions: a.actions.clone(),
+        actions: a
+            .actions
+            .iter()
+            .map(|act| AlertAction {
+                label: act.label.clone(),
+                kind: act.kind.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -235,6 +255,14 @@ pub fn DashboardPage() -> Element {
     let mut ai_collapsed = use_signal(|| false);
     let mut sel = use_signal(|| Option::<String>::None);
     let mut drawer_sig = use_signal(|| false);
+    // The fixed, page-safe message from a rejected alert-action press; cleared
+    // when the next press starts.
+    let alert_error = use_signal(|| Option::<String>::None);
+    // `true` while an alert-action call is in flight: the alert buttons are
+    // disabled so a second press can't repeat it.
+    let alert_busy = use_signal(|| false);
+    // Same, for a rejected signal track/dismiss press from the signal panel.
+    let signal_error = use_signal(|| Option::<String>::None);
     // Programmatic navigation for the alert VIEW deep-link (React's navigate()).
     let nav = use_navigator();
 
@@ -850,23 +878,42 @@ pub fn DashboardPage() -> Element {
                                                 AlertItem {
                                                     key: "{a.id}",
                                                     a: alert_of(a),
-                                                    on_action: move |(id, label): (String, String)| {
+                                                    busy: alert_busy(),
+                                                    on_action: move |(id, kind): (String, String)| {
                                                         // VIEW navigates to the alert's deep-link target
                                                         // (React resolved /alerts/{id}/target → /transactions);
-                                                        // every other label POSTs then re-fetches the list.
-                                                        if label.eq_ignore_ascii_case("VIEW") {
+                                                        // every other kind POSTs then re-fetches the list
+                                                        // (and, after RAISE CAP, the caps it changed).
+                                                        if kind == "navigate" {
                                                             let _ = nav.push(Route::TransactionsPage {});
-                                                        } else {
+                                                        } else if !alert_busy() {
                                                             let mut alerts = alerts;
+                                                            let mut cats = cats;
+                                                            let mut alert_error = alert_error;
+                                                            let mut alert_busy = alert_busy;
+                                                            alert_busy.set(true);
+                                                            alert_error.set(None);
                                                             spawn(async move {
-                                                                let _ = act_on_alert(id, label).await;
-                                                                alerts.restart();
+                                                                let raised_cap = kind == "apply";
+                                                                match act_on_alert(id, kind).await {
+                                                                    Ok(()) => {
+                                                                        alerts.restart();
+                                                                        if raised_cap {
+                                                                            cats.restart();
+                                                                        }
+                                                                    }
+                                                                    Err(_) => {
+                                                                        alert_error.set(Some(ALERT_ACTION_FAILED.to_string()));
+                                                                    }
+                                                                }
+                                                                alert_busy.set(false);
                                                             });
                                                         }
                                                     },
                                                 }
                                             }
                                         }
+                                        InlineStatus { error: alert_error() }
                                     }
                                     div { class: "hud", style: "display:flex;justify-content:space-between;align-items:center;margin-top:4px",
                                         span { "RECURRING · CLEAN" }
@@ -929,27 +976,40 @@ pub fn DashboardPage() -> Element {
                             let mut signals = signals;
                             let mut candidates = candidates;
                             let mut sig_detail = sig_detail;
+                            let mut signal_error = signal_error;
                             spawn(async move {
-                                let _ = track_signal(id).await;
-                                signals.restart();
-                                candidates.restart();
-                                sig_detail.restart();
-                                sel.set(None);
+                                match track_signal(id).await {
+                                    Ok(()) => {
+                                        signal_error.set(None);
+                                        signals.restart();
+                                        candidates.restart();
+                                        sig_detail.restart();
+                                        sel.set(None);
+                                    }
+                                    Err(e) => signal_error.set(Some(signal_action_error_text(&e))),
+                                }
                             });
                         },
                         on_dismiss: move |id: String| {
                             let mut signals = signals;
                             let mut candidates = candidates;
                             let mut sig_detail = sig_detail;
+                            let mut signal_error = signal_error;
                             spawn(async move {
-                                let _ = dismiss_signal(id).await;
-                                signals.restart();
-                                candidates.restart();
-                                sig_detail.restart();
-                                sel.set(None);
+                                match dismiss_signal(id).await {
+                                    Ok(()) => {
+                                        signal_error.set(None);
+                                        signals.restart();
+                                        candidates.restart();
+                                        sig_detail.restart();
+                                        sel.set(None);
+                                    }
+                                    Err(e) => signal_error.set(Some(signal_action_error_text(&e))),
+                                }
                             });
                         },
                     }
+                    InlineStatus { error: signal_error() }
                 }
             }
 
@@ -966,29 +1026,46 @@ pub fn DashboardPage() -> Element {
                                 let mut signals = signals;
                                 let mut candidates = candidates;
                                 let mut sig_detail = sig_detail;
+                                let mut signal_error = signal_error;
                                 spawn(async move {
-                                    let _ = track_signal(id).await;
-                                    signals.restart();
-                                    candidates.restart();
-                                    sig_detail.restart();
-                                    drawer_sig.set(false);
-                                    sel.set(None);
+                                    match track_signal(id).await {
+                                        Ok(()) => {
+                                            signal_error.set(None);
+                                            signals.restart();
+                                            candidates.restart();
+                                            sig_detail.restart();
+                                            drawer_sig.set(false);
+                                            sel.set(None);
+                                        }
+                                        Err(e) => {
+                                            signal_error.set(Some(signal_action_error_text(&e)));
+                                        }
+                                    }
                                 });
                             },
                             on_dismiss: move |id: String| {
                                 let mut signals = signals;
                                 let mut candidates = candidates;
                                 let mut sig_detail = sig_detail;
+                                let mut signal_error = signal_error;
                                 spawn(async move {
-                                    let _ = dismiss_signal(id).await;
-                                    signals.restart();
-                                    candidates.restart();
-                                    sig_detail.restart();
-                                    drawer_sig.set(false);
-                                    sel.set(None);
+                                    match dismiss_signal(id).await {
+                                        Ok(()) => {
+                                            signal_error.set(None);
+                                            signals.restart();
+                                            candidates.restart();
+                                            sig_detail.restart();
+                                            drawer_sig.set(false);
+                                            sel.set(None);
+                                        }
+                                        Err(e) => {
+                                            signal_error.set(Some(signal_action_error_text(&e)));
+                                        }
+                                    }
                                 });
                             },
                         }
+                        InlineStatus { error: signal_error() }
                     }
                 }
             }
@@ -1019,6 +1096,27 @@ fn AiPanelDash(
             collapsed,
             on_toggle: move |()| on_toggle.call(()),
             on_track: move |id: String| on_track.call(id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dioxus::prelude::ServerFnError;
+
+    use super::{signal_action_error_text, SIGNAL_ACTION_FAILED};
+
+    /// A failed signal track/dismiss shows one fixed line, never the server's
+    /// message (a `PhoskError` or session error can embed a data path or
+    /// driver text).
+    #[test]
+    fn signal_action_errors_never_echo_the_server_message() {
+        for err in [
+            ServerFnError::new("surreal: IO error at /some/data/path"),
+            ServerFnError::new(""),
+            ServerFnError::StreamError("connection reset".to_string()),
+        ] {
+            assert_eq!(signal_action_error_text(&err), SIGNAL_ACTION_FAILED);
         }
     }
 }

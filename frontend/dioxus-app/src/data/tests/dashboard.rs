@@ -6,7 +6,7 @@ use phosk_planning::alerts as alert_svc;
 use super::support::{assert_maps, fresh_db, json, money, server_error, today};
 use crate::data::dashboard::{
     act_on_alert_with, get_alerts, get_insight, get_recurring, get_spend_series, get_top_shops,
-    get_totals,
+    get_totals, ALERT_ACTION_FAILED,
 };
 
 #[tokio::test]
@@ -86,7 +86,10 @@ async fn get_alerts_serves_the_active_alert_log() {
     let ids: Vec<&str> = a.iter().map(|x| x.id.as_str()).collect();
     assert_eq!(ids, ["a1", "a2", "a3"]);
     assert_eq!(a[0].tone, "alert");
-    assert_eq!(a[0].actions, ["VIEW", "RAISE CAP", "DISMISS"]);
+    let labels: Vec<&str> = a[0].actions.iter().map(|act| act.label.as_str()).collect();
+    assert_eq!(labels, ["VIEW", "RAISE CAP", "DISMISS"]);
+    let kinds: Vec<&str> = a[0].actions.iter().map(|act| act.kind.as_str()).collect();
+    assert_eq!(kinds, ["navigate", "apply", "dismiss"]);
 
     let backend = alert_svc::alerts(&fresh_db(), today())
         .await
@@ -143,12 +146,38 @@ async fn apply_raises_the_targeted_cap_by_a_tenth() {
 #[tokio::test]
 async fn act_on_alert_rejects_bad_input_without_side_effects() {
     let db = fresh_db();
+    // Every rejection — unknown alert, unknown kind, or a kind a3 doesn't
+    // offer (it has no RAISE CAP / "apply" button) — comes back as the one
+    // fixed, page-safe message; the PhoskError detail never reaches the page.
     let msg = server_error(act_on_alert_with(&db, "no-such-alert", "dismiss").await);
-    assert!(msg.starts_with("not found"), "{msg}");
+    assert_eq!(msg, ALERT_ACTION_FAILED);
     let msg = server_error(act_on_alert_with(&db, "a1", "explode").await);
-    assert!(msg.starts_with("invalid input"), "{msg}");
-    // a3 has no target envelope to raise.
+    assert_eq!(msg, ALERT_ACTION_FAILED);
     let msg = server_error(act_on_alert_with(&db, "a3", "apply").await);
-    assert!(msg.starts_with("invalid input"), "{msg}");
+    assert_eq!(msg, ALERT_ACTION_FAILED);
+    assert_eq!(active_ids(&db).await, ["a1", "a2", "a3"]);
+}
+
+#[tokio::test]
+async fn each_seeded_buttons_kind_succeeds() {
+    for (id, kind) in [
+        ("a1", "dismiss"),
+        ("a1", "apply"),
+        ("a2", "dismiss"),
+        ("a3", "dismiss"),
+        ("a3", "snooze"),
+    ] {
+        let db = fresh_db();
+        act_on_alert_with(&db, id, kind)
+            .await
+            .unwrap_or_else(|e| panic!("{id} {kind}: {e:?}"));
+    }
+}
+
+#[tokio::test]
+async fn the_button_label_sent_instead_of_its_kind_is_rejected() {
+    let db = fresh_db();
+    let msg = server_error(act_on_alert_with(&db, "a1", "DISMISS").await);
+    assert_eq!(msg, ALERT_ACTION_FAILED);
     assert_eq!(active_ids(&db).await, ["a1", "a2", "a3"]);
 }

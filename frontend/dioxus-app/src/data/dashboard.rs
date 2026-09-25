@@ -268,6 +268,17 @@ pub async fn get_recurring() -> Result<RecurringListDto, ServerFnError> {
     }
 }
 
+/// One action button on an [`AlertDto`]. Mirrors `phosk_planning::alerts::AlertActionDto`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertActionDto {
+    /// Button label, e.g. `"VIEW"`, `"RAISE CAP"`, `"DISMISS"`, `"SNOOZE"`.
+    pub label: String,
+    /// The backend verb [`act_on_alert`] expects back for this button:
+    /// `"navigate" | "dismiss" | "snooze" | "apply"`.
+    pub kind: String,
+}
+
 /// One attention item (`GET /alerts` element). `tone` is `"alert"|"warn"|"info"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -282,11 +293,11 @@ pub struct AlertDto {
     pub head: String,
     /// Supporting body line.
     pub body: String,
-    /// Action button labels (first is the primary). Mirrors React `a.actions`
+    /// Action buttons (first is the primary). Mirrors React `a.actions`
     /// (`comps.jsx` `AlertItem` renders one `<button class="btn[ p]">` each, e.g.
     /// VIEW / RAISE CAP / DISMISS / SNOOZE / MARK PAID); the page routes a press
-    /// through [`act_on_alert`].
-    pub actions: Vec<String>,
+    /// through [`act_on_alert`], sending the button's `kind`, never its label.
+    pub actions: Vec<AlertActionDto>,
 }
 
 /// The dashboard alerts list (`GET /alerts`).
@@ -309,7 +320,14 @@ pub async fn get_alerts() -> Result<Vec<AlertDto>, ServerFnError> {
                 tag: a.tag,
                 head: a.head,
                 body: a.body,
-                actions: a.actions,
+                actions: a
+                    .actions
+                    .into_iter()
+                    .map(|act| AlertActionDto {
+                        label: act.label,
+                        kind: act.kind,
+                    })
+                    .collect(),
             })
             .collect())
     }
@@ -321,12 +339,19 @@ pub async fn get_alerts() -> Result<Vec<AlertDto>, ServerFnError> {
 
 /// Act on a dashboard alert (`POST /alerts/{id}/{dismiss|snooze|apply}`).
 ///
-/// React's `AlertItem` POSTed each action label to the dead REST layer and then
-/// re-fetched (`onChanged`). Here that mutation is a single seeded server fn that
-/// the page routes every non-navigation label through (VIEW is handled client-
-/// side as a route push); it currently acknowledges the action so the list can
-/// re-fetch, mirroring the React `after`/`onChanged` round-trip. The real
-/// dismiss/snooze/raise-cap services land later.
+/// `action` is the pressed button's `kind` (`AlertActionDto.kind`), never its
+/// label: the server validates it against that alert's own actions and
+/// rejects anything else. React's `AlertItem` POSTed each action label to the
+/// dead REST layer and then re-fetched (`onChanged`); here that mutation is a
+/// single seeded server fn that the page routes every non-navigation button
+/// through (VIEW is handled client-side as a route push).
+///
+/// # Errors
+/// [`ALERT_ACTION_FAILED`] on any rejection by the planning service (unknown
+/// or dismissed alert, a kind this alert doesn't offer, an adapter failure):
+/// that [`phosk_core::error::PhoskError`] text is not sent. A failure to build
+/// the session, or a transport failure, carries its own message; the page
+/// shows [`ALERT_ACTION_FAILED`] for every error either way.
 #[server]
 pub async fn act_on_alert(id: String, action: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "server-deps")]
@@ -341,6 +366,10 @@ pub async fn act_on_alert(id: String, action: String) -> Result<(), ServerFnErro
     }
 }
 
+/// Shown for any [`act_on_alert`] rejection: a fixed, generic line so an
+/// engine/store detail from `PhoskError` never reaches the page.
+pub const ALERT_ACTION_FAILED: &str = "could not update this alert, try again";
+
 /// [`act_on_alert`]'s logic over an explicit DB port (tests pass a fresh store).
 /// `action` is the backend verb: `dismiss` | `snooze` | `apply`.
 #[cfg(feature = "server-deps")]
@@ -351,7 +380,7 @@ pub(crate) async fn act_on_alert_with(
 ) -> Result<(), ServerFnError> {
     phosk_planning::alerts::act_on_alert(db, id, action, crate::data::today())
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .map_err(|_| ServerFnError::new(ALERT_ACTION_FAILED))
 }
 
 /// `GET /insights/dashboard` — the GEMMA4 one-liner + estimated saving.
