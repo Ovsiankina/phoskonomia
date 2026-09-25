@@ -272,7 +272,10 @@ async fn a_new_day_moves_only_the_next_due_date() {
     assert_eq!(d.day, 28);
     assert_eq!(d.next_label, "28 JUN");
     assert_eq!(d.monthly, before.monthly);
-    assert_eq!(d.term, before.term, "the day does not touch the amortisation");
+    assert_eq!(
+        d.term, before.term,
+        "the day does not touch the amortisation"
+    );
     assert_eq!(d.months_to_payoff, before.months_to_payoff);
 
     let log = db.corrections().expect("audit log");

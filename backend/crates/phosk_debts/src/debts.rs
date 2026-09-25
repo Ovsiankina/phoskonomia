@@ -615,7 +615,11 @@ pub async fn debt_payments(
 /// `monthly <= balance · monthly_rate` (payment ≤ accruing interest) the balance
 /// never amortizes ⇒ returns 600 (revolving/unknown). Integer-centime, no panics.
 #[allow(clippy::unnecessary_wraps)] // fallible signature kept per the build-contract.
-fn months_to_payoff(balance: Money, monthly: Money, monthly_rate: f64) -> Result<i32, PhoskError> {
+pub(crate) fn months_to_payoff(
+    balance: Money,
+    monthly: Money,
+    monthly_rate: f64,
+) -> Result<i32, PhoskError> {
     const CAP: i32 = 600;
     if balance.centimes() <= 0 {
         return Ok(0);

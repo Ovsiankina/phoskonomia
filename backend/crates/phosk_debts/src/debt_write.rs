@@ -3,8 +3,8 @@
 //! A service over the [`DatabaseAdapter`] PORT, like the read side in
 //! [`crate::debts`]: it validates caller input, stamps
 //! [`Provenance`] and delegates the storage to the port. Plan changes
-//! (monthly/day/term adjustment, refinance) are a separate concern and are NOT
-//! here.
+//! (monthly/day/term adjustment, refinance) are a separate concern and live
+//! in [`crate::debt_plan`].
 //!
 //! **Identity.** A debt is addressed on the wire by its `slug` (that is what
 //! [`crate::debts::DebtDto::id`] carries). The slug is derived from the name
@@ -272,8 +272,18 @@ pub async fn edit_debt(
         }
     }
     next.provenance = Provenance::user_modified();
+    write_audited(db, &current, next, chrono::Utc::now().date_naive()).await
+}
 
-    let changes = changed_fields(&current, &next);
+/// Write `next` over `current` and append one correction event per changed
+/// field, stamped `at`. The caller has validated `next` and set its provenance.
+pub(crate) async fn write_audited(
+    db: &dyn DatabaseAdapter,
+    current: &Debt,
+    next: Debt,
+    at: NaiveDate,
+) -> Result<(), PhoskError> {
+    let changes = changed_fields(current, &next);
     db.upsert_debt(next).await?;
     for (field, old_value, new_value) in changes {
         db.record_correction(CorrectionEvent {
@@ -282,7 +292,7 @@ pub async fn edit_debt(
             field: field.to_owned(),
             old_value,
             new_value,
-            at: chrono::Utc::now().date_naive(),
+            at,
         })
         .await?;
     }
@@ -420,7 +430,7 @@ pub fn slugify(name: &str) -> String {
 
 /// Trim the free-text fields and upper-case the kind, so `"lease"` and
 /// `"LEASE"` are the same bucket to [`crate::debts`]'s `groupLabel` map.
-fn normalized(debt: Debt) -> Debt {
+pub(crate) fn normalized(debt: Debt) -> Debt {
     Debt {
         name: debt.name.trim().to_owned(),
         lender: debt.lender.trim().to_owned(),
@@ -433,7 +443,7 @@ fn normalized(debt: Debt) -> Debt {
 }
 
 /// Reject a record the read side could not make sense of.
-fn validate(debt: &Debt) -> Result<(), PhoskError> {
+pub(crate) fn validate(debt: &Debt) -> Result<(), PhoskError> {
     if debt.name.is_empty() {
         return Err(PhoskError::Invalid("debt name is empty".to_owned()));
     }
