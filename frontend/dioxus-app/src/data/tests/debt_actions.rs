@@ -1,14 +1,15 @@
 //! `data::debt_actions`: debt and personal-IOU writes, driven through the
 //! `*_with` inner fns on a fresh seeded store (never the global one).
 
-use phosk_debts::debts as svc;
+use phosk_debts::{debts as svc, personal_ious};
 
 use super::support::{fresh_db, money, today};
 use crate::data::debt_actions::{
-    create_debt_with, delete_debt_with, edit_debt_with, pay_debt_extra_with, pay_debt_with,
-    DebtForm, DEBT_KINDS,
+    create_debt_with, create_iou_with, delete_debt_with, delete_iou_with, edit_debt_with,
+    edit_iou_with, pay_debt_extra_with, pay_debt_with, pay_iou_with, settle_iou_with, DebtForm,
+    IouForm, DEBT_KINDS,
 };
-use crate::data::debts::map_debt;
+use crate::data::debts::{map_debt, map_iou};
 use dioxus::prelude::ServerFnError;
 use phosk_db_memory::MemoryDb;
 
@@ -42,6 +43,14 @@ async fn debt(db: &MemoryDb, id: &str) -> Option<svc::DebtDto> {
         .expect("debts")
         .into_iter()
         .find(|d| d.id == id)
+}
+
+async fn iou(db: &MemoryDb, id: &str) -> Option<personal_ious::PersonalIouDto> {
+    personal_ious::list_personal_ious(db)
+        .await
+        .expect("ious")
+        .into_iter()
+        .find(|i| i.id == id)
 }
 
 // ── debts ─────────────────────────────────────────────────────────────────────
@@ -199,4 +208,85 @@ async fn extra_payment_reduces_principal_and_can_clear_the_debt() {
     let tax = map_debt(debt(&db, "tax").await.expect("still listed"));
     assert_eq!(tax.balance, money(0));
     assert!(!tax.actions.pay, "no payment on a paid-off debt");
+}
+
+// ── personal IOUs ─────────────────────────────────────────────────────────────
+
+fn iou_form() -> IouForm {
+    IouForm {
+        dir: "out".into(),
+        person: "Anna Muster".into(),
+        amount: "80.50".into(),
+        reason: "concert tickets".into(),
+    }
+}
+
+#[tokio::test]
+async fn create_iou_starts_outstanding_in_full() {
+    let db = fresh_db();
+    let id = create_iou_with(&db, iou_form()).await.expect("created");
+    let i = iou(&db, &id).await.expect("listed");
+    assert_eq!((i.amount, i.of), (money(8_050), money(8_050)));
+    assert_eq!((i.dir.as_str(), i.initials.as_str()), ("out", "AM"));
+    let wire = map_iou(i);
+    assert!(wire.actions.pay && wire.actions.settle);
+
+    let mut bad = iou_form();
+    bad.dir = "sideways".into();
+    assert!(msg(create_iou_with(&db, bad).await).starts_with("Direction"));
+    let mut bad = iou_form();
+    bad.amount = "0".into();
+    assert!(msg(create_iou_with(&db, bad).await).starts_with("Could not save the IOU"));
+    let mut bad = iou_form();
+    bad.amount = "1.234".into();
+    assert!(msg(create_iou_with(&db, bad).await).starts_with("Amount"));
+}
+
+#[tokio::test]
+async fn edit_iou_moves_the_original_but_not_what_was_repaid() {
+    let db = fresh_db();
+    // i2: Marco owes 45 of 90 → 45 repaid.
+    let f = IouForm {
+        dir: "in".into(),
+        person: "Marco".into(),
+        amount: "100".into(),
+        reason: "dinner".into(),
+    };
+    edit_iou_with(&db, "i2".into(), f.clone())
+        .await
+        .expect("edited");
+    let i = iou(&db, "i2").await.expect("i2");
+    assert_eq!((i.of, i.amount), (money(10_000), money(5_500)));
+    assert_eq!(i.reason, "dinner");
+
+    let mut below = f.clone();
+    below.amount = "40".into();
+    assert!(msg(edit_iou_with(&db, "i2".into(), below).await).starts_with("Could not save the IOU"));
+    assert_eq!(
+        msg(edit_iou_with(&db, "nope".into(), f).await),
+        "This IOU no longer exists."
+    );
+}
+
+#[tokio::test]
+async fn iou_payment_settle_and_delete() {
+    let db = fresh_db();
+    pay_iou_with(&db, "i2".into(), "20".into())
+        .await
+        .expect("paid");
+    assert_eq!(iou(&db, "i2").await.expect("i2").amount, money(2_500));
+    assert!(msg(pay_iou_with(&db, "i2".into(), "26".into()).await).starts_with("The payment"));
+    assert!(msg(pay_iou_with(&db, "i2".into(), "".into()).await).starts_with("Payment"));
+
+    settle_iou_with(&db, "i2".into()).await.expect("settled");
+    let settled = map_iou(iou(&db, "i2").await.expect("kept, fully repaid"));
+    assert_eq!(settled.amount, money(0));
+    assert!(!settled.actions.pay && !settled.actions.settle);
+
+    delete_iou_with(&db, "i2".into()).await.expect("deleted");
+    assert!(iou(&db, "i2").await.is_none());
+    assert_eq!(
+        msg(settle_iou_with(&db, "i2".into()).await),
+        "This IOU no longer exists."
+    );
 }

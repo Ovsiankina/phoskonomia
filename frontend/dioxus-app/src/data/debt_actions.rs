@@ -50,6 +50,20 @@ pub struct DebtForm {
     pub note: String,
 }
 
+/// The personal-IOU create/edit form, exactly as typed. Parsed server-side.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IouForm {
+    /// `"in"` (owed to you) or `"out"` (you owe).
+    pub dir: String,
+    /// The other person.
+    pub person: String,
+    /// The ORIGINAL amount, CHF text. Editing it keeps what was repaid.
+    pub amount: String,
+    /// What it was for.
+    pub reason: String,
+}
+
 /// Shown when an action fails before the server could answer.
 const UNREACHABLE: &str = "Could not reach the server, nothing was saved.";
 
@@ -103,6 +117,27 @@ delegate!(
     /// Record an extra (principal-only) payment. REAL: `phosk_debts::debt_write::extra_payment`.
     pay_debt_extra => pay_debt_extra_with(id: String, amount: String) -> ()
 );
+delegate!(
+    /// Create a personal IOU; returns its id. REAL: `phosk_debts::iou_write::create_personal_iou`.
+    create_iou => create_iou_with(form: IouForm) -> String
+);
+delegate!(
+    /// Edit a personal IOU. REAL: `phosk_debts::iou_write::edit_personal_iou`.
+    edit_iou => edit_iou_with(id: String, form: IouForm) -> ()
+);
+delegate!(
+    /// Delete a personal IOU. REAL: `phosk_debts::iou_write::delete_personal_iou`.
+    delete_iou => delete_iou_with(id: String) -> ()
+);
+delegate!(
+    /// Record a partial repayment. REAL: `phosk_debts::iou_write::record_iou_payment`.
+    pay_iou => pay_iou_with(id: String, amount: String) -> ()
+);
+delegate!(
+    /// Settle what is left. REAL: `phosk_debts::iou_write::settle_personal_iou`.
+    settle_iou => settle_iou_with(id: String) -> ()
+);
+
 // ── inner fns (server only) ───────────────────────────────────────────────────
 
 #[cfg(feature = "server-deps")]
@@ -115,8 +150,9 @@ mod inner {
     use phosk_core::error::PhoskError;
     use phosk_core::money::Money;
     use phosk_debts::debt_write::{self, DebtEdit, NewDebt, NewDebtPayment};
+    use phosk_debts::iou_write::{self, NewPersonalIou, PersonalIouEdit};
 
-    use super::{msg, DebtForm, DEBT_KINDS};
+    use super::{msg, DebtForm, IouForm, DEBT_KINDS};
 
     /// Largest amount any field accepts: CHF 100'000'000.00.
     const MAX_AMOUNT: Money = Money::from_centimes(10_000_000_000);
@@ -322,6 +358,86 @@ mod inner {
             .map(drop)
             .map_err(|e| store_error(msg::DEBT_GONE, msg::PAYMENT_RANGE, &e))
     }
+
+    /// `"in"` / `"out"`, else the fixed direction text.
+    fn dir(text: &str) -> Result<String, ServerFnError> {
+        let d = text.trim().to_ascii_lowercase();
+        if d == "in" || d == "out" {
+            Ok(d)
+        } else {
+            Err(fail(msg::DIR))
+        }
+    }
+
+    pub(crate) async fn create_iou_with(
+        db: &dyn DatabaseAdapter,
+        form: IouForm,
+    ) -> Result<String, ServerFnError> {
+        let input = NewPersonalIou {
+            dir: dir(&form.dir)?,
+            amount: amount(&form.amount, msg::IOU_AMOUNT)?,
+            person: form.person,
+            // Blank: the service derives the initials from the name.
+            initials: String::new(),
+            reason: form.reason,
+            since: crate::data::today(),
+        };
+        iou_write::create_personal_iou(db, input)
+            .await
+            .map_err(|e| store_error(msg::IOU_GONE, msg::IOU_INVALID, &e))
+    }
+
+    pub(crate) async fn edit_iou_with(
+        db: &dyn DatabaseAdapter,
+        id: String,
+        form: IouForm,
+    ) -> Result<(), ServerFnError> {
+        let id = slug(msg::IOU_GONE, &id)?;
+        let edit = PersonalIouEdit {
+            dir: Some(dir(&form.dir)?),
+            of: Some(amount(&form.amount, msg::IOU_AMOUNT)?),
+            person: Some(form.person),
+            reason: Some(form.reason),
+            ..PersonalIouEdit::default()
+        };
+        iou_write::edit_personal_iou(db, id, edit)
+            .await
+            .map_err(|e| store_error(msg::IOU_GONE, msg::IOU_INVALID, &e))
+    }
+
+    pub(crate) async fn delete_iou_with(
+        db: &dyn DatabaseAdapter,
+        id: String,
+    ) -> Result<(), ServerFnError> {
+        let id = slug(msg::IOU_GONE, &id)?;
+        iou_write::delete_personal_iou(db, id)
+            .await
+            .map_err(|e| store_error(msg::IOU_GONE, msg::RETRY, &e))
+    }
+
+    pub(crate) async fn pay_iou_with(
+        db: &dyn DatabaseAdapter,
+        id: String,
+        amount_text: String,
+    ) -> Result<(), ServerFnError> {
+        let id = slug(msg::IOU_GONE, &id)?;
+        let payment = amount(&amount_text, msg::PAYMENT)?;
+        iou_write::record_iou_payment(db, id, payment)
+            .await
+            .map(drop)
+            .map_err(|e| store_error(msg::IOU_GONE, msg::PAYMENT_RANGE, &e))
+    }
+
+    pub(crate) async fn settle_iou_with(
+        db: &dyn DatabaseAdapter,
+        id: String,
+    ) -> Result<(), ServerFnError> {
+        let id = slug(msg::IOU_GONE, &id)?;
+        iou_write::settle_personal_iou(db, id)
+            .await
+            .map(drop)
+            .map_err(|e| store_error(msg::IOU_GONE, msg::RETRY, &e))
+    }
 }
 
 /// The fixed, user-facing failure texts. None repeats the input or a figure.
@@ -337,9 +453,14 @@ mod msg {
     pub(super) const DEBT_INVALID: &str = "Could not save the debt: the name must be new and not \
         blank, the lender filled in, the original amount above zero and the balance no more than \
         the original.";
+    pub(super) const DIR: &str = "Direction: pick owed to you or you owe.";
+    pub(super) const IOU_AMOUNT: &str = "Amount: enter an amount in CHF, like 1250.50.";
+    pub(super) const IOU_INVALID: &str = "Could not save the IOU: the name must not be blank and \
+        the amount must be above zero and no less than what was already repaid.";
     pub(super) const PAYMENT: &str = "Payment: enter an amount in CHF, like 1250.50.";
     pub(super) const PAYMENT_RANGE: &str =
         "The payment must be above zero and no more than what is still owed.";
     pub(super) const DEBT_GONE: &str = "This debt no longer exists.";
+    pub(super) const IOU_GONE: &str = "This IOU no longer exists.";
     pub(super) const RETRY: &str = "Could not save, please try again.";
 }

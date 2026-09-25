@@ -23,10 +23,11 @@
 //!     debt detail/payments → `use_resource` over the `sel` signal (refetch on
 //!     change), exactly like the dashboard's signal detail.
 //!   * writes (T39): debt create / edit / delete / instalment / extra payment
-//!     go through `data::debt_actions`; the forms live in `pages::debt_forms`,
-//!     each in its own page-level signal, and every success refetches the
-//!     reads it feeds. REFINANCE / ADJUST PLAN still render inert (no UI for
-//!     T17's plan changes yet), as do the IOU card actions (REMIND / SETTLE).
+//!     and IOU create / edit / delete / partial payment / settle go through
+//!     `data::debt_actions`; the forms live in `pages::debt_forms`, each in its
+//!     own page-level signal, and every success refetches the reads it feeds.
+//!     REFINANCE / ADJUST PLAN still render inert (no UI for T17's plan changes
+//!     yet); REMIND had no backend and is replaced by RECORD PAYMENT.
 //!   * SVG charts (`PayoffTrajectory`, `DecayLine`, `NetBeam`) are hand-written
 //!     inline here, faithful to the JSX (Debts owns these page-specific charts;
 //!     they are not shared F2 primitives). `Spark` (the card balance trace) IS a
@@ -43,14 +44,17 @@ use crate::components::shell::{AiPanel, TopBar};
 use crate::components::states::Awaiting;
 use crate::data::chf;
 use crate::data::cycle::{get_cycle, CycleDto};
-use crate::data::debt_actions::{delete_debt, pay_debt, pay_debt_extra, DebtForm};
+use crate::data::debt_actions::{
+    delete_debt, delete_iou, pay_debt, pay_debt_extra, pay_iou, settle_iou, DebtForm, IouForm,
+};
 use crate::data::debts::{
     get_debt, get_debt_payments, get_debt_stats, get_iou_stats, get_trajectory, list_debts,
     list_personal_ious, DebtDetailDto, DebtDto, DebtPaymentDto, DebtStatsDto, IouStatsDto,
     PersonalIouDto, TrajectoryDto,
 };
 use crate::pages::debt_forms::{
-    debt_draft, new_debt_draft, submit, DebtFormPanel, DeleteConfirm, Panel, PayDraft, PayField,
+    debt_draft, iou_draft, new_debt_draft, new_iou_draft, submit, DebtFormPanel, DeleteConfirm,
+    IouFormPanel, Panel, PayDraft, PayField,
 };
 
 // ── pure presentation helpers (faithful to the JSX) ─────────────────────────
@@ -163,6 +167,9 @@ pub fn DebtsPage() -> Element {
     let mut debt_edit = use_signal(Panel::<DebtForm>::default);
     let debt_pay = use_signal(Panel::<PayDraft>::default);
     let debt_row = use_signal(Panel::<bool>::default);
+    let mut iou_edit = use_signal(Panel::<IouForm>::default);
+    let iou_pay = use_signal(Panel::<PayDraft>::default);
+    let iou_row = use_signal(Panel::<bool>::default);
 
     // Responsive dock vs drawer: narrow (<1280px) drawers the inspector.
     let narrow = use_signal(|| false);
@@ -186,8 +193,8 @@ pub fn DebtsPage() -> Element {
     let cycle = use_resource(get_cycle);
     let mut debts = use_resource(list_debts);
     let mut stats = use_resource(get_debt_stats);
-    let ious = use_resource(list_personal_ious);
-    let iou_stats = use_resource(get_iou_stats);
+    let mut ious = use_resource(list_personal_ious);
+    let mut iou_stats = use_resource(get_iou_stats);
 
     // trajectory re-fetches when the strategy changes (params drive use_resource).
     let traj_strategy = match strategy().as_str() {
@@ -223,6 +230,10 @@ pub fn DebtsPage() -> Element {
         detail.restart();
         payments.restart();
     });
+    let refresh_ious = use_callback(move |()| {
+        ious.restart();
+        iou_stats.restart();
+    });
     let on_debt_deleted = use_callback(move |()| {
         sel.set(None);
         drawer.set(false);
@@ -240,6 +251,17 @@ pub fn DebtsPage() -> Element {
     });
     let delete_debt_cb = use_callback(move |id: String| {
         submit(debt_row, delete_debt(id), on_debt_deleted);
+    });
+    let pay_iou_cb = use_callback(move |(id, d): (String, PayDraft)| {
+        submit(iou_pay, pay_iou(id, d.amount), refresh_ious);
+    });
+    let delete_iou_cb = use_callback(move |id: String| {
+        submit(iou_row, delete_iou(id), refresh_ious);
+    });
+    let settle_iou_cb = use_callback(move |id: String| {
+        let mut row = iou_row;
+        row.write().open(&id, false);
+        submit(iou_row, settle_iou(id), refresh_ious);
     });
 
     // ---- read resources into owned snapshots (clone out of the borrow) ----
@@ -629,7 +651,14 @@ pub fn DebtsPage() -> Element {
                                         span { class: "ct", "{iou_count_str}" }
                                         span { class: "rule" }
                                         span { class: "meta", "INFORMAL · NO INTEREST · KEPT OUT OF YOUR REAL DEBT" }
+                                        button {
+                                            class: "gbtn dx-add",
+                                            r#type: "button",
+                                            onclick: move |_| iou_edit.write().open("", new_iou_draft()),
+                                            "+ NEW IOU"
+                                        }
                                     }
+                                    IouFormPanel { panel: iou_edit, on_saved: refresh_ious }
 
                                     if let Some(s) = &iou_stats_v {
                                         NetBeam { stats: s.clone(), count: iou_total_count }
@@ -648,7 +677,16 @@ pub fn DebtsPage() -> Element {
                                                     span { class: "n", "{iou_in_head}" }
                                                 }
                                                 for p in iou_in.iter() {
-                                                    PersonCard { key: "{p.id}", p: p.clone() }
+                                                    PersonCard {
+                                                        key: "{p.id}",
+                                                        p: p.clone(),
+                                                        iou_pay,
+                                                        iou_row,
+                                                        on_edit: move |p: PersonalIouDto| iou_edit.write().open(&p.id, iou_draft(&p)),
+                                                        on_pay: pay_iou_cb,
+                                                        on_settle: settle_iou_cb,
+                                                        on_delete: delete_iou_cb,
+                                                    }
                                                 }
                                             }
                                             div { class: "iou-col",
@@ -657,7 +695,16 @@ pub fn DebtsPage() -> Element {
                                                     span { class: "n", "{iou_out_head}" }
                                                 }
                                                 for p in iou_out.iter() {
-                                                    PersonCard { key: "{p.id}", p: p.clone() }
+                                                    PersonCard {
+                                                        key: "{p.id}",
+                                                        p: p.clone(),
+                                                        iou_pay,
+                                                        iou_row,
+                                                        on_edit: move |p: PersonalIouDto| iou_edit.write().open(&p.id, iou_draft(&p)),
+                                                        on_pay: pay_iou_cb,
+                                                        on_settle: settle_iou_cb,
+                                                        on_delete: delete_iou_cb,
+                                                    }
                                                 }
                                             }
                                         }
@@ -1658,11 +1705,19 @@ fn NetBeam(stats: IouStatsDto, count: Option<u32>) -> Element {
     }
 }
 
-/// One personal-IOU card (`PersonCard` in the JSX). The REMIND / SETTLE UP /
-/// MARK SETTLED actions had no F3 mutation server fn yet, so the buttons render
-/// (faithful DOM) but are inert.
+/// One personal-IOU card (`PersonCard` in the JSX). RECORD PAYMENT and MARK
+/// SETTLED show only while the server offers them (`p.actions`); EDIT and
+/// DELETE (with a confirm step) always.
 #[component]
-fn PersonCard(p: PersonalIouDto) -> Element {
+fn PersonCard(
+    p: PersonalIouDto,
+    iou_pay: Signal<Panel<PayDraft>>,
+    iou_row: Signal<Panel<bool>>,
+    on_edit: EventHandler<PersonalIouDto>,
+    on_pay: Callback<(String, PayDraft), ()>,
+    on_settle: Callback<String>,
+    on_delete: Callback<String>,
+) -> Element {
     let inbound = p.dir == "in";
     // backend-derived repaid fraction (0–1); render only when > 0 (the JSX showed
     // it whenever repaidPct != null; seeded data always carries it, so we always
@@ -1691,7 +1746,8 @@ fn PersonCard(p: PersonalIouDto) -> Element {
         ),
         chf(p.of, 0)
     );
-    let act_left = if inbound { "REMIND" } else { "SETTLE UP" };
+    let (pay_id, settle_id, edit_p) = (p.id.clone(), p.id.clone(), p.clone());
+    let row_busy = iou_row.read().saving;
 
     rsx! {
         div { class: "{dir_cls}",
@@ -1714,9 +1770,29 @@ fn PersonCard(p: PersonalIouDto) -> Element {
             div { class: "person-foot",
                 span { class: "since", "SINCE {p.since}" }
                 div { class: "person-acts",
-                    button { class: "gbtn", "{act_left}" }
-                    button { class: "gbtn p", "MARK SETTLED" }
+                    if p.actions.pay {
+                        button {
+                            class: "gbtn",
+                            r#type: "button",
+                            onclick: move |_| iou_pay.write().open(&pay_id, PayDraft::default()),
+                            "RECORD PAYMENT"
+                        }
+                    }
+                    if p.actions.settle {
+                        button {
+                            class: "gbtn p",
+                            r#type: "button",
+                            disabled: row_busy,
+                            onclick: move |_| on_settle.call(settle_id.clone()),
+                            "MARK SETTLED"
+                        }
+                    }
                 }
+            }
+            PayField { panel: iou_pay, target: p.id.clone(), label: "Payment · CHF".to_string(), on_pay }
+            div { class: "person-acts",
+                button { class: "gbtn", r#type: "button", onclick: move |_| on_edit.call(edit_p.clone()), "EDIT" }
+                DeleteConfirm { panel: iou_row, target: p.id.clone(), on_confirm: on_delete }
             }
         }
     }

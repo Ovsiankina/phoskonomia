@@ -1,11 +1,11 @@
-//! The Debts page's write UI (T39): the create/edit forms, the
+//! The Debts page's write UI (T39): the debt and IOU create/edit forms, the
 //! inline payment fields, and the confirm-before-delete step.
 //!
 //! Every panel keeps its state in its own page-level [`Panel`] signal, so a
 //! save in one panel (and the refetch that follows it) never closes or resets
 //! another panel's open form. The page sends what was typed; parsing, the
 //! error texts and which actions a row offers all come from the server
-//! (`data::debt_actions`, `DebtDto::actions`).
+//! (`data::debt_actions`, `DebtDto::actions`, `PersonalIouDto::actions`).
 
 use std::future::Future;
 
@@ -13,8 +13,10 @@ use dioxus::prelude::*;
 
 use crate::components::states::InlineStatus;
 use crate::data::budgets::cap_input_text;
-use crate::data::debt_actions::{action_error_text, create_debt, edit_debt, DebtForm, DEBT_KINDS};
-use crate::data::debts::DebtDto;
+use crate::data::debt_actions::{
+    action_error_text, create_debt, create_iou, edit_debt, edit_iou, DebtForm, IouForm, DEBT_KINDS,
+};
+use crate::data::debts::{DebtDto, PersonalIouDto};
 
 /// One write panel: what it is open for, the draft, and the save state.
 ///
@@ -134,6 +136,24 @@ pub fn new_debt_draft() -> DebtForm {
     }
 }
 
+/// The edit form's starting values for `p`. The amount is the ORIGINAL.
+pub fn iou_draft(p: &PersonalIouDto) -> IouForm {
+    IouForm {
+        dir: p.dir.clone(),
+        person: p.person.clone(),
+        amount: cap_input_text(p.of),
+        reason: p.reason.clone(),
+    }
+}
+
+/// The create form's starting values.
+pub fn new_iou_draft() -> IouForm {
+    IouForm {
+        dir: "in".into(),
+        ..IouForm::default()
+    }
+}
+
 /// One labelled text field. `num` sets it in Pilowlava with a decimal keypad.
 #[component]
 fn Field(
@@ -234,6 +254,67 @@ pub fn DebtFormPanel(panel: Signal<Panel<DebtForm>>, on_saved: Callback<()>) -> 
             Field { label: "Payment day", value: f.day, num: true, busy, on_input: set(|d, v| d.day = v) }
             Field { label: "Term · months", value: f.term, num: true, busy, on_input: set(|d, v| d.term = v) }
             Field { label: "Note", value: f.note, wide: true, busy, on_input: set(|d, v| d.note = v) }
+            FormActions { busy, error: p.error, on_cancel: move |()| panel.write().close() }
+        }
+    }
+}
+
+/// The personal-IOU create/edit form; renders nothing while closed.
+#[component]
+pub fn IouFormPanel(panel: Signal<Panel<IouForm>>, on_saved: Callback<()>) -> Element {
+    let p = panel.read().clone();
+    let Some(target) = p.open.clone() else {
+        return rsx! {};
+    };
+    let busy = p.saving;
+    let f = p.draft;
+    let head = if target.is_empty() {
+        "⟷ NEW IOU"
+    } else {
+        "⟷ EDIT IOU"
+    };
+    let amount_label = if target.is_empty() {
+        "Amount · CHF"
+    } else {
+        "Original amount · CHF"
+    };
+    let save = move |()| {
+        let (id, form) = {
+            let p = panel.read();
+            (p.open.clone().unwrap_or_default(), p.draft.clone())
+        };
+        let action = async move {
+            if id.is_empty() {
+                create_iou(form).await.map(drop)
+            } else {
+                edit_iou(id, form).await
+            }
+        };
+        submit(panel, action, on_saved);
+    };
+    let set =
+        move |apply: fn(&mut IouForm, String)| move |v: String| apply(&mut panel.write().draft, v);
+
+    rsx! {
+        form {
+            class: "dx-form",
+            onsubmit: move |e: Event<FormData>| {
+                e.prevent_default();
+                save(());
+            },
+            div { class: "dx-h", "{head}" }
+            label { class: "dx-fld",
+                span { "Direction" }
+                select {
+                    disabled: busy,
+                    onchange: move |e: Event<FormData>| panel.write().draft.dir = e.value(),
+                    option { value: "in", selected: f.dir == "in", "← OWED TO YOU" }
+                    option { value: "out", selected: f.dir == "out", "YOU OWE →" }
+                }
+            }
+            Field { label: "Person", value: f.person, busy, on_input: set(|d, v| d.person = v) }
+            Field { label: amount_label, value: f.amount, num: true, busy, on_input: set(|d, v| d.amount = v) }
+            Field { label: "Reason", value: f.reason, wide: true, busy, on_input: set(|d, v| d.reason = v) }
             FormActions { busy, error: p.error, on_cancel: move |()| panel.write().close() }
         }
     }
