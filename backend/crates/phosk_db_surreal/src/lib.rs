@@ -789,12 +789,32 @@ impl DatabaseAdapter for SurrealDb {
         self.store.list(Bucket::PersonalIou).await
     }
 
+    async fn personal_iou_by_slug(&self, slug: &str) -> Result<PersonalIou, PhoskError> {
+        let all: Vec<PersonalIou> = self.store.list(Bucket::PersonalIou).await?;
+        all.into_iter()
+            .find(|i| i.slug == slug)
+            .ok_or_else(|| PhoskError::NotFound(format!("personal iou slug {slug}")))
+    }
+
     async fn upsert_personal_iou(&self, i: PersonalIou) -> Result<PersonalIouId, PhoskError> {
         let id = i.id;
         self.store
             .put(Bucket::PersonalIou, &id.to_string(), &i)
             .await?;
         Ok(id)
+    }
+
+    async fn delete_personal_iou(&self, id: PersonalIouId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self
+            .store
+            .get::<PersonalIou>(Bucket::PersonalIou, &key)
+            .await?
+            .is_none()
+        {
+            return Err(PhoskError::NotFound(format!("personal iou {id}")));
+        }
+        self.store.delete(Bucket::PersonalIou, &key).await
     }
 
     // ── Analytics support ──────────────────────────────────────────────────────

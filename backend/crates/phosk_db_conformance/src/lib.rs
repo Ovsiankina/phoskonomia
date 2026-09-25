@@ -99,6 +99,8 @@ macro_rules! database_adapter_conformance {
             debts::delete_debt_removes_it_and_its_payments,
             debts::debt_payments_are_scoped_and_oldest_first,
             debts::upsert_personal_iou_inserts_then_replaces,
+            debts::personal_iou_lookup_by_slug_agrees,
+            debts::delete_personal_iou_removes_it,
             settings::preferences_lookup_by_key,
             settings::set_preference_updates_or_creates,
             settings::reset_preference_restores_the_default,
