@@ -23,6 +23,8 @@ use crate::Route;
 #[derive(Clone, Copy, PartialEq)]
 enum Decided {
     Booked,
+    /// Approve succeeded but wrote nothing new (it was already booked).
+    AlreadyBooked,
     Rejected,
 }
 
@@ -78,7 +80,13 @@ pub fn ReceiptPage() -> Element {
         decide_error.set(None);
         spawn(async move {
             let result = if approve {
-                approve_proposal(id).await.map(|_| Decided::Booked)
+                approve_proposal(id).await.map(|o| {
+                    if o.applied {
+                        Decided::Booked
+                    } else {
+                        Decided::AlreadyBooked
+                    }
+                })
             } else {
                 reject_proposal(id).await.map(|()| Decided::Rejected)
             };
@@ -169,15 +177,23 @@ pub fn ReceiptPage() -> Element {
                                         message: "Upload a receipt photo to review what the model read.",
                                     }
                                 },
-                                Some(ReceiptIntakeDto { proposal: None, .. }) => rsx! {
+                                Some(ReceiptIntakeDto { status: IntakeStatus::Duplicate, proposal: None, .. }) => rsx! {
                                     Awaiting {
                                         label: "RECEIPT REVIEW",
-                                        legend: "ALREADY BOOKED",
+                                        legend: "ALREADY DECIDED",
                                         message: "This photo was submitted before and is no longer pending.",
                                     }
                                     Link { class: "gbtn", to: Route::TransactionsPage {}, "OPEN TRANSACTIONS" }
                                 },
-                                Some(ReceiptIntakeDto { status, proposal: Some(p), .. }) => rsx! {
+                                Some(ReceiptIntakeDto { proposal: None, .. }) => rsx! {
+                                    Awaiting {
+                                        label: "RECEIPT REVIEW",
+                                        legend: "NOT LOADED",
+                                        message: "The receipt was staged, but its review could not be loaded. Open Approvals to review it.",
+                                    }
+                                    Link { class: "gbtn", to: Route::ApprovalsPage {}, "OPEN APPROVALS" }
+                                },
+                                Some(ReceiptIntakeDto { status, proposal: Some(p), conflicting, .. }) => rsx! {
                                     div { class: "cand-list osc-glass hair osc-bkt blue",
                                         span { class: "osc-leg", "MOD·AI · RECEIPT PROPOSAL" }
                                         if status == IntakeStatus::Duplicate {
@@ -200,6 +216,12 @@ pub fn ReceiptPage() -> Element {
                                                     Link { class: "gbtn p", to: Route::TransactionsPage {}, "OPEN TRANSACTIONS" }
                                                 }
                                             },
+                                            Some(Decided::AlreadyBooked) => rsx! {
+                                                div { class: "cand-row",
+                                                    span { class: "cand-ev", style: "flex:1 1 auto", "Already booked · nothing new." }
+                                                    Link { class: "gbtn", to: Route::TransactionsPage {}, "OPEN TRANSACTIONS" }
+                                                }
+                                            },
                                             Some(Decided::Rejected) => rsx! {
                                                 div { class: "cand-row",
                                                     span { class: "cand-ev", "Rejected · nothing was booked." }
@@ -211,11 +233,15 @@ pub fn ReceiptPage() -> Element {
                                                         span { class: "cand-conf low", style: "flex:1 1 auto",
                                                             "INVALID · this proposal can't be booked as read · reject it"
                                                         }
+                                                    } else if conflicting {
+                                                        span { class: "cand-conf low", style: "flex:1 1 auto",
+                                                            "CONFLICT · another open proposal targets this receipt · resolve it on Approvals"
+                                                        }
                                                     }
                                                     div { class: "cand-acts",
                                                         button {
                                                             class: "gbtn p",
-                                                            disabled: busy || !p.bookable,
+                                                            disabled: busy || !p.bookable || conflicting,
                                                             onclick: move |_| decide(true),
                                                             if deciding() == Some(true) { "BOOKING…" } else { "APPROVE" }
                                                         }
