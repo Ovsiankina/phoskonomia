@@ -2,9 +2,8 @@
 #
 # Composes the shared AiPanel read-model (live feed + chat transcript + model
 # status) and the dashboard AI insight one-liner from the PORT, and exposes the
-# suggestion/feed/chat write skeletons. The real Ollama/GEMMA4 wiring (LlmAdapter,
-# tool registry, approval queue) is deferred — see backend-features-todo.md §7;
-# today this crate is a SKELETON (todo!() bodies, no computation).
+# suggestion/feed/chat write paths, plus the approval service (ai_approval) —
+# the ONLY path from a model proposal to the ledger (`insert_receipt`).
 #
 # Layering (ADR-010): every service fn takes a `&dyn DatabaseAdapter` (the PORT)
 # and depends only on the PORT trait crate + the foundation crates (core, model,
