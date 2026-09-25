@@ -48,8 +48,9 @@ use phosk_model::{CorrectionEvent, Debt, DebtPayment, Provenance, Source};
 
 /// The lowest day-of-month an instalment may land on.
 const MIN_DAY: u32 = 1;
-/// The highest day-of-month an instalment may land on. Short months clamp on
-/// read (see [`crate::debts`]), so the 31st is accepted here.
+/// The highest day-of-month an instalment may land on. In a shorter month the
+/// due date falls on that month's last day (see [`crate::debts`]), so the 31st
+/// is accepted here.
 const MAX_DAY: u32 = 31;
 
 /// The debt kinds the read model knows how to group and label
@@ -401,7 +402,7 @@ async fn apply_payment(
 /// One month of interest on `balance` at `apr`: `round(balance · apr / 12)`,
 /// exact i64 centimes. The same rounding the read side's `annualInterest` uses,
 /// so a recorded instalment and the projection agree to the centime.
-fn monthly_interest(balance: Money, apr: f64) -> Result<Money, PhoskError> {
+pub(crate) fn monthly_interest(balance: Money, apr: f64) -> Result<Money, PhoskError> {
     #[allow(clippy::cast_precision_loss)]
     let raw = balance.centimes() as f64 * apr / 12.0;
     if !raw.is_finite() {

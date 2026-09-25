@@ -247,20 +247,26 @@ fn next_label(as_of: NaiveDate, day: u32) -> String {
     date.format("%d %b").to_string().to_uppercase()
 }
 
-/// The next calendar date with day-of-month `day` that is ≥ `as_of`.
+/// The next due date on/after `as_of` for payment day-of-month `day`. In a
+/// month shorter than `day` the instalment falls on its last day (day 31 is
+/// 30 JUN, day 29 is 28 FEB outside a leap year).
 fn next_payment_date(as_of: NaiveDate, day: u32) -> NaiveDate {
-    let day = day.clamp(1, 28);
-    let this = as_of.with_day(day);
+    let this = due_in_month(as_of, day);
     match this {
         Some(d) if d >= as_of => d,
-        _ => {
-            let next = as_of
-                .with_day(1)
-                .and_then(|d| d.checked_add_months(Months::new(1)))
-                .and_then(|d| d.with_day(day));
-            next.unwrap_or(as_of)
-        }
+        _ => as_of
+            .with_day(1)
+            .and_then(|d| d.checked_add_months(Months::new(1)))
+            .and_then(|d| due_in_month(d, day))
+            .unwrap_or(as_of),
     }
+}
+
+/// Day `day` of `in_month`'s month, clamped to that month's last day.
+fn due_in_month(in_month: NaiveDate, day: u32) -> Option<NaiveDate> {
+    let first = in_month.with_day(1)?;
+    let last = first.checked_add_months(Months::new(1))?.pred_opt()?.day();
+    first.with_day(day.clamp(1, last))
 }
 
 /// The KPI band + strategy targets (`GET /debts/stats`).
