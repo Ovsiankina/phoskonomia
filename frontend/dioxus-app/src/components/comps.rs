@@ -693,11 +693,23 @@ pub fn RecRow(r: Rec) -> Element {
     }
 }
 
+/// One action button on an [`Alert`]: the label the button shows, and the
+/// verb kind [`AlertItem`] sends the page when it's pressed.
+#[derive(Clone, PartialEq)]
+pub struct AlertAction {
+    /// Button label, e.g. `"VIEW"`, `"RAISE CAP"`, `"DISMISS"`, `"SNOOZE"`.
+    pub label: String,
+    /// `"navigate" | "dismiss" | "snooze" | "apply"` — what the page (and, for
+    /// non-navigate kinds, the server) act on.
+    pub kind: String,
+}
+
 /// An AI / budget alert with action buttons.
 ///
 /// Faithful port of the `a` object consumed by `comps.jsx` `AlertItem`. The
-/// React version POSTed each action to the dead REST layer; here `actions` are
-/// labels and the page wires behaviour via `on_action` (the F3 server fns).
+/// React version POSTed each action to the dead REST layer; here the page
+/// wires behaviour via `on_action` (the F3 server fns), keyed by the button's
+/// `kind`, never its display label.
 #[derive(Clone, PartialEq)]
 pub struct Alert {
     /// Stable id.
@@ -710,14 +722,14 @@ pub struct Alert {
     pub head: String,
     /// Body text.
     pub body: String,
-    /// Action button labels (first is the primary `p`).
-    pub actions: Vec<String>,
+    /// Action buttons (first is the primary `p`).
+    pub actions: Vec<AlertAction>,
 }
 
 /// Alert item — icon, tag/head, body, action buttons.
 ///
 /// Faithful port of `comps.jsx` `AlertItem`. `on_action` receives `(alert id,
-/// action label)` when a button is pressed (the page routes it to an F3 server
+/// action kind)` when a button is pressed (the page routes it to an F3 server
 /// fn — the React DISMISS / SNOOZE / APPLY / VIEW / MARK-PAID logic moves there).
 #[component]
 pub fn AlertItem(
@@ -747,14 +759,14 @@ pub fn AlertItem(
                             class: if i == 0 { "btn p" } else { "btn" },
                             onclick: {
                                 let id = id.clone();
-                                let act = act.clone();
+                                let kind = act.kind.clone();
                                 move |_| {
                                     if let Some(h) = &on_action {
-                                        h.call((id.clone(), act.clone()));
+                                        h.call((id.clone(), kind.clone()));
                                     }
                                 }
                             },
-                            "{act}"
+                            "{act.label}"
                         }
                     }
                 }

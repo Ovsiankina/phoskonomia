@@ -268,6 +268,17 @@ pub async fn get_recurring() -> Result<RecurringListDto, ServerFnError> {
     }
 }
 
+/// One action button on an [`AlertDto`]. Mirrors `phosk_planning::alerts::AlertActionDto`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertActionDto {
+    /// Button label, e.g. `"VIEW"`, `"RAISE CAP"`, `"DISMISS"`, `"SNOOZE"`.
+    pub label: String,
+    /// The backend verb [`act_on_alert`] expects back for this button:
+    /// `"navigate" | "dismiss" | "snooze" | "apply"`.
+    pub kind: String,
+}
+
 /// One attention item (`GET /alerts` element). `tone` is `"alert"|"warn"|"info"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -282,11 +293,11 @@ pub struct AlertDto {
     pub head: String,
     /// Supporting body line.
     pub body: String,
-    /// Action button labels (first is the primary). Mirrors React `a.actions`
+    /// Action buttons (first is the primary). Mirrors React `a.actions`
     /// (`comps.jsx` `AlertItem` renders one `<button class="btn[ p]">` each, e.g.
     /// VIEW / RAISE CAP / DISMISS / SNOOZE / MARK PAID); the page routes a press
-    /// through [`act_on_alert`].
-    pub actions: Vec<String>,
+    /// through [`act_on_alert`], sending the button's `kind`, never its label.
+    pub actions: Vec<AlertActionDto>,
 }
 
 /// The dashboard alerts list (`GET /alerts`).
@@ -309,7 +320,14 @@ pub async fn get_alerts() -> Result<Vec<AlertDto>, ServerFnError> {
                 tag: a.tag,
                 head: a.head,
                 body: a.body,
-                actions: a.actions,
+                actions: a
+                    .actions
+                    .into_iter()
+                    .map(|act| AlertActionDto {
+                        label: act.label,
+                        kind: act.kind,
+                    })
+                    .collect(),
             })
             .collect())
     }
@@ -321,12 +339,17 @@ pub async fn get_alerts() -> Result<Vec<AlertDto>, ServerFnError> {
 
 /// Act on a dashboard alert (`POST /alerts/{id}/{dismiss|snooze|apply}`).
 ///
-/// React's `AlertItem` POSTed each action label to the dead REST layer and then
-/// re-fetched (`onChanged`). Here that mutation is a single seeded server fn that
-/// the page routes every non-navigation label through (VIEW is handled client-
-/// side as a route push); it currently acknowledges the action so the list can
-/// re-fetch, mirroring the React `after`/`onChanged` round-trip. The real
-/// dismiss/snooze/raise-cap services land later.
+/// `action` is the pressed button's `kind` (`AlertActionDto.kind`), never its
+/// label: the server validates it against that alert's own actions and
+/// rejects anything else. React's `AlertItem` POSTed each action label to the
+/// dead REST layer and then re-fetched (`onChanged`); here that mutation is a
+/// single seeded server fn that the page routes every non-navigation button
+/// through (VIEW is handled client-side as a route push).
+///
+/// # Errors
+/// [`ALERT_ACTION_FAILED`] on any rejection (unknown alert, a kind this alert
+/// doesn't offer, an adapter failure) or transport failure — the underlying
+/// [`phosk_core::error::PhoskError`] text never reaches the client.
 #[server]
 pub async fn act_on_alert(id: String, action: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "server-deps")]
@@ -341,6 +364,10 @@ pub async fn act_on_alert(id: String, action: String) -> Result<(), ServerFnErro
     }
 }
 
+/// Shown for any [`act_on_alert`] rejection: a fixed, generic line so an
+/// engine/store detail from `PhoskError` never reaches the page.
+pub const ALERT_ACTION_FAILED: &str = "could not update this alert, try again";
+
 /// [`act_on_alert`]'s logic over an explicit DB port (tests pass a fresh store).
 /// `action` is the backend verb: `dismiss` | `snooze` | `apply`.
 #[cfg(feature = "server-deps")]
@@ -351,7 +378,7 @@ pub(crate) async fn act_on_alert_with(
 ) -> Result<(), ServerFnError> {
     phosk_planning::alerts::act_on_alert(db, id, action, crate::data::today())
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .map_err(|_| ServerFnError::new(ALERT_ACTION_FAILED))
 }
 
 /// `GET /insights/dashboard` — the GEMMA4 one-liner + estimated saving.
@@ -430,5 +457,101 @@ pub(crate) mod opt_money_vec_centimes {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<Money>>, D::Error> {
         let raw = Option::<Vec<i64>>::deserialize(d)?;
         Ok(raw.map(|v| v.into_iter().map(Money::from_centimes).collect()))
+    }
+}
+
+/// `act_on_alert_with` against a fresh seeded store (F1): each seeded button's
+/// `kind` succeeds, and every rejection — an unknown alert, an unknown kind, a
+/// kind this alert doesn't offer, or the button label sent instead of its
+/// kind — comes back as the one fixed [`ALERT_ACTION_FAILED`] message.
+#[cfg(all(test, feature = "server-deps"))]
+mod act_on_alert_tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use dioxus::prelude::ServerFnError;
+    use phosk_db_memory::MemoryDb;
+
+    use super::{act_on_alert_with, ALERT_ACTION_FAILED};
+
+    /// Minimal std-only executor. The memory adapter never waits on I/O, so a
+    /// thread-park waker is enough and the tests need no async runtime.
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        struct Unpark(std::thread::Thread);
+        impl Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = pin!(fut);
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(out) => return out,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
+    /// A fresh seeded store per test: never the process-global stack.
+    fn fresh_db() -> MemoryDb {
+        MemoryDb::seeded().expect("seeded memory db")
+    }
+
+    fn act(db: &MemoryDb, id: &str, action: &str) -> Result<(), ServerFnError> {
+        block_on(act_on_alert_with(db, id, action))
+    }
+
+    /// The message a rejected call would show on the page.
+    fn rejection(result: Result<(), ServerFnError>) -> String {
+        match result.expect_err("the call should be rejected") {
+            ServerFnError::ServerError { message, .. } => message,
+            other => panic!("expected a ServerError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_seeded_buttons_kind_succeeds() {
+        for (id, kind) in [
+            ("a1", "dismiss"),
+            ("a1", "apply"),
+            ("a2", "dismiss"),
+            ("a3", "dismiss"),
+            ("a3", "snooze"),
+        ] {
+            let db = fresh_db();
+            act(&db, id, kind).unwrap_or_else(|e| panic!("{id} {kind}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_returns_the_fixed_message() {
+        let db = fresh_db();
+        assert_eq!(rejection(act(&db, "a1", "frobnicate")), ALERT_ACTION_FAILED);
+    }
+
+    #[test]
+    fn a_kind_the_alert_does_not_offer_returns_the_fixed_message() {
+        let db = fresh_db();
+        // a2 (Groceries) has no RAISE CAP / "apply" button.
+        assert_eq!(rejection(act(&db, "a2", "apply")), ALERT_ACTION_FAILED);
+    }
+
+    #[test]
+    fn the_button_label_sent_instead_of_its_kind_returns_the_fixed_message() {
+        let db = fresh_db();
+        assert_eq!(rejection(act(&db, "a1", "DISMISS")), ALERT_ACTION_FAILED);
+    }
+
+    #[test]
+    fn an_unknown_alert_returns_the_fixed_message() {
+        let db = fresh_db();
+        assert_eq!(
+            rejection(act(&db, "does-not-exist", "dismiss")),
+            ALERT_ACTION_FAILED
+        );
     }
 }

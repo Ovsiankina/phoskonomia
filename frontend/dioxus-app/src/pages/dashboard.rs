@@ -26,14 +26,14 @@
 use dioxus::prelude::*;
 use phosk_core::money::Money;
 
-use crate::components::comps::{Alert, AlertItem, Cat, CatRows, Rec, RecRow, Txn, TxnTape};
+use crate::components::comps::{Alert, AlertAction, AlertItem, Cat, CatRows, Rec, RecRow, Txn, TxnTape};
 use crate::components::prims::{pct_tone, Dot, PhoskChart, SavingsDial, ScannerBg, Spark};
 use crate::components::shell::{Sig, SigOcc, SignalPanel, SignalStrip, TopBar};
-use crate::components::states::Awaiting;
+use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::budgets::{get_categories, CategoryDto};
 use crate::data::dashboard::{
     act_on_alert, get_alerts, get_insight, get_recurring, get_spend_series, get_top_shops,
-    get_totals, AlertDto, RecurringDto,
+    get_totals, AlertDto, RecurringDto, ALERT_ACTION_FAILED,
 };
 use crate::data::signals::{
     dismiss_signal, get_signal, get_signal_candidates, get_signals, track_signal, SignalDetailDto,
@@ -110,10 +110,22 @@ fn rec_of(r: &RecurringDto) -> Rec {
     }
 }
 
+/// The text to show for a failed signal track/dismiss press: the server's own
+/// message (`track_signal_with`/`dismiss_signal_with` already keep it
+/// page-safe — see their tests) or a generic line if the call failed before
+/// the server could answer.
+fn signal_action_error_text(err: &ServerFnError) -> String {
+    match err {
+        ServerFnError::ServerError { message, .. } if !message.is_empty() => message.clone(),
+        _ => "could not reach the server, try again".to_string(),
+    }
+}
+
 /// `AlertDto` → the `Alert` row consumed by `AlertItem`. The per-tone action
-/// labels (`VIEW` / `RAISE CAP` / `DISMISS` / `SNOOZE` / `MARK PAID`) carry through
-/// from the read so the `.acts` button row renders; the page wires `on_action`
-/// (the React DISMISS/SNOOZE/APPLY/VIEW round-trip).
+/// buttons (`VIEW` / `RAISE CAP` / `DISMISS` / `SNOOZE` / `MARK PAID`, each with
+/// its backend verb `kind`) carry through from the read so the `.acts` button
+/// row renders; the page wires `on_action` (the React DISMISS/SNOOZE/APPLY/VIEW
+/// round-trip), sending each button's `kind`, never its label.
 fn alert_of(a: &AlertDto) -> Alert {
     let tone = if a.tone == "info" {
         "llm".to_string()
@@ -126,7 +138,14 @@ fn alert_of(a: &AlertDto) -> Alert {
         tag: a.tag.clone(),
         head: a.head.clone(),
         body: a.body.clone(),
-        actions: a.actions.clone(),
+        actions: a
+            .actions
+            .iter()
+            .map(|act| AlertAction {
+                label: act.label.clone(),
+                kind: act.kind.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -235,6 +254,11 @@ pub fn DashboardPage() -> Element {
     let mut ai_collapsed = use_signal(|| false);
     let mut sel = use_signal(|| Option::<String>::None);
     let mut drawer_sig = use_signal(|| false);
+    // The fixed, page-safe message from a rejected alert-action press; cleared
+    // on the next attempt or once it succeeds.
+    let alert_error = use_signal(|| Option::<String>::None);
+    // Same, for a rejected signal track/dismiss press from the signal panel.
+    let signal_error = use_signal(|| Option::<String>::None);
     // Programmatic navigation for the alert VIEW deep-link (React's navigate()).
     let nav = use_navigator();
 
@@ -850,23 +874,32 @@ pub fn DashboardPage() -> Element {
                                                 AlertItem {
                                                     key: "{a.id}",
                                                     a: alert_of(a),
-                                                    on_action: move |(id, label): (String, String)| {
+                                                    on_action: move |(id, kind): (String, String)| {
                                                         // VIEW navigates to the alert's deep-link target
                                                         // (React resolved /alerts/{id}/target → /transactions);
-                                                        // every other label POSTs then re-fetches the list.
-                                                        if label.eq_ignore_ascii_case("VIEW") {
+                                                        // every other kind POSTs then re-fetches the list.
+                                                        if kind == "navigate" {
                                                             let _ = nav.push(Route::TransactionsPage {});
                                                         } else {
                                                             let mut alerts = alerts;
+                                                            let mut alert_error = alert_error;
                                                             spawn(async move {
-                                                                let _ = act_on_alert(id, label).await;
-                                                                alerts.restart();
+                                                                match act_on_alert(id, kind).await {
+                                                                    Ok(()) => {
+                                                                        alert_error.set(None);
+                                                                        alerts.restart();
+                                                                    }
+                                                                    Err(_) => {
+                                                                        alert_error.set(Some(ALERT_ACTION_FAILED.to_string()));
+                                                                    }
+                                                                }
                                                             });
                                                         }
                                                     },
                                                 }
                                             }
                                         }
+                                        InlineStatus { error: alert_error() }
                                     }
                                     div { class: "hud", style: "display:flex;justify-content:space-between;align-items:center;margin-top:4px",
                                         span { "RECURRING · CLEAN" }
@@ -929,27 +962,40 @@ pub fn DashboardPage() -> Element {
                             let mut signals = signals;
                             let mut candidates = candidates;
                             let mut sig_detail = sig_detail;
+                            let mut signal_error = signal_error;
                             spawn(async move {
-                                let _ = track_signal(id).await;
-                                signals.restart();
-                                candidates.restart();
-                                sig_detail.restart();
-                                sel.set(None);
+                                match track_signal(id).await {
+                                    Ok(()) => {
+                                        signal_error.set(None);
+                                        signals.restart();
+                                        candidates.restart();
+                                        sig_detail.restart();
+                                        sel.set(None);
+                                    }
+                                    Err(e) => signal_error.set(Some(signal_action_error_text(&e))),
+                                }
                             });
                         },
                         on_dismiss: move |id: String| {
                             let mut signals = signals;
                             let mut candidates = candidates;
                             let mut sig_detail = sig_detail;
+                            let mut signal_error = signal_error;
                             spawn(async move {
-                                let _ = dismiss_signal(id).await;
-                                signals.restart();
-                                candidates.restart();
-                                sig_detail.restart();
-                                sel.set(None);
+                                match dismiss_signal(id).await {
+                                    Ok(()) => {
+                                        signal_error.set(None);
+                                        signals.restart();
+                                        candidates.restart();
+                                        sig_detail.restart();
+                                        sel.set(None);
+                                    }
+                                    Err(e) => signal_error.set(Some(signal_action_error_text(&e))),
+                                }
                             });
                         },
                     }
+                    InlineStatus { error: signal_error() }
                 }
             }
 
@@ -966,29 +1012,46 @@ pub fn DashboardPage() -> Element {
                                 let mut signals = signals;
                                 let mut candidates = candidates;
                                 let mut sig_detail = sig_detail;
+                                let mut signal_error = signal_error;
                                 spawn(async move {
-                                    let _ = track_signal(id).await;
-                                    signals.restart();
-                                    candidates.restart();
-                                    sig_detail.restart();
-                                    drawer_sig.set(false);
-                                    sel.set(None);
+                                    match track_signal(id).await {
+                                        Ok(()) => {
+                                            signal_error.set(None);
+                                            signals.restart();
+                                            candidates.restart();
+                                            sig_detail.restart();
+                                            drawer_sig.set(false);
+                                            sel.set(None);
+                                        }
+                                        Err(e) => {
+                                            signal_error.set(Some(signal_action_error_text(&e)));
+                                        }
+                                    }
                                 });
                             },
                             on_dismiss: move |id: String| {
                                 let mut signals = signals;
                                 let mut candidates = candidates;
                                 let mut sig_detail = sig_detail;
+                                let mut signal_error = signal_error;
                                 spawn(async move {
-                                    let _ = dismiss_signal(id).await;
-                                    signals.restart();
-                                    candidates.restart();
-                                    sig_detail.restart();
-                                    drawer_sig.set(false);
-                                    sel.set(None);
+                                    match dismiss_signal(id).await {
+                                        Ok(()) => {
+                                            signal_error.set(None);
+                                            signals.restart();
+                                            candidates.restart();
+                                            sig_detail.restart();
+                                            drawer_sig.set(false);
+                                            sel.set(None);
+                                        }
+                                        Err(e) => {
+                                            signal_error.set(Some(signal_action_error_text(&e)));
+                                        }
+                                    }
                                 });
                             },
                         }
+                        InlineStatus { error: signal_error() }
                     }
                 }
             }
