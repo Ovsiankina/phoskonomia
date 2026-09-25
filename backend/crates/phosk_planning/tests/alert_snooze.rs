@@ -228,7 +228,7 @@ async fn the_snooze_action_snoozes_until_the_next_cycle() {
 }
 
 #[tokio::test]
-async fn the_snooze_action_keeps_an_at_risk_alert_hidden_at_as_of() {
+async fn snooze_alert_keeps_an_at_risk_alert_hidden_at_as_of() {
     let db = seeded();
     // a1 targets Going out; put it at risk (under the cap) on the demo day.
     // a1's seeded actions are VIEW/RAISE CAP/DISMISS (no SNOOZE button), so this

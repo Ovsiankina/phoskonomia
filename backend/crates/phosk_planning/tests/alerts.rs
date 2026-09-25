@@ -375,6 +375,84 @@ async fn act_on_alert_rejects_a_kind_the_alert_does_not_offer() {
     assert_eq!(cap, seeded_cap, "rejected apply must not raise the cap");
 }
 
+/// A stale press on an alert the user already dismissed (e.g. a second tab)
+/// must not still act: RAISE CAP on a dismissed a1 is Invalid, cap untouched.
+#[tokio::test]
+async fn act_on_a_dismissed_alert_is_invalid() {
+    let db = seeded();
+    act_on_alert(&db, "a1", "dismiss", today())
+        .await
+        .expect("dismiss ok");
+    let before = db.category_cap_by_name("Going out").await.expect("cap").cap;
+    let err = act_on_alert(&db, "a1", "apply", today())
+        .await
+        .expect_err("a dismissed alert takes no further action");
+    assert!(
+        matches!(err, phosk_core::error::PhoskError::Invalid(_)),
+        "expected Invalid, got {err:?}"
+    );
+    let after = db.category_cap_by_name("Going out").await.expect("cap").cap;
+    assert_eq!(before, after, "the cap must not move");
+}
+
+/// Dismiss every persisted alert through the action the list itself offers,
+/// so the list falls back to rule-generated alerts.
+async fn dismiss_every_persisted_alert(db: &MemoryDb) {
+    for a in db.alerts().await.expect("persisted alerts") {
+        act_on_alert(db, &a.slug, "dismiss", today())
+            .await
+            .unwrap_or_else(|e| panic!("dismiss {} should succeed, got {e:?}", a.slug));
+    }
+}
+
+/// Every non-navigate button the list offers — persisted or rule-generated —
+/// must be accepted by `act_on_alert` (F1 revision: generated `gen-*` alerts
+/// used to offer RAISE CAP / DISMISS that always failed NotFound). Each
+/// press runs on a fresh copy of the state that produced the list, since the
+/// actions mutate it.
+#[tokio::test]
+async fn every_offered_non_navigate_action_is_accepted() {
+    for dismiss_persisted in [false, true] {
+        let db = seeded();
+        if dismiss_persisted {
+            dismiss_every_persisted_alert(&db).await;
+        }
+        let list = alerts(&db, today()).await.expect("alerts ok");
+        if dismiss_persisted {
+            assert!(
+                !list.is_empty() && list.iter().all(|a| a.id.starts_with("gen-")),
+                "with every persisted alert dismissed the seeded list must fall \
+                 back to generated alerts, got {list:?}"
+            );
+        }
+        for a in &list {
+            for act in a.actions.iter().filter(|act| act.kind != "navigate") {
+                let fresh = seeded();
+                if dismiss_persisted {
+                    dismiss_every_persisted_alert(&fresh).await;
+                }
+                act_on_alert(&fresh, &a.id, &act.kind, today())
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("{} {} is offered but rejected: {e:?}", a.id, act.kind)
+                    });
+            }
+        }
+    }
+}
+
+/// A rule-generated alert (no persisted row) offers only VIEW until generated
+/// alerts can be persisted: nothing else it could offer would be accepted.
+#[tokio::test]
+async fn generated_alerts_offer_only_navigation() {
+    let db = synth("DINING", 10_000, 420_000, vec![(naive(2026, 6, 5), 13_000)]);
+    let list = alerts(&db, naive(2026, 6, 10)).await.expect("alerts ok");
+    assert!(!list.is_empty(), "the over-budget rule fires");
+    for a in &list {
+        assert_eq!(a.actions, vec![action("VIEW", "navigate")], "{}", a.id);
+    }
+}
+
 // ── target deep-link ──────────────────────────────────────────────────────────
 
 /// Recalc after a new transaction: the alerts list reflects the underlying
