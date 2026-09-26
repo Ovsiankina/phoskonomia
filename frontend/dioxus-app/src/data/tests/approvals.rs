@@ -164,7 +164,7 @@ async fn reject_leaves_the_ledger_unchanged() {
     assert!(db.receipt_by_slug(SLUG).await.is_err());
     assert!(queue(&db).await.is_empty(), "rejected leaves the queue");
 
-    let msg = server_error(approve_proposal_with(&db, &id).await);
+    let msg = server_error(approve_proposal_with(&db, &id).await, 500);
     assert!(msg.contains("can't be booked"), "{msg}");
     assert_eq!(db.all_receipts().await.expect("receipts"), before);
 }
@@ -174,7 +174,7 @@ async fn an_applied_proposal_cannot_be_rejected() {
     let db = fresh_db();
     let id = enqueue(&db, &proposal(SLUG)).await;
     approve_proposal_with(&db, &id).await.expect("approve");
-    let msg = server_error(reject_proposal_with(&db, &id).await);
+    let msg = server_error(reject_proposal_with(&db, &id).await, 500);
     assert_eq!(
         msg,
         "This proposal is already booked. Correct the transaction instead."
@@ -213,8 +213,8 @@ async fn an_invalid_proposal_is_refused_with_a_user_safe_message() {
     assert!(!listed[0].proposals[0].bookable, "flagged before approval");
 
     let fixed = REFUSED;
-    let single = server_error(approve_proposal_with(&db, &id).await);
-    let bulk = server_error(approve_receipt_proposals_with(&db, SLUG).await);
+    let single = server_error(approve_proposal_with(&db, &id).await, 500);
+    let bulk = server_error(approve_receipt_proposals_with(&db, SLUG).await, 500);
     assert_eq!(single, fixed);
     assert_eq!(bulk, fixed);
     assert_eq!(ledger_len(&db).await, before, "nothing booked");
@@ -225,20 +225,20 @@ async fn an_invalid_proposal_is_refused_with_a_user_safe_message() {
 async fn malformed_and_unknown_ids_get_fixed_texts() {
     let db = fresh_db();
     let hostile = "<script>x</script>\u{7}";
-    let msg = server_error(approve_proposal_with(&db, hostile).await);
+    let msg = server_error(approve_proposal_with(&db, hostile).await, 500);
     assert_eq!(msg, "That is not a valid proposal id.");
-    let msg = server_error(reject_proposal_with(&db, hostile).await);
+    let msg = server_error(reject_proposal_with(&db, hostile).await, 500);
     assert_eq!(msg, "That is not a valid proposal id.");
-    let msg = server_error(approve_receipt_proposals_with(&db, hostile).await);
+    let msg = server_error(approve_receipt_proposals_with(&db, hostile).await, 500);
     assert_eq!(msg, "That is not a valid receipt.");
 
     let unknown = "00000000-0000-4000-8000-000000000000";
-    let msg = server_error(approve_proposal_with(&db, unknown).await);
+    let msg = server_error(approve_proposal_with(&db, unknown).await, 500);
     assert_eq!(
         msg,
         "This proposal is no longer pending. Refresh to see the current queue."
     );
-    let msg = server_error(approve_receipt_proposals_with(&db, "rcpt:none").await);
+    let msg = server_error(approve_receipt_proposals_with(&db, "rcpt:none").await, 500);
     assert_eq!(
         msg,
         "This proposal is no longer pending. Refresh to see the current queue."
@@ -261,7 +261,10 @@ async fn hostile_model_text_is_bounded() {
     assert!(!groups[0].proposals[0].bookable);
 
     // The bulk-approve slug check uses the same rule as the service.
-    let msg = server_error(approve_receipt_proposals_with(&db, "rcpt:a\u{202E}b").await);
+    let msg = server_error(
+        approve_receipt_proposals_with(&db, "rcpt:a\u{202E}b").await,
+        500,
+    );
     assert_eq!(msg, "That is not a valid receipt.");
 }
 
@@ -350,10 +353,10 @@ async fn conflicting_proposals_are_refused_single_and_bulk() {
     assert_eq!(queue(&db).await[0].proposals.len(), 2);
 
     for id in [&a, &b] {
-        let msg = server_error(approve_proposal_with(&db, id).await);
+        let msg = server_error(approve_proposal_with(&db, id).await, 500);
         assert_eq!(msg, REFUSED);
     }
-    let msg = server_error(approve_receipt_proposals_with(&db, SLUG).await);
+    let msg = server_error(approve_receipt_proposals_with(&db, SLUG).await, 500);
     assert_eq!(msg, REFUSED);
     assert_eq!(ledger_len(&db).await, before, "nothing booked");
     assert!(db.receipt_by_slug(SLUG).await.is_err());
@@ -372,9 +375,15 @@ async fn a_non_receipt_suggestion_is_gone_and_not_dismissed() {
         .expect("the seed has a non-receipt suggestion");
     let id = seeded.id.to_string();
 
-    assert_eq!(server_error(approve_proposal_with(&db, &id).await), GONE);
-    assert_eq!(server_error(reject_proposal_with(&db, &id).await), GONE);
-    assert_eq!(server_error(get_proposal_with(&db, &id).await), GONE);
+    assert_eq!(
+        server_error(approve_proposal_with(&db, &id).await, 500),
+        GONE
+    );
+    assert_eq!(
+        server_error(reject_proposal_with(&db, &id).await, 500),
+        GONE
+    );
+    assert_eq!(server_error(get_proposal_with(&db, &id).await, 500), GONE);
     let after = db
         .ai_suggestions()
         .await
@@ -406,5 +415,5 @@ async fn get_proposal_reads_one_open_proposal() {
     assert_eq!(get_proposal_with(&db, &id).await.expect("get"), listed);
 
     reject_proposal_with(&db, &id).await.expect("reject");
-    assert_eq!(server_error(get_proposal_with(&db, &id).await), GONE);
+    assert_eq!(server_error(get_proposal_with(&db, &id).await, 500), GONE);
 }
