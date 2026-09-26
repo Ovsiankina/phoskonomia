@@ -17,7 +17,7 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for `phosk_debts::personal_ious` — the informal
+//! Integration tests for `phosk_debts::personal_ious` — the informal
 //! "owe / owed" list and its net-position beam.
 //!
 //! These drive the service layer (`list_personal_ious`, `iou_stats`) through the
@@ -38,8 +38,8 @@
 //! Stats: owedToYou = 12000+4500 = 16500; youOwe = 6000+20000 = 26000;
 //! net = 16500 − 26000 = −9500; countIn = 2; countOut = 2.
 //!
-//! Every service body is `todo!()` in the skeleton, so these compile and FAIL at
-//! runtime (the RED bar). No production logic lives here.
+//! Every service is implemented against `&dyn DatabaseAdapter`, so these tests
+//! exercise the real read paths and pin the exact derived values above.
 
 use std::sync::Arc;
 

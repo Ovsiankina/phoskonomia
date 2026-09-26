@@ -16,9 +16,9 @@
 //! ## The store contract
 //!
 //! The factory must yield a store holding the shared deterministic Swiss seed
-//! (the one `MemoryDb::seeded` and `SurrealDb::seeded` load). The port has no
-//! write path for the budget config, caps, history, alerts or feed items, so
-//! those checks read seeded values. Dashboard transactions are never written
+//! (the one `MemoryDb::seeded` and `SurrealDb::seeded` load). The port cannot
+//! create budget-history rows, alerts or feed items, so those checks read
+//! seeded values. Dashboard transactions are never written
 //! directly either — only as the projection `insert_receipt` maintains. Write
 //! checks create their own records with fresh ids and `conf-*` slugs (the
 //! category checks are the exception: renaming and delete-if-empty are about
@@ -26,13 +26,14 @@
 //!
 //! ## Deliberately not asserted
 //!
-//! - Order of rows that share a date, or have none (line items): the port says
-//!   "stored order" / "oldest→newest", but the `SurrealDB` adapter keeps no
-//!   insertion sequence for most tables, so same-day rows (budget history,
-//!   charges, debt payments) and a receipt's lines can come back in any order
-//!   there. Ordering checks use distinct dates. Chat messages are the
-//!   exception: both adapters return them in append order, and the
-//!   `phosk_adapter_db::contract` suite checks that for same-day lines.
+//! - Order of rows that share a date: the port says "stored order" /
+//!   "oldest→newest", but the `SurrealDB` adapter keeps no insertion sequence
+//!   for most tables, so same-day rows (budget history, charges, debt
+//!   payments) can come back in any order there. Ordering checks use distinct
+//!   dates. Chat messages and a receipt's line items are the exception: both
+//!   adapters return them in insertion order (checked by
+//!   `phosk_adapter_db::contract` for same-day chat lines and by
+//!   [`ledger::line_items_keep_insertion_order`] here).
 //! - Recording the same charge, payment, message or suggestion id twice:
 //!   `phosk_db_memory` appends a duplicate, `phosk_db_surreal` overwrites. The
 //!   port does not say which is right.
@@ -67,11 +68,14 @@ macro_rules! database_adapter_conformance {
             ledger::insert_receipt_appends_and_reads_back,
             ledger::insert_receipt_binds_lines_to_the_receipt,
             ledger::insert_receipt_same_slug_replaces_in_place,
+            ledger::insert_receipt_same_rows_twice_is_one_booking,
             ledger::insert_receipt_projects_a_dashboard_transaction,
             ledger::insert_receipt_same_slug_replaces_the_projection,
+            ledger::delete_receipt_removes_it_its_lines_and_its_projection,
             ledger::receipts_between_filters_inclusively,
             ledger::receipt_lookups_report_not_found,
             ledger::update_line_item_replaces_the_stored_line,
+            ledger::line_items_keep_insertion_order,
             ledger::record_correction_accepts_events,
             ids::category_ids_round_trip_as_typed_ids,
             ids::receipt_ids_round_trip_as_typed_ids,
@@ -89,14 +93,19 @@ macro_rules! database_adapter_conformance {
             planning::budget_history_is_oldest_to_newest,
             planning::spend_history_returns_the_recorded_cycles,
             planning::alerts_lookup_and_status_update,
+            planning::set_budget_config_replaces_it_and_appends_history,
+            planning::snooze_alert_sets_status_and_term,
             recurring::subscriptions_lookup_by_id_and_slug_agree,
             recurring::upsert_subscription_inserts_then_replaces,
             recurring::subscription_charges_are_scoped_and_oldest_first,
             recurring::delete_subscription_removes_it_and_its_charges,
             debts::debts_lookup_by_id_and_slug_agree,
             debts::upsert_debt_inserts_then_replaces,
+            debts::delete_debt_removes_it_and_its_payments,
             debts::debt_payments_are_scoped_and_oldest_first,
             debts::upsert_personal_iou_inserts_then_replaces,
+            debts::personal_iou_lookup_by_slug_agrees,
+            debts::delete_personal_iou_removes_it,
             settings::preferences_lookup_by_key,
             settings::set_preference_updates_or_creates,
             settings::reset_preference_restores_the_default,
@@ -106,6 +115,7 @@ macro_rules! database_adapter_conformance {
             ai::clear_chat_empties_only_that_chat,
             ai::enqueue_suggestion_appends_it,
             ai::update_suggestion_status_changes_only_the_target,
+            ai::stage_receipt_proposal_round_trips_off_ledger,
         );
     };
     (@each $factory:expr; $($module:ident :: $check:ident),+ $(,)?) => {

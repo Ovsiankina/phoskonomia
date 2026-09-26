@@ -17,12 +17,12 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED tests for `phosk_ledger::{transactions, line_items, categories, shops}`.
+//! Tests for `phosk_ledger::{transactions, line_items, categories, shops}`.
 //!
 //! These pin the EXACT derived values produced by the deterministic Swiss seed
 //! in `phosk_db_memory` (the canonical source — its receipt line-items, NOT the
-//! dioxus wire seed, are ground truth for the backend). Every body under test is
-//! `todo!()`, so each test must COMPILE and then FAIL at runtime (RED phase).
+//! dioxus wire seed, are ground truth for the backend). Each test drives the
+//! implemented service against that seed.
 //!
 //! Money is asserted in exact i64 centimes; `as_of` is the seed clock 2026-06-18
 //! (June cycle `[2026-06-01, 2026-06-30]`). Slug reads use the seed slugs

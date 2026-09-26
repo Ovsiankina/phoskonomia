@@ -13,8 +13,9 @@
 //! failure maps to a [`PhoskError`] (no panic, ADR §0).
 //!
 //! A table scan has no defined order, so buckets whose port contract is ordered
-//! (chat messages) are written with [`Store::put_in_sequence`], which adds an
-//! insertion `seq` next to `doc`, and read with
+//! (chat messages, budget history, a receipt's line items) are written with
+//! [`Store::put_in_sequence`], which adds an insertion `seq` next to `doc`,
+//! edited in place with [`Store::put_keeping_sequence`], and read with
 //! [`Store::list_in_insertion_order`].
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -55,6 +56,7 @@ pub enum Bucket {
     SignalOccurrence,
     CategoryCap,
     BudgetHistory,
+    BudgetChange,
     Alert,
     Subscription,
     Charge,
@@ -66,6 +68,7 @@ pub enum Bucket {
     Chat,
     Message,
     AiSuggestion,
+    ReceiptProposal,
 }
 
 impl Bucket {
@@ -82,6 +85,7 @@ impl Bucket {
             Self::SignalOccurrence => "phosk_signal_occurrence",
             Self::CategoryCap => "phosk_category_cap",
             Self::BudgetHistory => "phosk_budget_history",
+            Self::BudgetChange => "phosk_budget_change",
             Self::Alert => "phosk_alert",
             Self::Subscription => "phosk_subscription",
             Self::Charge => "phosk_charge",
@@ -93,11 +97,12 @@ impl Bucket {
             Self::Chat => "phosk_chat",
             Self::Message => "phosk_message",
             Self::AiSuggestion => "phosk_ai_suggestion",
+            Self::ReceiptProposal => "phosk_receipt_proposal",
         }
     }
 
     /// Every bucket, for schema definition / migration.
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::Transaction,
         Self::Category,
         Self::BudgetConfig,
@@ -108,6 +113,7 @@ impl Bucket {
         Self::SignalOccurrence,
         Self::CategoryCap,
         Self::BudgetHistory,
+        Self::BudgetChange,
         Self::Alert,
         Self::Subscription,
         Self::Charge,
@@ -119,6 +125,7 @@ impl Bucket {
         Self::Chat,
         Self::Message,
         Self::AiSuggestion,
+        Self::ReceiptProposal,
     ];
 }
 
@@ -223,8 +230,13 @@ impl Store {
     /// next insertion sequence number, so [`Store::list_in_insertion_order`] can
     /// return the bucket in the order its records were written.
     ///
-    /// Used for buckets whose port contract is ordered (chat messages): record
-    /// keys are random UUIDs and a table scan has no defined order.
+    /// Re-writing an existing key replaces its `doc` but keeps its sequence
+    /// number, so the record stays where it was first written (the in-memory
+    /// adapter replaces in place the same way).
+    ///
+    /// Used for buckets whose port contract is ordered (chat messages, budget
+    /// history, line items): record keys are random UUIDs and a table scan has
+    /// no defined order.
     pub(crate) async fn put_in_sequence<T: Serialize + Sync>(
         &self,
         bucket: Bucket,
@@ -234,7 +246,7 @@ impl Store {
         let doc = serde_json::to_string(value)
             .map_err(|e| PhoskError::Invalid(format!("serialize {}: {e}", bucket.table())))?;
         let seq = NEXT_SEQ.fetch_add(1, Ordering::SeqCst);
-        let sql = "UPSERT type::thing($tb, $id) CONTENT { doc: $doc, seq: $seq } RETURN NONE";
+        let sql = "UPSERT type::thing($tb, $id) SET doc = $doc, seq = seq ?? $seq RETURN NONE";
         self.db
             .query(sql)
             .bind(("tb", bucket.table()))
@@ -245,6 +257,31 @@ impl Store {
             .map_err(|e| Self::map_err("put-seq", &e))?
             .check()
             .map_err(|e| Self::map_err("put-seq-check", &e))?;
+        Ok(())
+    }
+
+    /// Replace the `doc` of the record at `bucket:key`, keeping any sequence
+    /// number already stored on it, so an in-place edit does not move the
+    /// record in [`Store::list_in_insertion_order`]. Creates the record (with
+    /// no sequence number) if it is absent.
+    pub(crate) async fn put_keeping_sequence<T: Serialize + Sync>(
+        &self,
+        bucket: Bucket,
+        key: &str,
+        value: &T,
+    ) -> Result<(), PhoskError> {
+        let doc = serde_json::to_string(value)
+            .map_err(|e| PhoskError::Invalid(format!("serialize {}: {e}", bucket.table())))?;
+        let sql = "UPSERT type::thing($tb, $id) SET doc = $doc RETURN NONE";
+        self.db
+            .query(sql)
+            .bind(("tb", bucket.table()))
+            .bind(("id", key.to_owned()))
+            .bind(("doc", doc))
+            .await
+            .map_err(|e| Self::map_err("put-keep-seq", &e))?
+            .check()
+            .map_err(|e| Self::map_err("put-keep-seq-check", &e))?;
         Ok(())
     }
 

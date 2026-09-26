@@ -203,7 +203,10 @@ mod tests {
             .find(|r| r.text == "5.65")
             .expect("total region present");
         assert_eq!(total.bbox, (400, 240, 90, 36));
-        assert!(total.confidence >= 0.7, "total should be high-confidence");
+        assert!(
+            !phosk_model::is_low_confidence(total.confidence),
+            "total should be high-confidence"
+        );
     }
 
     #[test]

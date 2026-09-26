@@ -22,9 +22,14 @@
 //!   * `useGet(...)` → `use_resource(move || server_fn())`; the on-demand selected
 //!     debt detail/payments → `use_resource` over the `sel` signal (refetch on
 //!     change), exactly like the dashboard's signal detail.
-//!   * the dead REST mutations (PAY EXTRA / REFINANCE / ADJUST PLAN / REMIND /
-//!     SETTLE) have no F3 server fn yet, so those buttons render (faithful DOM)
-//!     but are inert — the action plumbing lands with the mutation server fns.
+//!   * writes (T39): debt create / edit / delete / instalment / extra payment
+//!     and IOU create / edit / delete / partial payment / settle go through
+//!     `data::debt_actions`; the forms live in `pages::debt_forms`, each in its
+//!     own page-level signal, and every success refetches the reads it feeds.
+//!     The plan (monthly / day / term) and the APR are create-only: changing
+//!     them must run T17's `debt_plan` rules, which have no UI yet, so
+//!     REFINANCE / ADJUST PLAN render disabled. REMIND had no backend and is
+//!     replaced by RECORD PAYMENT.
 //!   * SVG charts (`PayoffTrajectory`, `DecayLine`, `NetBeam`) are hand-written
 //!     inline here, faithful to the JSX (Debts owns these page-specific charts;
 //!     they are not shared F2 primitives). `Spark` (the card balance trace) IS a
@@ -38,13 +43,20 @@ use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg, Spark};
 use crate::components::shell::{AiPanel, TopBar};
-use crate::components::states::Awaiting;
+use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::chf;
 use crate::data::cycle::{get_cycle, CycleDto};
+use crate::data::debt_actions::{
+    delete_debt, delete_iou, pay_debt, pay_debt_extra, pay_iou, settle_iou, DebtForm, IouForm,
+};
 use crate::data::debts::{
     get_debt, get_debt_payments, get_debt_stats, get_iou_stats, get_trajectory, list_debts,
     list_personal_ious, DebtDetailDto, DebtDto, DebtPaymentDto, DebtStatsDto, IouStatsDto,
     PersonalIouDto, TrajectoryDto,
+};
+use crate::pages::debt_forms::{
+    debt_draft, iou_draft, new_debt_draft, new_iou_draft, submit, DebtFormPanel, DeleteConfirm,
+    IouFormPanel, Panel, PayDraft, PayField,
 };
 
 // ── pure presentation helpers (faithful to the JSX) ─────────────────────────
@@ -153,6 +165,15 @@ pub fn DebtsPage() -> Element {
     let iou_show = use_signal(|| DEFAULT_IOU_SHOW);
     let insp_dock = use_signal(|| DEFAULT_INSP_DOCK);
 
+    // ---- write panels (T39): one signal each, so no save closes another ----
+    let mut debt_edit = use_signal(Panel::<DebtForm>::default);
+    let debt_pay = use_signal(Panel::<PayDraft>::default);
+    let debt_row = use_signal(Panel::<bool>::default);
+    let mut iou_edit = use_signal(Panel::<IouForm>::default);
+    let iou_pay = use_signal(Panel::<PayDraft>::default);
+    let iou_row = use_signal(Panel::<bool>::default);
+    let iou_settle = use_signal(Panel::<bool>::default);
+
     // Responsive dock vs drawer: narrow (<1280px) drawers the inspector.
     let narrow = use_signal(|| false);
     use_effect(move || {
@@ -173,10 +194,10 @@ pub fn DebtsPage() -> Element {
 
     // ---- backend data loads (was: useGet) ----
     let cycle = use_resource(get_cycle);
-    let debts = use_resource(list_debts);
-    let stats = use_resource(get_debt_stats);
-    let ious = use_resource(list_personal_ious);
-    let iou_stats = use_resource(get_iou_stats);
+    let mut debts = use_resource(list_debts);
+    let mut stats = use_resource(get_debt_stats);
+    let mut ious = use_resource(list_personal_ious);
+    let mut iou_stats = use_resource(get_iou_stats);
 
     // trajectory re-fetches when the strategy changes (params drive use_resource).
     let traj_strategy = match strategy().as_str() {
@@ -184,23 +205,90 @@ pub fn DebtsPage() -> Element {
         "none" => "none".to_string(),
         _ => "avalanche".to_string(),
     };
-    let traj = {
+    let mut traj = {
         let s = traj_strategy.clone();
         use_resource(move || get_trajectory(s.clone()))
     };
 
     // selected debt detail + payments — fetched on demand (refetch when sel changes).
-    let detail = use_resource(move || async move {
+    let mut detail = use_resource(move || async move {
         match sel() {
             Some(id) => Some(get_debt(id).await),
             None => None,
         }
     });
-    let payments = use_resource(move || async move {
+    let mut payments = use_resource(move || async move {
         match sel() {
             Some(id) => Some(get_debt_payments(id).await),
             None => None,
         }
+    });
+
+    // A write landed: refetch every read it feeds. `restart` keeps the previous
+    // value until the new one arrives, so nothing unmounts meanwhile.
+    let refresh_debts = use_callback(move |()| {
+        debts.restart();
+        stats.restart();
+        traj.restart();
+        detail.restart();
+        payments.restart();
+    });
+    let refresh_ious = use_callback(move |()| {
+        ious.restart();
+        iou_stats.restart();
+    });
+    let on_debt_deleted = use_callback(move |()| {
+        sel.set(None);
+        drawer.set(false);
+        refresh_debts.call(());
+    });
+    let pay_debt_cb = use_callback(move |(id, d): (String, PayDraft)| {
+        let action = async move {
+            if d.extra {
+                pay_debt_extra(id, d.amount).await
+            } else {
+                pay_debt(id, d.amount).await
+            }
+        };
+        submit(debt_pay, action, refresh_debts);
+    });
+    let delete_debt_cb = use_callback(move |id: String| {
+        let (mut edit, mut pay) = (debt_edit, debt_pay);
+        let action = async move {
+            delete_debt(id.clone()).await?;
+            // No panel may stay open on a record that is gone.
+            if edit.peek().is_open_for(&id) {
+                edit.write().close();
+            }
+            if pay.peek().is_open_for(&id) {
+                pay.write().close();
+            }
+            Ok(())
+        };
+        submit(debt_row, action, on_debt_deleted);
+    });
+    let pay_iou_cb = use_callback(move |(id, d): (String, PayDraft)| {
+        submit(iou_pay, pay_iou(id, d.amount), refresh_ious);
+    });
+    let delete_iou_cb = use_callback(move |id: String| {
+        let (mut edit, mut pay) = (iou_edit, iou_pay);
+        let action = async move {
+            delete_iou(id.clone()).await?;
+            if edit.peek().is_open_for(&id) {
+                edit.write().close();
+            }
+            if pay.peek().is_open_for(&id) {
+                pay.write().close();
+            }
+            Ok(())
+        };
+        submit(iou_row, action, refresh_ious);
+    });
+    // Its own panel: settling one IOU never disarms another's DELETE confirm.
+    let settle_iou_cb = use_callback(move |id: String| {
+        let mut settle = iou_settle;
+        settle.write().open(&id, false);
+        submit(iou_settle, settle_iou(id), refresh_ious);
     });
 
     // ---- read resources into owned snapshots (clone out of the borrow) ----
@@ -264,7 +352,7 @@ pub fn DebtsPage() -> Element {
             "apr" => arr.sort_by(|a, b| b.apr.total_cmp(&a.apr).then(b.balance.cmp(&a.balance))),
             "name" => arr.sort_by(|a, b| a.name.cmp(&b.name)),
             "payoff" => arr.sort_by_key(|d| d.months_to_payoff),
-            _ => arr.sort_by(|a, b| b.balance.cmp(&a.balance)),
+            _ => arr.sort_by_key(|d| std::cmp::Reverse(d.balance)),
         }
         arr
     };
@@ -525,7 +613,14 @@ pub fn DebtsPage() -> Element {
                                     }
                                     "▌ BAR = PAID OFF · CLICK TO INSPECT"
                                 }
+                                button {
+                                    class: "gbtn dx-add",
+                                    r#type: "button",
+                                    onclick: move |_| debt_edit.write().open("", new_debt_draft()),
+                                    "+ NEW DEBT"
+                                }
                             }
+                            DebtFormPanel { panel: debt_edit, on_saved: refresh_debts }
 
                             if debts_ready {
                                 for (i , (label , items)) in groups.iter().enumerate() {
@@ -571,6 +666,8 @@ pub fn DebtsPage() -> Element {
                                         }
                                     }
                                 }
+                            } else if debts_v.is_some() {
+                                Awaiting { label: "OPEN BALANCES".to_string(), legend: "EMPTY".to_string(), message: "No debts. Add one with + NEW DEBT.".to_string() }
                             } else {
                                 Awaiting { label: "OPEN BALANCES".to_string(), loading: debts_loading, tone: "coral".to_string() }
                             }
@@ -583,7 +680,14 @@ pub fn DebtsPage() -> Element {
                                         span { class: "ct", "{iou_count_str}" }
                                         span { class: "rule" }
                                         span { class: "meta", "INFORMAL · NO INTEREST · KEPT OUT OF YOUR REAL DEBT" }
+                                        button {
+                                            class: "gbtn dx-add",
+                                            r#type: "button",
+                                            onclick: move |_| iou_edit.write().open("", new_iou_draft()),
+                                            "+ NEW IOU"
+                                        }
                                     }
+                                    IouFormPanel { panel: iou_edit, on_saved: refresh_ious }
 
                                     if let Some(s) = &iou_stats_v {
                                         NetBeam { stats: s.clone(), count: iou_total_count }
@@ -602,7 +706,17 @@ pub fn DebtsPage() -> Element {
                                                     span { class: "n", "{iou_in_head}" }
                                                 }
                                                 for p in iou_in.iter() {
-                                                    PersonCard { key: "{p.id}", p: p.clone() }
+                                                    PersonCard {
+                                                        key: "{p.id}",
+                                                        p: p.clone(),
+                                                        iou_pay,
+                                                        iou_row,
+                                                        iou_settle,
+                                                        on_edit: move |p: PersonalIouDto| iou_edit.write().open(&p.id, iou_draft(&p)),
+                                                        on_pay: pay_iou_cb,
+                                                        on_settle: settle_iou_cb,
+                                                        on_delete: delete_iou_cb,
+                                                    }
                                                 }
                                             }
                                             div { class: "iou-col",
@@ -611,10 +725,22 @@ pub fn DebtsPage() -> Element {
                                                     span { class: "n", "{iou_out_head}" }
                                                 }
                                                 for p in iou_out.iter() {
-                                                    PersonCard { key: "{p.id}", p: p.clone() }
+                                                    PersonCard {
+                                                        key: "{p.id}",
+                                                        p: p.clone(),
+                                                        iou_pay,
+                                                        iou_row,
+                                                        iou_settle,
+                                                        on_edit: move |p: PersonalIouDto| iou_edit.write().open(&p.id, iou_draft(&p)),
+                                                        on_pay: pay_iou_cb,
+                                                        on_settle: settle_iou_cb,
+                                                        on_delete: delete_iou_cb,
+                                                    }
                                                 }
                                             }
                                         }
+                                    } else if ious_v.is_some() {
+                                        Awaiting { label: "PERSONAL IOUS".to_string(), legend: "EMPTY".to_string(), message: "No IOUs. Add one with + NEW IOU.".to_string() }
                                     } else {
                                         Awaiting { label: "PERSONAL IOUS".to_string(), loading: ious_loading }
                                     }
@@ -635,6 +761,14 @@ pub fn DebtsPage() -> Element {
                         cycle: c.clone(),
                         variant: None,
                         on_close: move |()| sel.set(None),
+                        on_edit: move |d: DebtDto| {
+                            drawer.set(false);
+                            debt_edit.write().open(&d.id, debt_draft(&d));
+                        },
+                        debt_pay,
+                        debt_row,
+                        on_pay: pay_debt_cb,
+                        on_delete: delete_debt_cb,
                     }
                 }
             }
@@ -652,6 +786,14 @@ pub fn DebtsPage() -> Element {
                             cycle: c.clone(),
                             variant: Some("drawer".to_string()),
                             on_close: move |()| drawer.set(false),
+                            on_edit: move |d: DebtDto| {
+                                drawer.set(false);
+                                debt_edit.write().open(&d.id, debt_draft(&d));
+                            },
+                            debt_pay,
+                            debt_row,
+                            on_pay: pay_debt_cb,
+                            on_delete: delete_debt_cb,
                         }
                     }
                 }
@@ -1300,9 +1442,8 @@ fn DebtRow(
 
 // ════════════════════════════ INSPECTOR (right dock) ════════════════════════
 
-/// Debt inspector (`DebtInspector` in the JSX). The dead REST mutations
-/// (PAY EXTRA / REFINANCE / ADJUST PLAN) have no F3 server fn yet, so the buttons
-/// render (faithful DOM) but are inert until those mutations land.
+/// Debt inspector (`DebtInspector` in the JSX). REFINANCE / ADJUST PLAN have
+/// no UI for T17's `debt_plan` yet, so they render (faithful DOM) disabled.
 #[component]
 fn DebtInspector(
     d: Option<DebtDto>,
@@ -1313,6 +1454,11 @@ fn DebtInspector(
     cycle: CycleDto,
     variant: Option<String>,
     on_close: EventHandler<()>,
+    on_edit: EventHandler<DebtDto>,
+    debt_pay: Signal<Panel<PayDraft>>,
+    debt_row: Signal<Panel<bool>>,
+    on_pay: Callback<(String, PayDraft), ()>,
+    on_delete: Callback<String>,
 ) -> Element {
     let panel_cls = match &variant {
         Some(v) => format!("sig-panel debt-insp {v}"),
@@ -1395,6 +1541,13 @@ fn DebtInspector(
         d.since.clone()
     };
     let recent: Vec<DebtPaymentDto> = payments.iter().take(4).cloned().collect();
+    let (pay_id, extra_id, edit_d) = (d.id.clone(), d.id.clone(), d.clone());
+    let instalment = crate::data::budgets::cap_input_text(d.monthly);
+    let pay_label = if debt_pay.read().draft.extra {
+        "Extra payment · CHF".to_string()
+    } else {
+        "Instalment · CHF".to_string()
+    };
 
     rsx! {
         aside { class: "{panel_cls}",
@@ -1454,12 +1607,32 @@ fn DebtInspector(
             }
 
             div { class: "insp-acts",
-                button { class: "gbtn p", "PAY EXTRA" }
-                if refinance {
-                    button { class: if d.status == "high" { "gbtn coral" } else { "gbtn" }, "REFINANCE" }
+                if d.actions.pay {
+                    button {
+                        class: "gbtn p",
+                        r#type: "button",
+                        onclick: move |_| debt_pay.write().open(&pay_id, PayDraft { amount: instalment.clone(), extra: false }),
+                        "PAY INSTALMENT"
+                    }
+                    button {
+                        class: "gbtn",
+                        r#type: "button",
+                        onclick: move |_| debt_pay.write().open(&extra_id, PayDraft { amount: String::new(), extra: true }),
+                        "PAY EXTRA"
+                    }
                 } else {
-                    button { class: "gbtn", "ADJUST PLAN" }
+                    span { class: "dx-note", "PAID OFF · NO PAYMENT DUE" }
                 }
+                if refinance {
+                    button { class: if d.status == "high" { "gbtn coral" } else { "gbtn" }, r#type: "button", disabled: true, "REFINANCE" }
+                } else {
+                    button { class: "gbtn", r#type: "button", disabled: true, "ADJUST PLAN" }
+                }
+            }
+            PayField { panel: debt_pay, target: d.id.clone(), label: pay_label, on_pay }
+            div { class: "insp-acts",
+                button { class: "gbtn", r#type: "button", onclick: move |_| on_edit.call(edit_d.clone()), "EDIT" }
+                DeleteConfirm { panel: debt_row, target: d.id.clone(), on_confirm: on_delete }
             }
 
             div { class: "sig-foot",
@@ -1564,11 +1737,20 @@ fn NetBeam(stats: IouStatsDto, count: Option<u32>) -> Element {
     }
 }
 
-/// One personal-IOU card (`PersonCard` in the JSX). The REMIND / SETTLE UP /
-/// MARK SETTLED actions had no F3 mutation server fn yet, so the buttons render
-/// (faithful DOM) but are inert.
+/// One personal-IOU card (`PersonCard` in the JSX). RECORD PAYMENT and MARK
+/// SETTLED show only while the server offers them (`p.actions`); EDIT and
+/// DELETE (with a confirm step) always.
 #[component]
-fn PersonCard(p: PersonalIouDto) -> Element {
+fn PersonCard(
+    p: PersonalIouDto,
+    iou_pay: Signal<Panel<PayDraft>>,
+    iou_row: Signal<Panel<bool>>,
+    iou_settle: Signal<Panel<bool>>,
+    on_edit: EventHandler<PersonalIouDto>,
+    on_pay: Callback<(String, PayDraft), ()>,
+    on_settle: Callback<String>,
+    on_delete: Callback<String>,
+) -> Element {
     let inbound = p.dir == "in";
     // backend-derived repaid fraction (0–1); render only when > 0 (the JSX showed
     // it whenever repaidPct != null; seeded data always carries it, so we always
@@ -1597,7 +1779,15 @@ fn PersonCard(p: PersonalIouDto) -> Element {
         ),
         chf(p.of, 0)
     );
-    let act_left = if inbound { "REMIND" } else { "SETTLE UP" };
+    let (pay_id, settle_id, edit_p) = (p.id.clone(), p.id.clone(), p.clone());
+    // One settle runs at a time; its pending line and error show on its card.
+    let settle = iou_settle.read().clone();
+    let settle_busy = settle.saving;
+    let (settling_here, settle_error) = if settle.is_open_for(&p.id) {
+        (settle.saving, settle.error)
+    } else {
+        (false, None)
+    };
 
     rsx! {
         div { class: "{dir_cls}",
@@ -1620,9 +1810,30 @@ fn PersonCard(p: PersonalIouDto) -> Element {
             div { class: "person-foot",
                 span { class: "since", "SINCE {p.since}" }
                 div { class: "person-acts",
-                    button { class: "gbtn", "{act_left}" }
-                    button { class: "gbtn p", "MARK SETTLED" }
+                    if p.actions.pay {
+                        button {
+                            class: "gbtn",
+                            r#type: "button",
+                            onclick: move |_| iou_pay.write().open(&pay_id, PayDraft::default()),
+                            "RECORD PAYMENT"
+                        }
+                    }
+                    if p.actions.settle {
+                        button {
+                            class: "gbtn p",
+                            r#type: "button",
+                            disabled: settle_busy,
+                            onclick: move |_| on_settle.call(settle_id.clone()),
+                            "MARK SETTLED"
+                        }
+                    }
+                    InlineStatus { pending: settling_here, error: settle_error }
                 }
+            }
+            PayField { panel: iou_pay, target: p.id.clone(), label: "Payment · CHF".to_string(), on_pay }
+            div { class: "person-acts",
+                button { class: "gbtn", r#type: "button", onclick: move |_| on_edit.call(edit_p.clone()), "EDIT" }
+                DeleteConfirm { panel: iou_row, target: p.id.clone(), on_confirm: on_delete }
             }
         }
     }

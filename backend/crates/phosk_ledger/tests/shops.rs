@@ -17,7 +17,7 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED tests for `phosk_ledger::shops` — the shop directory + per-shop spend
+//! Tests for `phosk_ledger::shops` — the shop directory + per-shop spend
 //! roll-up derived from the receipt seed (`t1..t9`).
 //!
 //! These assert EXACT centime values computed directly from the deterministic
@@ -40,8 +40,8 @@
 //!   Migros 7_155(2) · Restaurant Linde 6_450(1) · Coop 4_230(1) ·
 //!   SBB 3_400(1) · Denner 2_990(1). Eight distinct shops; total 237_015.
 //!
-//! The bodies are `todo!()`, so every test here MUST compile and then FAIL at
-//! runtime (RED phase). No production logic lives here.
+//! The services are implemented, so every test here exercises the real
+//! aggregation against the seed.
 
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::money::Money;

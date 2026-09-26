@@ -45,9 +45,10 @@ use phosk_id::{
     SubscriptionId, SuggestionId,
 };
 use phosk_model::{
-    AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
-    CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription, Transaction,
+    AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
+    CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
+    PersonalIou, Preference, Provenance, Receipt, ReceiptProposal, Signal, SignalOccurrence,
+    Source, Subscription, Transaction,
 };
 
 mod seed;
@@ -65,7 +66,8 @@ pub struct MemoryDb {
     // its row. Read back alongside `transactions` by `transactions_between`.
     receipt_transactions: Mutex<Vec<(ReceiptId, Transaction)>>,
     categories: Vec<Category>,
-    budget: BudgetConfig,
+    budget: Mutex<BudgetConfig>,
+    budget_changes: Mutex<Vec<BudgetChange>>,
     // Richer write-side entities (ADR-008 / locked decision #3). Mutable
     // collections sit behind a `Mutex` so the `&self` async port methods can
     // record writes without an `&mut self` (the trait is `&self`-only).
@@ -89,6 +91,7 @@ pub struct MemoryDb {
     chats: Vec<Chat>,
     messages: Mutex<Vec<Message>>,
     ai_suggestions: Mutex<Vec<AiSuggestion>>,
+    receipt_proposals: Mutex<Vec<ReceiptProposal>>,
 }
 
 impl MemoryDb {
@@ -105,7 +108,8 @@ impl MemoryDb {
             transactions,
             receipt_transactions: Mutex::new(Vec::new()),
             categories,
-            budget,
+            budget: Mutex::new(budget),
+            budget_changes: Mutex::new(Vec::new()),
             receipts: Mutex::new(Vec::new()),
             line_items: Mutex::new(Vec::new()),
             corrections: Mutex::new(Vec::new()),
@@ -124,6 +128,7 @@ impl MemoryDb {
             chats: Vec::new(),
             messages: Mutex::new(Vec::new()),
             ai_suggestions: Mutex::new(Vec::new()),
+            receipt_proposals: Mutex::new(Vec::new()),
         }
     }
 
@@ -163,7 +168,8 @@ impl MemoryDb {
             transactions,
             receipt_transactions: Mutex::new(Vec::new()),
             categories,
-            budget,
+            budget: Mutex::new(budget),
+            budget_changes: Mutex::new(Vec::new()),
             receipts: Mutex::new(receipts),
             line_items: Mutex::new(line_items),
             corrections: Mutex::new(Vec::new()),
@@ -182,11 +188,23 @@ impl MemoryDb {
             chats,
             messages: Mutex::new(messages),
             ai_suggestions: Mutex::new(ai_suggestions),
+            receipt_proposals: Mutex::new(Vec::new()),
         })
     }
 }
 
 impl MemoryDb {
+    /// A snapshot of the correction audit log, oldest first.
+    ///
+    /// Inspection helper for service tests (the audit log is write-only through
+    /// the PORT); not a port method.
+    ///
+    /// # Errors
+    /// [`PhoskError::Invalid`] if the store lock is poisoned.
+    pub fn corrections(&self) -> Result<Vec<CorrectionEvent>, PhoskError> {
+        Ok(lock(&self.corrections)?.clone())
+    }
+
     /// Whether any stored row still names `category` — the guard behind
     /// `delete_category` (receipts, their lines, subscriptions and signals).
     fn category_is_referenced(&self, category: &str) -> Result<bool, PhoskError> {
@@ -206,6 +224,16 @@ impl MemoryDb {
             return Ok(true);
         }
         Ok(lock(&self.signals)?.iter().any(|s| s.parent == category))
+    }
+
+    /// How many receipt proposals are staged (test inspection: the port only
+    /// reads a proposal by its suggestion id, so "nothing was staged" is not
+    /// observable through it).
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store lock is poisoned.
+    pub fn staged_proposal_count(&self) -> Result<usize, PhoskError> {
+        Ok(lock(&self.receipt_proposals)?.len())
     }
 }
 
@@ -256,7 +284,26 @@ impl DatabaseAdapter for MemoryDb {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn budget_config(&self) -> Result<BudgetConfig, PhoskError> {
         tracing::debug!("returning budget config");
-        Ok(self.budget.clone())
+        Ok(lock(&self.budget)?.clone())
+    }
+
+    async fn set_budget_config(
+        &self,
+        cfg: BudgetConfig,
+        change: BudgetChange,
+    ) -> Result<(), PhoskError> {
+        let mut changes = lock(&self.budget_changes)?;
+        match changes.iter_mut().find(|c| c.id == change.id) {
+            Some(existing) => *existing = change,
+            None => changes.push(change),
+        }
+        drop(changes);
+        *lock(&self.budget)? = cfg;
+        Ok(())
+    }
+
+    async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError> {
+        Ok(lock(&self.budget_changes)?.clone())
     }
 
     // ── Ledger ───────────────────────────────────────────────────────────────
@@ -366,6 +413,24 @@ impl DatabaseAdapter for MemoryDb {
             mirror.push((stored_id, projected));
         }
         Ok(stored_id)
+    }
+
+    async fn delete_receipt(&self, id: ReceiptId) -> Result<(), PhoskError> {
+        // Same lock order as `insert_receipt` (receipts → lines → projection)
+        // so the two write paths can never deadlock against each other.
+        let mut receipts = lock(&self.receipts)?;
+        let before = receipts.len();
+        receipts.retain(|r| r.id != id);
+        if receipts.len() == before {
+            return Err(PhoskError::NotFound(format!("receipt {id}")));
+        }
+        lock(&self.line_items)?.retain(|l| l.receipt_id != id);
+        // Drop the dashboard projection this receipt owns, so the deleted spend
+        // stops counting towards `transactions_between` (port contract). The
+        // seeded demo rows in `self.transactions` belong to no receipt and are
+        // left alone.
+        lock(&self.receipt_transactions)?.retain(|(rid, _)| *rid != id);
+        Ok(())
     }
 
     async fn update_line_item(&self, line: LineItem) -> Result<(), PhoskError> {
@@ -667,6 +732,17 @@ impl DatabaseAdapter for MemoryDb {
         Ok(())
     }
 
+    async fn snooze_alert(&self, id: AlertId, snooze: AlertSnooze) -> Result<(), PhoskError> {
+        let mut alerts = lock(&self.alerts)?;
+        let a = alerts
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
+        a.status = "snoozed".to_owned();
+        a.snooze = Some(snooze);
+        Ok(())
+    }
+
     // ── Recurring ────────────────────────────────────────────────────────────
 
     async fn subscriptions(&self) -> Result<Vec<Subscription>, PhoskError> {
@@ -768,6 +844,18 @@ impl DatabaseAdapter for MemoryDb {
         Ok(id)
     }
 
+    async fn delete_debt(&self, id: DebtId) -> Result<(), PhoskError> {
+        let mut debts = lock(&self.debts)?;
+        let before = debts.len();
+        debts.retain(|d| d.id != id);
+        if debts.len() == before {
+            return Err(PhoskError::NotFound(format!("debt {id}")));
+        }
+        // Cascade: a payment without its debt is an orphan.
+        lock(&self.debt_payments)?.retain(|p| p.debt_id != id);
+        Ok(())
+    }
+
     async fn record_debt_payment(&self, p: DebtPayment) -> Result<(), PhoskError> {
         lock(&self.debt_payments)?.push(p);
         Ok(())
@@ -775,6 +863,14 @@ impl DatabaseAdapter for MemoryDb {
 
     async fn personal_ious(&self) -> Result<Vec<PersonalIou>, PhoskError> {
         Ok(lock(&self.personal_ious)?.clone())
+    }
+
+    async fn personal_iou_by_slug(&self, slug: &str) -> Result<PersonalIou, PhoskError> {
+        lock(&self.personal_ious)?
+            .iter()
+            .find(|i| i.slug == slug)
+            .cloned()
+            .ok_or_else(|| PhoskError::NotFound(format!("personal iou slug {slug}")))
     }
 
     async fn upsert_personal_iou(&self, i: PersonalIou) -> Result<PersonalIouId, PhoskError> {
@@ -786,6 +882,16 @@ impl DatabaseAdapter for MemoryDb {
             ious.push(i);
         }
         Ok(id)
+    }
+
+    async fn delete_personal_iou(&self, id: PersonalIouId) -> Result<(), PhoskError> {
+        let mut ious = lock(&self.personal_ious)?;
+        let before = ious.len();
+        ious.retain(|i| i.id != id);
+        if ious.len() == before {
+            return Err(PhoskError::NotFound(format!("personal iou {id}")));
+        }
+        Ok(())
     }
 
     // ── Analytics support ────────────────────────────────────────────────────
@@ -923,6 +1029,23 @@ impl DatabaseAdapter for MemoryDb {
             .ok_or_else(|| PhoskError::NotFound(format!("suggestion {id}")))?;
         s.status = status.to_owned();
         Ok(())
+    }
+
+    async fn stage_receipt_proposal(&self, p: ReceiptProposal) -> Result<(), PhoskError> {
+        let mut staged = lock(&self.receipt_proposals)?;
+        staged.retain(|s| s.suggestion_id != p.suggestion_id);
+        staged.push(p);
+        Ok(())
+    }
+
+    async fn receipt_proposal(
+        &self,
+        id: SuggestionId,
+    ) -> Result<Option<ReceiptProposal>, PhoskError> {
+        Ok(lock(&self.receipt_proposals)?
+            .iter()
+            .find(|p| p.suggestion_id == id)
+            .cloned())
     }
 }
 

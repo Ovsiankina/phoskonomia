@@ -71,13 +71,44 @@ pub async fn insert_receipt_same_slug_replaces_in_place(db: &dyn DatabaseAdapter
     ensure_not_found(db.receipt(second_id).await, "receipt(re-import id)")?;
 
     let lines = db.line_items(first_id).await?;
-    let mut names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
-    names.sort_unstable();
-    ensure_eq(&names, &vec!["New A", "New B"], "line set replaced")?;
+    let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
+    ensure_eq(
+        &names,
+        &vec!["New A", "New B"],
+        "line set replaced, in order",
+    )?;
     let rebound = lines.iter().all(|l| l.receipt_id == first_id);
     ensure(rebound, "new lines rebound to the stored id")?;
     let orphans = db.line_items(second_id).await?;
     ensure(orphans.is_empty(), "no lines under the discarded id")
+}
+
+/// Writing the SAME rows (same ids, same slug) twice — what a concurrent
+/// double-approve of one proposal degrades to — is one booking: one receipt,
+/// one projected transaction, one set of lines.
+pub async fn insert_receipt_same_rows_twice_is_one_booking(db: &dyn DatabaseAdapter) -> Outcome {
+    let (id, day) = (ReceiptId::new(), date(2027, 1, 12)?);
+    let r = receipt(id, "conf-twice", day, 2_500);
+    let lines = vec![line(id, "A", 1_000), line(id, "B", 1_500)];
+    let count = db.all_receipts().await?.len();
+    db.insert_receipt(r.clone(), lines.clone()).await?;
+    let again = db.insert_receipt(r, lines.clone()).await?;
+    ensure_eq(&again, &id, "same id")?;
+    ensure_eq(&db.all_receipts().await?.len(), &(count + 1), "one receipt")?;
+    let projected = db.transactions_between(day, day).await?;
+    ensure_eq(&projected.len(), &1, "one projected transaction")?;
+    let stored: Vec<String> = db
+        .line_items(id)
+        .await?
+        .iter()
+        .map(|l| l.id.to_string())
+        .collect();
+    let written: Vec<String> = lines.iter().map(|l| l.id.to_string()).collect();
+    ensure_eq(
+        &sorted(stored, Clone::clone),
+        &sorted(written, Clone::clone),
+        "one set of lines",
+    )
 }
 
 /// A stored receipt is projected into the dashboard `Transaction` view, so a
@@ -118,6 +149,54 @@ pub async fn insert_receipt_same_slug_replaces_the_projection(db: &dyn DatabaseA
         &got.amount.centimes(),
         &2_500,
         "projection follows the replacement",
+    )
+}
+
+/// `delete_receipt` takes back everything `insert_receipt` wrote — the receipt,
+/// its lines and its dashboard projection — and leaves its neighbours alone.
+/// Deleting an unknown (or already deleted) receipt is `NotFound`.
+pub async fn delete_receipt_removes_it_its_lines_and_its_projection(
+    db: &dyn DatabaseAdapter,
+) -> Outcome {
+    let day = date(2027, 1, 10)?;
+    let (gone, kept) = (ReceiptId::new(), ReceiptId::new());
+    db.insert_receipt(
+        receipt(gone, "conf-del", day, 1_000),
+        vec![line(gone, "Apples", 400), line(gone, "Bread", 600)],
+    )
+    .await?;
+    db.insert_receipt(
+        receipt(kept, "conf-del-keep", day, 700),
+        vec![line(kept, "Cheese", 700)],
+    )
+    .await?;
+    let before = db.all_receipts().await?.len();
+
+    db.delete_receipt(gone).await?;
+    ensure_eq(&db.all_receipts().await?.len(), &(before - 1), "count")?;
+    ensure_not_found(db.receipt(gone).await, "receipt(deleted)")?;
+    ensure_not_found(db.receipt_by_slug("conf-del").await, "receipt_by_slug")?;
+    ensure(
+        db.line_items(gone).await?.is_empty(),
+        "no orphan line items",
+    )?;
+
+    let projected = db.transactions_between(day, day).await?;
+    ensure_eq(&projected.len(), &1, "only the surviving projection")?;
+    let got = projected.into_iter().next().ok_or("no projected row")?;
+    ensure_eq(&got.amount.centimes(), &700, "the deleted spend is gone")?;
+
+    ensure_eq(
+        &db.receipt(kept).await?.amount.centimes(),
+        &700,
+        "neighbour",
+    )?;
+    ensure_eq(&db.line_items(kept).await?.len(), &1, "neighbour's lines")?;
+
+    ensure_not_found(db.delete_receipt(gone).await, "delete_receipt(twice)")?;
+    ensure_not_found(
+        db.delete_receipt(ReceiptId::new()).await,
+        "delete_receipt(unknown)",
     )
 }
 
@@ -185,6 +264,34 @@ pub async fn update_line_item_replaces_the_stored_line(db: &dyn DatabaseAdapter)
 
     let ghost = line(id, "Ghost", 100);
     ensure_not_found(db.update_line_item(ghost).await, "update_line_item")
+}
+
+/// A receipt's lines read back in the order they were written, and editing a
+/// line in the middle keeps it in its original position.
+pub async fn line_items_keep_insertion_order(db: &dyn DatabaseAdapter) -> Outcome {
+    let id = ReceiptId::new();
+    let names = [
+        "Milk", "Bread", "Eggs", "Apples", "Cheese", "Coffee", "Rice", "Tea", "Jam", "Salt",
+    ];
+    let lines: Vec<LineItem> = names.iter().map(|n| line(id, n, 200)).collect();
+    let r = receipt(id, "conf-order", date(2027, 1, 10)?, 2_000);
+    db.insert_receipt(r, lines.clone()).await?;
+    ensure_eq(
+        &db.line_items(id).await?,
+        &lines,
+        "lines in insertion order",
+    )?;
+
+    let mut want = lines;
+    let middle = want.get_mut(4).ok_or("fixture has a middle line")?;
+    "Gruyere".clone_into(&mut middle.name);
+    middle.provenance = Provenance::user_modified();
+    db.update_line_item(middle.clone()).await?;
+    ensure_eq(
+        &db.line_items(id).await?,
+        &want,
+        "order after editing a line",
+    )
 }
 
 /// The audit log accepts events (it has no read path on the port) and is

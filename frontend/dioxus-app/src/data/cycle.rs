@@ -47,7 +47,7 @@ pub async fn get_cycle() -> Result<CycleDto, ServerFnError> {
         let as_of = crate::data::today();
         let w = Period::Month
             .resolve(as_of)
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(CycleDto {
             label: month_year_label(w.start),
             day: w.day_index(),

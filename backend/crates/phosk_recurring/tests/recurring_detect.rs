@@ -17,7 +17,7 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED tests for `phosk_recurring::recurring_detect`.
+//! Tests for `phosk_recurring::recurring_detect`.
 //!
 //! These pin the recurring-detection AI slice against the deterministic Swiss
 //! seed (`phosk_db_memory::MemoryDb::seeded`) at `as_of = 2026-06-18`:
@@ -32,18 +32,19 @@
 //!   slug.
 //! - Usage-based review flags: the `gym` sub (status `watch`) stays flagged.
 //!
-//! Every body under test is `todo!()`, so each test COMPILES and then panics at
-//! runtime — i.e. RED. No production logic lives here. `expect("msg")` is used
-//! for fallible setup; never a bare `unwrap()`.
+//! Every service under test is implemented, so each test drives the real
+//! detection paths against the seed. `expect("msg")` is used for fallible
+//! setup; never a bare `unwrap()`.
 
 use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_core::error::PhoskError;
 use phosk_db_memory::MemoryDb;
+use phosk_recurring::lifecycle::resume_subscription;
 use phosk_recurring::recurring_detect::{
     DetectionDto, RecurringCandidateDto, confirm_candidate, detect, dismiss_candidate,
 };
-use phosk_recurring::subscriptions::{SubFilter, list_subscriptions};
+use phosk_recurring::subscriptions::{SubFilter, list_subscriptions, subscription_detail};
 
 /// The seeded demo clock: day 18 of the June 2026 cycle.
 fn as_of() -> NaiveDate {
@@ -290,6 +291,27 @@ async fn dismiss_unknown_candidate_is_not_found() {
         "unknown candidate ⇒ NotFound, got {err:?}"
     );
     assert_eq!(err.http_status(), 404);
+}
+
+/// Dismissing then resuming a candidate un-dismisses it: it is an open
+/// candidate again in the inspector, per [`recurring_detect::is_open_candidate`]
+/// (a resumed record's status is no longer `"paused"`).
+#[tokio::test]
+async fn dismiss_then_resume_makes_it_an_open_candidate_again() {
+    let db = seeded();
+    dismiss_candidate(&db, "icloud").await.expect("dismiss ok");
+
+    resume_subscription(&db, "icloud", as_of())
+        .await
+        .expect("resume ok");
+
+    let detail = subscription_detail(&db, as_of(), "icloud")
+        .await
+        .expect("detail ok");
+    assert!(
+        detail.candidate,
+        "a resumed candidate is open again, not stuck dismissed"
+    );
 }
 
 // ── usage-based review flags ──────────────────────────────────────────────────

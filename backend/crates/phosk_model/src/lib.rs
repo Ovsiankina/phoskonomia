@@ -27,11 +27,13 @@ pub mod entities;
 pub mod provenance;
 
 pub use entities::{
-    AiSuggestion, Alert, AlertAction, Budget, BudgetHistory, CategoryCap, Charge, Chat, Debt,
-    DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference, Receipt, Signal,
-    SignalOccurrence, Subscription,
+    AiSuggestion, Alert, AlertAction, AlertSnooze, Budget, BudgetChange, BudgetHistory,
+    CategoryCap, Charge, Chat, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou,
+    Preference, Receipt, ReceiptProposal, Signal, SignalOccurrence, Subscription,
 };
-pub use provenance::{CorrectionEvent, Provenance, Source};
+pub use provenance::{
+    CorrectionEvent, LOW_CONFIDENCE_THRESHOLD, Provenance, Source, is_low_confidence,
+};
 
 /// A single dated spend: an `amount` of [`Money`] at a `shop`, classified into a
 /// spending `category`. Identity is the human `shop` / `category` *names*

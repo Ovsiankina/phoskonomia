@@ -63,7 +63,7 @@ pub async fn get_preferences() -> Result<SettingsDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         get_preferences_with(session.db())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))
+            .map_err(crate::data::server_err)
     }
     #[cfg(not(feature = "server-deps"))]
     {
@@ -81,7 +81,7 @@ pub async fn set_preference(key: String, value: String) -> Result<SettingsDto, S
         let session = crate::data::build_session().await?;
         set_preference_with(session.db(), &key, &value)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))
+            .map_err(crate::data::server_err)
     }
     #[cfg(not(feature = "server-deps"))]
     {
@@ -100,7 +100,7 @@ pub async fn reset_preference(key: String) -> Result<SettingsDto, ServerFnError>
         let session = crate::data::build_session().await?;
         reset_preference_with(session.db(), &key)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))
+            .map_err(crate::data::server_err)
     }
     #[cfg(not(feature = "server-deps"))]
     {
@@ -119,7 +119,7 @@ pub async fn reset_all_preferences() -> Result<SettingsDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         reset_all_preferences_with(session.db())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))
+            .map_err(crate::data::server_err)
     }
     #[cfg(not(feature = "server-deps"))]
     {

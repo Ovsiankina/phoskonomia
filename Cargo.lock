@@ -1670,6 +1670,7 @@ dependencies = [
 name = "dioxus-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dioxus",
  "phosk_adapter_db",
@@ -1687,6 +1688,7 @@ dependencies = [
  "phosk_model",
  "phosk_ocr_paddle",
  "phosk_ocr_vision",
+ "phosk_pipeline_receipt",
  "phosk_planning",
  "phosk_recurring",
  "phosk_settings",
@@ -5431,6 +5433,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "phosk_core",
+ "phosk_model",
  "serde",
  "serde_json",
  "tokio",
@@ -5462,8 +5465,10 @@ dependencies = [
  "phosk_model",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5481,8 +5486,22 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
+ "phosk_adapter_db",
+ "phosk_adapter_llm",
+ "phosk_adapter_ocr",
+ "phosk_adapter_storage",
+ "phosk_ai",
  "phosk_core",
+ "phosk_db_memory",
+ "phosk_db_surreal",
+ "phosk_llm_ollama",
+ "phosk_model",
+ "phosk_ocr_paddle",
+ "phosk_ocr_vision",
+ "phosk_pipeline_receipt",
  "phosk_queue",
+ "phosk_storage_fs",
  "reqwest",
  "serde",
  "serde_json",
@@ -5589,6 +5608,7 @@ dependencies = [
  "phosk_model",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
 ]
@@ -5679,6 +5699,7 @@ dependencies = [
  "phosk_adapter_db",
  "phosk_core",
  "phosk_db_memory",
+ "phosk_id",
  "phosk_model",
  "serde",
  "serde_json",

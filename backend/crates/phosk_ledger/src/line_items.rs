@@ -142,8 +142,33 @@ pub fn line_total(qty: f64, unit_price: Money) -> Result<Money, PhoskError> {
     Ok(Money::from_centimes(rounded as i64))
 }
 
+/// Longest accepted line name, in characters. The wire layer
+/// (`dioxus-app/src/data/transactions.rs::line_fix`) reuses this constant, so
+/// the service is never laxer than the UI it backs.
+pub const MAX_NAME_CHARS: usize = 120;
+/// Longest accepted line category, in characters. Reused by the wire layer's
+/// `line_fix` module.
+pub const MAX_CATEGORY_CHARS: usize = 60;
+/// Largest accepted quantity (pieces or weighed units). Reused by the wire
+/// layer's `line_fix` module.
+pub const MAX_QTY: f64 = 100_000.0;
+/// Largest accepted unit price: CHF 1'000'000, in centimes. Reused by the
+/// wire layer's `line_fix` module.
+pub const MAX_UNIT_PRICE_CENTIMES: i64 = 100_000_000;
+
 /// Correct a single line field (records a `CorrectionEvent`, updates the line,
 /// flips its provenance to `UserModified`). Write path.
+///
+/// # Errors
+/// - [`PhoskError::Invalid`] for an unknown field; a blank or over-long
+///   name/category, or one containing control characters; a qty that is not
+///   finite and positive or is above [`MAX_QTY`]; or a unit price that is
+///   negative or above [`MAX_UNIT_PRICE_CENTIMES`] — matching the shape
+///   [`crate::transactions::create_transaction`] already refuses on manual
+///   entry, plus the caps the UI enforces. Nothing is written when validation
+///   fails: the stored line, its provenance and the audit log are untouched.
+/// - [`PhoskError::NotFound`] if no receipt holds `line`, or a `signal_id`
+///   names a signal slug that does not exist.
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn correct_line(
     db: &dyn DatabaseAdapter,
@@ -155,6 +180,13 @@ pub async fn correct_line(
     let old_value = field_value(&current, field)?;
 
     apply_field(db, &mut current, field, new_value).await?;
+    // name/category are stored trimmed; log the normalised value that was
+    // actually written, not the raw (possibly padded) input.
+    let logged_value = match field {
+        "name" => current.name.clone(),
+        "category" => current.category.clone(),
+        _ => new_value.to_owned(),
+    };
     // Any user touch re-derives the (backend-owned) total and clears the
     // low-confidence flag: the line is now user-reviewed at full confidence.
     current.line_total = line_total(current.qty, current.unit_price)?;
@@ -166,7 +198,7 @@ pub async fn correct_line(
         entity_id: line.to_string(),
         field: field.to_owned(),
         old_value,
-        new_value: new_value.to_owned(),
+        new_value: logged_value,
         at: chrono::Utc::now().date_naive(),
     })
     .await
@@ -186,6 +218,28 @@ async fn find_line(db: &dyn DatabaseAdapter, line: LineItemId) -> Result<LineIte
         }
     }
     Err(PhoskError::NotFound(format!("line item {line}")))
+}
+
+/// A trimmed, non-empty, length-bounded, control-character-free label.
+/// Blank/wording mirrors [`crate::transactions::create_transaction`]'s
+/// `required` helper; the length and control-character bounds mirror
+/// [`crate::categories::create_category`]'s `clean_text`.
+fn bounded_label(raw: &str, field: &str, max_chars: usize) -> Result<String, PhoskError> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err(PhoskError::Invalid(format!("{field} is required")));
+    }
+    if text.chars().count() > max_chars {
+        return Err(PhoskError::Invalid(format!(
+            "{field} is longer than {max_chars} characters"
+        )));
+    }
+    if text.chars().any(char::is_control) {
+        return Err(PhoskError::Invalid(format!(
+            "{field} cannot contain control characters"
+        )));
+    }
+    Ok(text.to_owned())
 }
 
 /// The current stringified value of a correctable field (for the audit log's
@@ -213,18 +267,43 @@ async fn apply_field(
     new_value: &str,
 ) -> Result<(), PhoskError> {
     match field {
-        "name" => new_value.clone_into(&mut line.name),
-        "category" => new_value.clone_into(&mut line.category),
+        "name" => line.name = bounded_label(new_value, "name", MAX_NAME_CHARS)?,
+        "category" => line.category = bounded_label(new_value, "category", MAX_CATEGORY_CHARS)?,
         "qty" => {
-            line.qty = new_value
+            let qty = new_value
                 .trim()
                 .parse::<f64>()
                 .map_err(|_| PhoskError::Invalid(format!("qty `{new_value}` is not a number")))?;
+            if !qty.is_finite() || qty <= 0.0 {
+                return Err(PhoskError::Invalid(format!(
+                    "line `{}`: qty must be a finite number greater than zero",
+                    line.name
+                )));
+            }
+            if qty > MAX_QTY {
+                return Err(PhoskError::Invalid(format!(
+                    "line `{}`: qty is larger than {MAX_QTY}",
+                    line.name
+                )));
+            }
+            line.qty = qty;
         }
         "unit_price" => {
             let centimes = new_value.trim().parse::<i64>().map_err(|_| {
                 PhoskError::Invalid(format!("unit_price `{new_value}` is not a number"))
             })?;
+            if centimes < 0 {
+                return Err(PhoskError::Invalid(format!(
+                    "line `{}`: unit price must not be negative",
+                    line.name
+                )));
+            }
+            if centimes > MAX_UNIT_PRICE_CENTIMES {
+                return Err(PhoskError::Invalid(format!(
+                    "line `{}`: unit price is larger than {MAX_UNIT_PRICE_CENTIMES} centimes",
+                    line.name
+                )));
+            }
             line.unit_price = Money::from_centimes(centimes);
         }
         "signal_id" => {

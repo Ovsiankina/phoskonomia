@@ -7,21 +7,34 @@ edition.workspace = true
 #
 # The desktop NEVER exposes an inbound socket. Instead this daemon polls the Pi
 # `phosk_queue` OUTBOUND, drains opaque blobs one at a time, and hands each to
-# the receipt-import pipeline. The pipeline itself runs in a network-less
-# sandbox and is reached here only through a port seam ([`ReceiptIngest`]); the
-# real OCR/LLM adapters are composed elsewhere. The pipeline crate
-# (`phosk_pipeline_receipt`) exists but is not yet adapted to the seam, so this
-# bin ships the seam + a deterministic fake so the poll/drain loop is real,
-# tested, and ready to wire.
+# the receipt-import pipeline through a port seam ([`ReceiptIngest`]).
+# `PHOSK_INGEST=pipeline` selects `PipelineIngest` (phosk_pipeline_receipt over
+# the L2 ports); the default `null` keeps the deterministic `NullIngest`.
 #
-# Composition root: it imports NO feature crate, only phosk_core (the one error
-# taxonomy). The reqwest/HTTP client stays inside this bin.
+# Composition root (ADR-010): the library sees only PORT traits + the pipeline
+# crate; the concrete adapters below are named ONLY in `src/main.rs`. The
+# reqwest/HTTP client stays inside this bin.
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 phosk_core = { path = "../../crates/phosk_core" }
+# chrono: the desktop's local date stamped on each intaken photo.
+chrono = { workspace = true }
+# The pipeline + the four L2 PORTs it orchestrates (what `PipelineIngest` holds).
+phosk_pipeline_receipt = { path = "../../crates/phosk_pipeline_receipt" }
+phosk_adapter_db = { path = "../../crates/phosk_adapter_db" }
+phosk_adapter_ocr = { path = "../../crates/phosk_adapter_ocr" }
+phosk_adapter_llm = { path = "../../crates/phosk_adapter_llm" }
+phosk_adapter_storage = { path = "../../crates/phosk_adapter_storage" }
+# Concrete adapters, wired ONLY in src/main.rs (the composition root), mirroring
+# frontend/dioxus-app/src/data/mod.rs.
+phosk_db_surreal = { path = "../../crates/phosk_db_surreal" }
+phosk_llm_ollama = { path = "../../crates/phosk_llm_ollama" }
+phosk_storage_fs = { path = "../../crates/phosk_storage_fs" }
+phosk_ocr_paddle = { path = "../../crates/phosk_ocr_paddle" }
+phosk_ocr_vision = { path = "../../crates/phosk_ocr_vision" }
 # Instrumentation: live in debug, compiled out in release (release_max_level_off).
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -33,6 +46,10 @@ phosk_queue = { path = "../phosk_queue" }
 axum = { version = "0.8" }
 # The round-trip test reads the queue's JSON enqueue ack.
 serde_json = { workspace = true }
+# Pipeline-ingest tests: the in-memory DB + the approval service's pending view.
+phosk_db_memory = { path = "../../crates/phosk_db_memory" }
+phosk_ai = { path = "../../crates/phosk_ai" }
+phosk_model = { path = "../../crates/phosk_model" }
 
 [lints]
 workspace = true

@@ -143,6 +143,10 @@ id_newtype!(
     CorrectionId
 );
 id_newtype!(
+    /// Identity of a `BudgetChange` (a global-budget history entry).
+    BudgetChangeId
+);
+id_newtype!(
     /// Identity of a `Preference` (a user setting).
     PreferenceId
 );

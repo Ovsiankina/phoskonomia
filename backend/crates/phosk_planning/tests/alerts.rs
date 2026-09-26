@@ -17,14 +17,14 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED integration tests for `phosk_planning::alerts` (F3 — alerts slice).
+//! Integration tests for `phosk_planning::alerts` (F3 — alerts slice).
 //!
 //! These pin the `alerts` / `act_on_alert` service contract against the
 //! deterministic Swiss seed (`MemoryDb::seeded()`) at the spec "today"
 //! 2026-06-18 and against synthetic `MemoryDb`s for the rule-engine edge cases.
 //!
-//! Every body in `phosk_planning::alerts` is `todo!()`, so these MUST compile
-//! and then panic (red) at runtime. No production logic lives here.
+//! The `phosk_planning::alerts` service is implemented, so these tests drive
+//! the real `alerts` / `act_on_alert` paths end to end.
 //!
 //! Source of truth for the expected shapes/values:
 //! - `frontend/dioxus-app/src/data/dashboard.rs` (the `AlertDto` wire struct +
@@ -43,7 +43,15 @@ use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
 use phosk_model::{BudgetConfig, Category, Provenance, Source, Transaction};
 
-use phosk_planning::alerts::{AlertDto, act_on_alert, alerts};
+use phosk_planning::alerts::{AlertActionDto, AlertDto, act_on_alert, alerts};
+
+/// Build an `AlertActionDto` fixture inline (label + backend verb kind).
+fn action(label: &str, kind: &str) -> AlertActionDto {
+    AlertActionDto {
+        label: label.to_owned(),
+        kind: kind.to_owned(),
+    }
+}
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -99,11 +107,11 @@ async fn a1_going_out_alert_fields_are_pinned() {
     assert_eq!(
         a.actions,
         vec![
-            "VIEW".to_owned(),
-            "RAISE CAP".to_owned(),
-            "DISMISS".to_owned()
+            action("VIEW", "navigate"),
+            action("RAISE CAP", "apply"),
+            action("DISMISS", "dismiss"),
         ],
-        "action labels only (AlertAction.label), primary first"
+        "label + backend verb kind, primary first"
     );
 }
 
@@ -119,7 +127,10 @@ async fn a2_groceries_alert_fields_are_pinned() {
         a.body,
         "Three large baskets pushed projected spend over CHF 800."
     );
-    assert_eq!(a.actions, vec!["VIEW".to_owned(), "DISMISS".to_owned()]);
+    assert_eq!(
+        a.actions,
+        vec![action("VIEW", "navigate"), action("DISMISS", "dismiss")]
+    );
 }
 
 /// a3 is the LLM-sourced savings info alert (tone "llm", no target/raise-cap).
@@ -132,7 +143,11 @@ async fn a3_savings_alert_is_llm_toned() {
     assert_eq!(a.head, "On track to hit your savings target");
     assert_eq!(
         a.actions,
-        vec!["VIEW".to_owned(), "SNOOZE".to_owned(), "DISMISS".to_owned()]
+        vec![
+            action("VIEW", "navigate"),
+            action("SNOOZE", "snooze"),
+            action("DISMISS", "dismiss"),
+        ]
     );
 }
 
@@ -209,7 +224,7 @@ async fn snoozed_alert_is_filtered_out_of_the_list() {
 #[tokio::test]
 async fn act_on_alert_dismiss_removes_it_from_the_list() {
     let db = seeded();
-    act_on_alert(&db, "a1", "dismiss")
+    act_on_alert(&db, "a1", "dismiss", today())
         .await
         .expect("dismiss ok");
 
@@ -230,7 +245,9 @@ async fn act_on_alert_dismiss_removes_it_from_the_list() {
 #[tokio::test]
 async fn act_on_alert_snooze_sets_snoozed_status() {
     let db = seeded();
-    act_on_alert(&db, "a3", "snooze").await.expect("snooze ok");
+    act_on_alert(&db, "a3", "snooze", today())
+        .await
+        .expect("snooze ok");
 
     let seed_alerts = db.alerts().await.expect("alerts");
     let a3 = seed_alerts
@@ -251,7 +268,9 @@ async fn act_on_alert_apply_raises_the_targeted_cap() {
         .expect("cap before");
     let before_cap = before.cap.expect("Going out has a cap");
 
-    act_on_alert(&db, "a1", "apply").await.expect("apply ok");
+    act_on_alert(&db, "a1", "apply", today())
+        .await
+        .expect("apply ok");
 
     let after = db
         .category_cap_by_name("Going out")
@@ -270,7 +289,7 @@ async fn act_on_alert_apply_raises_the_targeted_cap() {
 #[tokio::test]
 async fn act_on_unknown_alert_is_not_found() {
     let db = seeded();
-    let err = act_on_alert(&db, "does-not-exist", "dismiss")
+    let err = act_on_alert(&db, "does-not-exist", "dismiss", today())
         .await
         .expect_err("unknown alert must error");
     assert!(
@@ -283,13 +302,155 @@ async fn act_on_unknown_alert_is_not_found() {
 #[tokio::test]
 async fn act_with_unknown_action_is_invalid() {
     let db = seeded();
-    let err = act_on_alert(&db, "a1", "frobnicate")
+    let err = act_on_alert(&db, "a1", "frobnicate", today())
         .await
         .expect_err("unknown action must error");
     assert!(
         matches!(err, phosk_core::error::PhoskError::Invalid(_)),
         "expected Invalid, got {err:?}"
     );
+}
+
+/// `act_on_alert` accepts the backend verb (`AlertAction.kind`) of each action a
+/// seeded alert actually offers — the dashboard buttons must not always fail
+/// (F1). Each case starts from a fresh seed since `dismiss`/`snooze` mutate
+/// status.
+#[tokio::test]
+async fn act_on_alert_accepts_every_seeded_action_kind() {
+    for (slug, kind) in [
+        ("a1", "dismiss"),
+        ("a1", "apply"),
+        ("a2", "dismiss"),
+        ("a3", "dismiss"),
+        ("a3", "snooze"),
+    ] {
+        let db = seeded();
+        act_on_alert(&db, slug, kind, today())
+            .await
+            .unwrap_or_else(|e| panic!("{slug} {kind} should be accepted, got {e:?}"));
+    }
+}
+
+/// The dashboard used to send the button LABEL (`"DISMISS"`) instead of its
+/// backend verb kind (`"dismiss"`) — that must still be rejected, not silently
+/// coerced.
+#[tokio::test]
+async fn act_on_alert_rejects_the_button_label_instead_of_its_kind() {
+    let db = seeded();
+    let err = act_on_alert(&db, "a1", "DISMISS", today())
+        .await
+        .expect_err("a label, not a kind, must be rejected");
+    assert!(
+        matches!(err, phosk_core::error::PhoskError::Invalid(_)),
+        "expected Invalid, got {err:?}"
+    );
+}
+
+/// A kind that is a legal backend verb in general, but not one of THIS alert's
+/// own actions, must be rejected — a2 (Groceries) has no RAISE CAP / "apply"
+/// button.
+#[tokio::test]
+async fn act_on_alert_rejects_a_kind_the_alert_does_not_offer() {
+    let db = seeded();
+    let err = act_on_alert(&db, "a2", "apply", today())
+        .await
+        .expect_err("apply is not one of a2's actions");
+    assert!(
+        matches!(err, phosk_core::error::PhoskError::Invalid(_)),
+        "expected Invalid, got {err:?}"
+    );
+    // And the cap was left untouched.
+    let cap = db
+        .category_cap_by_name("Groceries")
+        .await
+        .expect("cap read")
+        .cap
+        .expect("Groceries has a cap");
+    let seeded_cap = seeded()
+        .category_cap_by_name("Groceries")
+        .await
+        .expect("cap read")
+        .cap
+        .expect("Groceries has a cap");
+    assert_eq!(cap, seeded_cap, "rejected apply must not raise the cap");
+}
+
+/// A stale press on an alert the user already dismissed (e.g. a second tab)
+/// must not still act: RAISE CAP on a dismissed a1 is Invalid, cap untouched.
+#[tokio::test]
+async fn act_on_a_dismissed_alert_is_invalid() {
+    let db = seeded();
+    act_on_alert(&db, "a1", "dismiss", today())
+        .await
+        .expect("dismiss ok");
+    let before = db.category_cap_by_name("Going out").await.expect("cap").cap;
+    let err = act_on_alert(&db, "a1", "apply", today())
+        .await
+        .expect_err("a dismissed alert takes no further action");
+    assert!(
+        matches!(err, phosk_core::error::PhoskError::Invalid(_)),
+        "expected Invalid, got {err:?}"
+    );
+    let after = db.category_cap_by_name("Going out").await.expect("cap").cap;
+    assert_eq!(before, after, "the cap must not move");
+}
+
+/// Dismiss every persisted alert through the action the list itself offers,
+/// so the list falls back to rule-generated alerts.
+async fn dismiss_every_persisted_alert(db: &MemoryDb) {
+    for a in db.alerts().await.expect("persisted alerts") {
+        act_on_alert(db, &a.slug, "dismiss", today())
+            .await
+            .unwrap_or_else(|e| panic!("dismiss {} should succeed, got {e:?}", a.slug));
+    }
+}
+
+/// Every non-navigate button the list offers — persisted or rule-generated —
+/// must be accepted by `act_on_alert` (F1 revision: generated `gen-*` alerts
+/// used to offer RAISE CAP / DISMISS that always failed NotFound). Each
+/// press runs on a fresh copy of the state that produced the list, since the
+/// actions mutate it.
+#[tokio::test]
+async fn every_offered_non_navigate_action_is_accepted() {
+    for dismiss_persisted in [false, true] {
+        let db = seeded();
+        if dismiss_persisted {
+            dismiss_every_persisted_alert(&db).await;
+        }
+        let list = alerts(&db, today()).await.expect("alerts ok");
+        if dismiss_persisted {
+            assert!(
+                !list.is_empty() && list.iter().all(|a| a.id.starts_with("gen-")),
+                "with every persisted alert dismissed the seeded list must fall \
+                 back to generated alerts, got {list:?}"
+            );
+        }
+        for a in &list {
+            for act in a.actions.iter().filter(|act| act.kind != "navigate") {
+                let fresh = seeded();
+                if dismiss_persisted {
+                    dismiss_every_persisted_alert(&fresh).await;
+                }
+                act_on_alert(&fresh, &a.id, &act.kind, today())
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("{} {} is offered but rejected: {e:?}", a.id, act.kind)
+                    });
+            }
+        }
+    }
+}
+
+/// A rule-generated alert (no persisted row) offers only VIEW until generated
+/// alerts can be persisted: nothing else it could offer would be accepted.
+#[tokio::test]
+async fn generated_alerts_offer_only_navigation() {
+    let db = synth("DINING", 10_000, 420_000, vec![(naive(2026, 6, 5), 13_000)]);
+    let list = alerts(&db, naive(2026, 6, 10)).await.expect("alerts ok");
+    assert!(!list.is_empty(), "the over-budget rule fires");
+    for a in &list {
+        assert_eq!(a.actions, vec![action("VIEW", "navigate")], "{}", a.id);
+    }
 }
 
 // ── target deep-link ──────────────────────────────────────────────────────────
@@ -506,6 +667,8 @@ async fn alert_dto_round_trips_as_camel_case_json() {
     assert_eq!(json["tone"], "alert");
     assert_eq!(json["tag"], "GOING OUT");
     assert!(json["actions"].is_array());
+    assert_eq!(json["actions"][0]["label"], "VIEW");
+    assert_eq!(json["actions"][0]["kind"], "navigate");
     assert!(
         json.get("amount").is_none() && json.get("amountCentimes").is_none(),
         "AlertDto carries no money field"

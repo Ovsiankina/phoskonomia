@@ -155,11 +155,16 @@ pub struct SettingsSummaryDto {
     pub model: String,
 }
 
+/// Key prefix of the per-category colour tokens `/categories` stores through the
+/// preference port (`category_colour.<slug>`). Those rows are not `/config`
+/// settings, so [`settings_summary`] leaves them out of both counts.
+pub const CATEGORY_COLOUR_PREFIX: &str = "category_colour.";
+
 /// List every preference as a [`PreferenceDto`].
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to answer.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>, PhoskError> {
     let prefs = db.preferences().await?;
     Ok(prefs
@@ -177,12 +182,14 @@ pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>,
 /// The `/config` header summary: preference counts + active engine/model labels.
 ///
 /// `changed_count` = preferences whose `provenance.source == UserModified`.
+/// Category colour rows ([`CATEGORY_COLOUR_PREFIX`]) count in neither.
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to answer.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummaryDto, PhoskError> {
-    let prefs = db.preferences().await?;
+    let mut prefs = db.preferences().await?;
+    prefs.retain(|p| !p.key.starts_with(CATEGORY_COLOUR_PREFIX));
     let total_preferences = u32::try_from(prefs.len()).unwrap_or(u32::MAX);
     let changed_count = u32::try_from(
         prefs
@@ -206,7 +213,7 @@ pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummar
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to persist.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn set_preference(
     db: &dyn DatabaseAdapter,
     key: &str,
@@ -219,7 +226,7 @@ pub async fn set_preference(
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to persist.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(), PhoskError> {
     let default_value = match default_for(key) {
         Some(v) => v.to_owned(),
@@ -244,7 +251,7 @@ pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(),
 /// # Errors
 /// Returns a [`PhoskError`] only on an underlying store failure other than
 /// `NotFound` (an unset / unparseable preference is the default, not an error).
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all)]
 pub async fn momentum_baseline_cycles(db: &dyn DatabaseAdapter) -> Result<u32, PhoskError> {
     match db.preference("momentum_baseline_cycles").await {
         Ok(pref) => Ok(pref

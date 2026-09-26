@@ -300,7 +300,6 @@ pub async fn top_shops(
         })
         .collect();
 
-    tracing::debug!(max_total = %max_total, "composed top-shops DTO");
     Ok(TopShopsDto { shops, max_total })
 }
 

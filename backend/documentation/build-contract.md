@@ -541,7 +541,7 @@ pub async fn category_detail(db: &dyn DatabaseAdapter, as_of: NaiveDate, name: &
 pub async fn category_transactions(db: &dyn DatabaseAdapter, as_of: NaiveDate, name: &str) -> Result<Vec<CategoryTxnDto>, PhoskError>;
 pub async fn alerts(db: &dyn DatabaseAdapter, as_of: NaiveDate) -> Result<Vec<AlertDto>, PhoskError>;
 pub async fn set_cap(db: &dyn DatabaseAdapter, name: &str, cap: Option<Money>) -> Result<(), PhoskError>;
-pub async fn act_on_alert(db: &dyn DatabaseAdapter, alert: &str, action: &str) -> Result<(), PhoskError>;
+pub async fn act_on_alert(db: &dyn DatabaseAdapter, alert: &str, action: &str, as_of: NaiveDate) -> Result<(), PhoskError>;
 ```
 
 Derived (per category):

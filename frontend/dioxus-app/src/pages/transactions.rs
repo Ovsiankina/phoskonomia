@@ -25,6 +25,10 @@
 //!   * Low-confidence lines (< 0.7) wear the design system's CAUTION treatment
 //!     (`--warn`): a flagged row rule, an amber dot and name. Coral stays the
 //!     page's single signal moment.
+//!   * NEW (page header) opens the manual-entry form (`NewTransactionForm`),
+//!     which saves through `create_transaction`; on success the form closes
+//!     and the list refetches. The design export has no NEW control; it sits
+//!     next to the CSV export as an indigo `gbtn`.
 //!   * The AI RE-READ nudge button still has no server fn (it POSTed the dead
 //!     REST layer), so its handler only `stop_propagation`s.
 //!   * F3's `TxnLineDto` always carries a concrete `line_total`/`confidence`
@@ -37,6 +41,8 @@
 use dioxus::prelude::*;
 use phosk_core::money::Money;
 
+use crate::components::edit_transaction::TxnActions;
+use crate::components::new_transaction::NewTransactionForm;
 use crate::components::prims::{Dot, ScannerBg};
 use crate::components::shell::{AiPanel, Sig, SigOcc, SignalPanel, TopBar};
 use crate::components::states::Awaiting;
@@ -74,10 +80,12 @@ fn hz_period(h: &str) -> &'static str {
     }
 }
 
-/// Whether a reading is below the review threshold — the same `< 0.7` rule as
-/// `phosk_model::Provenance::is_low_confidence` on the backend.
+/// Whether a reading is below the review threshold — delegates to
+/// `phosk_model::is_low_confidence`, the single source of truth this crate
+/// shares with the backend (including how a NaN/out-of-range reading is
+/// treated as low-confidence, never as confident).
 fn is_low_conf(c: f64) -> bool {
-    c < 0.7
+    phosk_model::is_low_confidence(c)
 }
 
 /// Confidence tone (React `ConfDot`): `>=0.85` ok, `>=0.7` blue, else `warn`.
@@ -86,12 +94,12 @@ fn is_low_conf(c: f64) -> bool {
 /// than coral (`alert`): several flagged lines must not multiply the page's one
 /// coral moment.
 fn conf_tone(c: f64) -> &'static str {
-    if c >= 0.85 {
-        "ok"
-    } else if !is_low_conf(c) {
-        "blue"
-    } else {
+    if is_low_conf(c) {
         "warn"
+    } else if c >= 0.85 {
+        "ok"
+    } else {
+        "blue"
     }
 }
 
@@ -902,6 +910,10 @@ fn ReceiptItem(
 /// Lines are reviewable here too. A saved correction tells the page
 /// (`on_changed`), which bumps [`LinesRev`]: the lines and the detail (average
 /// confidence) refetch here, and so do the accordion rows open underneath.
+///
+/// EDIT / DELETE of the whole transaction ([`TxnActions`]) sit under the
+/// meta row: `on_edited` hands the page the patched row, `on_deleted` lets it
+/// close this overlay.
 #[component]
 fn ReceiptScreen(
     t: TransactionDto,
@@ -909,11 +921,22 @@ fn ReceiptScreen(
     on_close: EventHandler<()>,
     on_select_sig: EventHandler<String>,
     on_changed: EventHandler<()>,
+    on_edited: EventHandler<TransactionDto>,
+    on_deleted: EventHandler<()>,
 ) -> Element {
     let id = t.id.clone();
     let id2 = t.id.clone();
     let receipt_id = t.id.clone();
     let mut editing = use_signal(|| Option::<usize>::None);
+    // Guards against the T11 write race between an EDIT/DELETE save here and a
+    // line correction below: `edit_transaction` re-inserts the line list it
+    // read earlier, so a line fix landing mid-save would be silently reverted.
+    // `txn_open` blocks a line pick while the EDIT/DELETE panel is open;
+    // `txn_busy` blocks this screen's own close (backdrop and ✕) while a
+    // save/delete is in flight, so it can't be dropped with no refresh to
+    // show for it.
+    let mut txn_open = use_signal(|| false);
+    let mut txn_busy = use_signal(|| false);
     let rev = try_use_context::<LinesRev>();
     let lines_res = use_resource(move || {
         track_lines_rev(rev);
@@ -967,9 +990,15 @@ fn ReceiptScreen(
     } else {
         t.item_count.to_string()
     };
-    let conf_pct = avg_conf.map_or(0, |c| (c * 100.0).round() as i64);
+    let conf_pct = avg_conf.map_or(0, |c| {
+        if c.is_nan() {
+            0
+        } else {
+            ((c * 100.0).round().clamp(0.0, 100.0)) as i64
+        }
+    });
     let conf_w = format!("{conf_pct}%");
-    let conf_bar_bg = if avg_conf.is_some_and(|c| c >= 0.85) {
+    let conf_bar_bg = if avg_conf.is_some_and(|c| !is_low_conf(c) && c >= 0.85) {
         "var(--ok)"
     } else {
         "var(--warn)"
@@ -981,7 +1010,11 @@ fn ReceiptScreen(
     let sigs_word = if sigs_count > 1 { "signals" } else { "signal" };
 
     rsx! {
-        div { class: "rscreen-back", onclick: move |_| on_close.call(()),
+        div {
+            class: "rscreen-back",
+            onclick: move |_| if !txn_busy() {
+                on_close.call(());
+            },
             div {
                 class: "rscreen",
                 onclick: move |e: Event<MouseData>| e.stop_propagation(),
@@ -994,7 +1027,9 @@ fn ReceiptScreen(
                     span {
                         class: "x",
                         title: "Close",
-                        onclick: move |_| on_close.call(()),
+                        onclick: move |_| if !txn_busy() {
+                            on_close.call(());
+                        },
                         "✕"
                     }
                 }
@@ -1047,6 +1082,16 @@ fn ReceiptScreen(
                             }
                             span { class: "badge", "{badge_str}" }
                         }
+                        TxnActions {
+                            key: "{t.id}",
+                            t: t.clone(),
+                            itemised: has_lines || t.item_count > 0,
+                            line_editing: editing().is_some(),
+                            on_open_change: move |open| txn_open.set(open),
+                            on_busy_change: move |busy| txn_busy.set(busy),
+                            on_edited,
+                            on_deleted,
+                        }
                         div { class: "conf-sum",
                             span { "READING CONFIDENCE" }
                             div { class: "bar",
@@ -1091,6 +1136,9 @@ fn ReceiptScreen(
                                     index: i,
                                     editing: editing() == Some(i),
                                     on_pick: move |pick: usize| {
+                                        if txn_open() {
+                                            return;
+                                        }
                                         let next = if editing() == Some(pick) { None } else { Some(pick) };
                                         editing.set(next);
                                     },
@@ -1164,6 +1212,7 @@ pub fn TransactionsPage() -> Element {
     let mut detail = use_signal(|| Option::<TransactionDto>::None);
     let mut sel = use_signal(|| Option::<String>::None);
     let mut drawer_sig = use_signal(|| false);
+    let mut adding = use_signal(|| false);
 
     // ---- filters → list params (changing any re-fetches the list) ----
     let mut horizon = use_signal(|| "MONTH".to_string());
@@ -1193,6 +1242,25 @@ pub fn TransactionsPage() -> Element {
             q: q(),
         };
         list_transactions(filter)
+    });
+
+    // An open detail follows the refetched list (after an EDIT the list has
+    // the server's own row, e.g. the new date label). A row that left the
+    // filtered list keeps the snapshot `on_edited` patched in.
+    use_effect(move || {
+        let fresh = txns
+            .read()
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|l| {
+                let open = detail.peek().as_ref().map(|t| t.id.clone())?;
+                l.transactions.iter().find(|t| t.id == open).cloned()
+            });
+        if let Some(row) = fresh {
+            if detail.peek().as_ref() != Some(&row) {
+                detail.set(Some(row));
+            }
+        }
     });
 
     // ---- read resources into local snapshots ----
@@ -1292,7 +1360,26 @@ pub fn TransactionsPage() -> Element {
                                         " · {period_label}"
                                     }
                                 }
-                                crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Transactions }
+                                div { class: "txn-acts",
+                                    button {
+                                        class: "gbtn p",
+                                        disabled: adding(),
+                                        onclick: move |_| adding.set(true),
+                                        "+ NEW"
+                                    }
+                                    crate::components::csv_export::CsvExport { kind: crate::data::csv_export::CsvExportKind::Transactions }
+                                }
+                            }
+
+                            if adding() {
+                                NewTransactionForm {
+                                    on_close: move |()| adding.set(false),
+                                    on_saved: move |()| {
+                                        adding.set(false);
+                                        txns.restart();
+                                        lines_rev += 1;
+                                    },
+                                }
                             }
 
                             FilterBar {
@@ -1398,6 +1485,18 @@ pub fn TransactionsPage() -> Element {
                         txns.restart();
                         lines_rev += 1;
                     },
+                    on_edited: move |row: TransactionDto| {
+                        detail.set(Some(row));
+                        txns.restart();
+                        lines_rev += 1;
+                    },
+                    on_deleted: move |()| {
+                        if let Some(gone) = detail.take() {
+                            open_ids.write().retain(|id| *id != gone.id);
+                        }
+                        txns.restart();
+                        lines_rev += 1;
+                    },
                 }
             }
         }
@@ -1419,5 +1518,50 @@ fn AiPanelTxn(
             on_toggle: move |()| on_toggle.call(()),
             on_track: move |id: String| on_track.call(id),
         }
+    }
+}
+
+#[cfg(test)]
+mod is_low_conf_tests {
+    use super::is_low_conf;
+
+    #[test]
+    fn nan_confidence_is_low_confidence() {
+        assert!(is_low_conf(f64::NAN));
+    }
+
+    #[test]
+    fn a_normal_confident_value_is_not_low_confidence() {
+        assert!(!is_low_conf(0.9));
+    }
+}
+
+#[cfg(test)]
+mod conf_tone_tests {
+    use super::conf_tone;
+
+    #[test]
+    fn out_of_range_confidence_is_warn() {
+        assert_eq!(conf_tone(1.5), "warn");
+    }
+
+    #[test]
+    fn positive_infinity_confidence_is_warn() {
+        assert_eq!(conf_tone(f64::INFINITY), "warn");
+    }
+
+    #[test]
+    fn nan_confidence_is_warn() {
+        assert_eq!(conf_tone(f64::NAN), "warn");
+    }
+
+    #[test]
+    fn high_confidence_is_ok() {
+        assert_eq!(conf_tone(0.9), "ok");
+    }
+
+    #[test]
+    fn mid_confidence_is_blue() {
+        assert_eq!(conf_tone(0.75), "blue");
     }
 }

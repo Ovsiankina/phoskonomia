@@ -50,6 +50,53 @@ pub async fn upsert_debt_inserts_then_replaces(db: &dyn DatabaseAdapter) -> Outc
     Ok(())
 }
 
+/// A deleted debt is gone from every read path, takes its payments with it,
+/// leaves its neighbours alone, and cannot be deleted twice.
+pub async fn delete_debt_removes_it_and_its_payments(db: &dyn DatabaseAdapter) -> Outcome {
+    let before = db.debts().await?;
+    let victim = first(before.clone())?;
+    let keeper = before
+        .get(1)
+        .ok_or("the seed has more than one debt")?
+        .clone();
+    let keeper_payments = db.debt_payments(keeper.id).await?;
+    db.record_debt_payment(DebtPayment {
+        id: PaymentId::new(),
+        debt_id: victim.id,
+        date: date(2027, 5, 9)?,
+        amount: Money::from_centimes(12_500),
+        balance_after: Money::from_centimes(87_500),
+        provenance: Provenance::user_entered(),
+    })
+    .await?;
+    ensure(
+        !db.debt_payments(victim.id).await?.is_empty(),
+        "the victim has a payment history",
+    )?;
+
+    db.delete_debt(victim.id).await?;
+
+    let after = db.debts().await?;
+    ensure_eq(&after.len(), &(before.len() - 1), "count after delete")?;
+    ensure(
+        after.iter().all(|d| d.id != victim.id),
+        "debts() no longer lists it",
+    )?;
+    ensure_not_found(db.debt(victim.id).await, "debt(deleted)")?;
+    ensure_not_found(db.debt_by_slug(&victim.slug).await, "by slug")?;
+    ensure(
+        db.debt_payments(victim.id).await?.is_empty(),
+        "its payments went with it",
+    )?;
+    ensure_eq(
+        &db.debt_payments(keeper.id).await?,
+        &keeper_payments,
+        "another debt's payments untouched",
+    )?;
+    ensure_eq(&db.debt(keeper.id).await?, &keeper, "keeper intact")?;
+    ensure_not_found(db.delete_debt(victim.id).await, "delete again")
+}
+
 /// Payments are scoped to their debt and come back oldest→newest.
 pub async fn debt_payments_are_scoped_and_oldest_first(db: &dyn DatabaseAdapter) -> Outcome {
     let other = first(db.debts().await?)?;
@@ -112,4 +159,43 @@ pub async fn upsert_personal_iou_inserts_then_replaces(db: &dyn DatabaseAdapter)
     ensure(after.contains(&iou), "the replaced IOU is listed verbatim")?;
     let kept = before.iter().all(|i| after.contains(i));
     ensure(kept, "other IOUs untouched")
+}
+
+/// The list and the slug lookup return the same records; an unknown slug is
+/// `NotFound`.
+pub async fn personal_iou_lookup_by_slug_agrees(db: &dyn DatabaseAdapter) -> Outcome {
+    let ious = db.personal_ious().await?;
+    for i in &ious {
+        ensure_eq(&db.personal_iou_by_slug(&i.slug).await?, i, "by slug")?;
+    }
+    ensure_not_found(
+        db.personal_iou_by_slug("conf-none").await,
+        "personal_iou_by_slug(unknown)",
+    )
+}
+
+/// A deleted IOU is gone from every read path, leaves its neighbours alone, and
+/// cannot be deleted twice.
+pub async fn delete_personal_iou_removes_it(db: &dyn DatabaseAdapter) -> Outcome {
+    let before = db.personal_ious().await?;
+    let victim = first(before.clone())?;
+
+    db.delete_personal_iou(victim.id).await?;
+
+    let after = db.personal_ious().await?;
+    ensure_eq(&after.len(), &(before.len() - 1), "count after delete")?;
+    ensure(
+        after.iter().all(|i| i.id != victim.id),
+        "personal_ious() no longer lists it",
+    )?;
+    ensure_not_found(
+        db.personal_iou_by_slug(&victim.slug).await,
+        "by slug after delete",
+    )?;
+    let kept = before
+        .iter()
+        .filter(|i| i.id != victim.id)
+        .all(|i| after.contains(i));
+    ensure(kept, "other IOUs untouched")?;
+    ensure_not_found(db.delete_personal_iou(victim.id).await, "delete again")
 }

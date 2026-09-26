@@ -18,13 +18,17 @@
 //!
 //! * [`cycle`]        — shared current-cycle window (`CycleDto`); every page top-bar uses it.
 //! * [`ai`]           — shared assistant (feed/status read, live chat) for the left `AiPanel`.
+//! * [`approvals`]    — the AI approval queue: pending receipt proposals, approve / reject / bulk.
 //! * [`signals`]      — shared item-signal vocabulary (`SignalDto`, candidates, movers).
 //! * [`dashboard`]    — the composed dashboard read (REAL backend via `phosk_insights`).
 //! * [`transactions`] — receipt list, lines, receipt detail.
 //! * [`budgets`]      — envelopes, budget totals, allocation, category inspector.
+//! * [`categories`]   — `/categories`: list, create, rename, delete, merge, colour token.
 //! * [`csv_export`]   — CSV export of the transactions / budget / subscriptions lists.
 //! * [`subscriptions`]— standing charges, stats, billing sweep, detail.
 //! * [`debts`]        — open balances, stats, payoff trajectory, IOU ledger, detail.
+//! * [`new_transaction`] — the "NEW transaction" form: manual entry (T36).
+//! * [`edit_transaction`] — EDIT / DELETE from the receipt detail (T37).
 //! * [`settings`]     — `/config` preferences: get / set / reset (REAL via `phosk_settings`).
 //! * [`analytics`]    — spend history, momentum, weekday rhythm, movers, insights.
 //!
@@ -50,11 +54,17 @@ use phosk_core::money::Money;
 
 pub mod ai;
 pub mod analytics;
+pub mod approvals;
 pub mod budgets;
+pub mod categories;
 pub mod csv_export;
 pub mod cycle;
 pub mod dashboard;
+pub mod debt_actions;
 pub mod debts;
+pub mod edit_transaction;
+pub mod new_transaction;
+pub mod receipt;
 pub mod settings;
 pub mod signals;
 pub mod subscriptions;
@@ -242,13 +252,11 @@ impl Session {
     }
 
     /// The encrypted photo-storage port the receipt pipeline writes to.
-    #[allow(dead_code)]
     pub(crate) fn storage(&self) -> &dyn phosk_adapter_storage::PhotoStorage {
         self.stack.storage.as_ref()
     }
 
     /// The OCR port the receipt pipeline transcribes with.
-    #[allow(dead_code)]
     pub(crate) fn ocr(&self) -> &dyn phosk_adapter_ocr::OcrAdapter {
         self.stack.ocr.as_ref()
     }
@@ -271,20 +279,70 @@ impl Session {
 /// ever see the `&dyn _` PORT objects [`Session`] exposes.
 ///
 /// # Errors
-/// Propagates any [`phosk_core::error::PhoskError`] from adapter construction
-/// (store open, key setup, model-name validation), surfaced to the client as a
-/// [`dioxus::prelude::ServerFnError`].
+/// A failure from adapter construction (store open, key setup, model-name
+/// validation) can carry a filesystem path or other operational detail (e.g.
+/// a "surreal file engine at {path}: …" error), so it is mapped by
+/// [`session_err`], which **never** passes the carried text through.
 #[cfg(feature = "server-deps")]
 pub(crate) async fn build_session() -> Result<Session, dioxus::prelude::ServerFnError> {
     let stack = composition::stack()
         .await
-        .map_err(|e| dioxus::prelude::ServerFnError::new(e.to_string()))?
+        .map_err(|e| session_err(&e))?
         .clone();
     Ok(Session { stack })
 }
 
-// Foundation API consumed by page/data agents; unused until they land.
-#[allow(dead_code)]
+/// The fixed, user-facing texts [`server_err`] and [`session_err`] return.
+/// Keyed on the error variant only: no carried string ever reaches a screen.
+#[cfg(feature = "server-deps")]
+pub(crate) mod server_msg {
+    pub(crate) const INVALID: &str =
+        "That request could not be completed. Check the values and try again.";
+    pub(crate) const NOT_FOUND: &str = "That item no longer exists.";
+    pub(crate) const OVERFLOW: &str = "That amount is too large.";
+    pub(crate) const INVALID_DATE: &str = "That date is not valid.";
+    pub(crate) const UNAVAILABLE: &str = "The app server is unavailable. Please try again.";
+}
+
+/// Maps a [`build_session`] failure (adapter construction) to the client:
+/// always [`server_msg::UNAVAILABLE`] at 503, whatever the variant or text.
+#[cfg(feature = "server-deps")]
+pub(crate) fn session_err(_err: &phosk_core::error::PhoskError) -> dioxus::prelude::ServerFnError {
+    dioxus::prelude::ServerFnError::ServerError {
+        message: server_msg::UNAVAILABLE.to_owned(),
+        code: 503,
+        details: None,
+    }
+}
+
+/// Sanitising boundary from [`phosk_core::error::PhoskError`] to the
+/// [`dioxus::prelude::ServerFnError`] a `#[server]` fn returns to the client.
+///
+/// `PhoskError` has no storage/internal variant, so adapters report driver,
+/// I/O and transport failures as `Invalid` (e.g. `phosk_db_surreal`'s
+/// "surreal {context}: {driver error}", `phosk_storage_fs`'s "read blob: {io
+/// error}" with a path) and put internal ids or caller input in `NotFound`
+/// ("receipt {id}", "storage ref {token}"). The carried string is therefore
+/// written for a log line, never a screen: every variant becomes one fixed
+/// [`server_msg`] text at its own [`PhoskError::http_status`]. Pages that need
+/// a field-specific message produce it client-side or via their own
+/// fixed-text mapper (e.g. `budgets::cap_store_error`).
+#[cfg(feature = "server-deps")]
+pub(crate) fn server_err(err: phosk_core::error::PhoskError) -> dioxus::prelude::ServerFnError {
+    use phosk_core::error::PhoskError;
+    let message = match &err {
+        PhoskError::Invalid(_) => server_msg::INVALID,
+        PhoskError::NotFound(_) => server_msg::NOT_FOUND,
+        PhoskError::Overflow(_) => server_msg::OVERFLOW,
+        PhoskError::InvalidDate(_) => server_msg::INVALID_DATE,
+    };
+    dioxus::prelude::ServerFnError::ServerError {
+        message: message.to_owned(),
+        code: err.http_status(),
+        details: None,
+    }
+}
+
 /// Swiss-currency formatter: apostrophe thousands, dot decimal, `−` for negatives
 /// (e.g. `CHF 1'234.50` renders `1’234.50`, `-12.5` renders `−12.50`).
 ///
@@ -336,7 +394,6 @@ pub fn chf(amount: Money, dp: usize) -> String {
 }
 
 /// `chf` with the default 2 decimal places (the common case).
-#[allow(dead_code)]
 #[must_use]
 pub fn chf2(amount: Money) -> String {
     chf(amount, 2)

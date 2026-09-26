@@ -129,7 +129,7 @@ async fn get_transaction_lines_returns_the_parsed_receipt() {
         .find(|x| x.name == "Bread (unclear)")
         .expect("line");
     assert!(
-        bread.confidence < 0.7,
+        phosk_model::is_low_confidence(bread.confidence),
         "the flagged line keeps its confidence"
     );
 
@@ -167,8 +167,8 @@ async fn get_transaction_describes_the_receipt_source() {
 
 #[tokio::test]
 async fn unknown_receipts_are_not_found() {
-    let msg = server_error(get_transaction("t404".into()).await);
-    assert!(msg.starts_with("not found"), "{msg}");
-    let msg = server_error(get_transaction_lines("t404".into()).await);
-    assert!(msg.starts_with("not found"), "{msg}");
+    let msg = server_error(get_transaction("t404".into()).await, 404);
+    assert_eq!(msg, crate::data::server_msg::NOT_FOUND);
+    let msg = server_error(get_transaction_lines("t404".into()).await, 404);
+    assert_eq!(msg, crate::data::server_msg::NOT_FOUND);
 }

@@ -177,7 +177,7 @@ pub async fn list_transactions(filter: TxnFilter) -> Result<TransactionListDto, 
             svc_filter,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(crate::data::server_err)?;
         Ok(TransactionListDto {
             transactions: list.transactions.into_iter().map(map_txn).collect(),
             summary: TxnSummaryDto {
@@ -207,7 +207,7 @@ pub async fn get_transaction_lines(id: String) -> Result<TxnLinesDto, ServerFnEr
         let session = crate::data::build_session().await?;
         let l = phosk_ledger::line_items::transaction_lines(session.db(), &id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(TxnLinesDto {
             lines: l.lines.into_iter().map(map_line).collect(),
             sigs: l.sigs,
@@ -231,7 +231,7 @@ pub async fn get_transaction(id: String) -> Result<TxnDetailDto, ServerFnError> 
         let session = crate::data::build_session().await?;
         let d = phosk_ledger::transactions::transaction_detail(session.db(), &id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(TxnDetailDto {
             id: d.id,
             avg_confidence: d.avg_confidence,
@@ -491,19 +491,14 @@ pub(crate) async fn correct_transaction_line_with(
 /// magnitude caps. Every message here is written for the user; store errors are
 /// mapped by kind and never echo their internal detail.
 #[cfg(feature = "server-deps")]
-mod line_fix {
+pub(crate) mod line_fix {
     use dioxus::prelude::ServerFnError;
     use phosk_core::error::PhoskError;
+    // The caps are the ledger service's own; the NEW transaction form reads
+    // the two label caps through this module, so they are re-exported here.
+    pub(crate) use phosk_ledger::line_items::{MAX_CATEGORY_CHARS, MAX_NAME_CHARS};
+    use phosk_ledger::line_items::{MAX_QTY, MAX_UNIT_PRICE_CENTIMES};
     use phosk_model::LineItem;
-
-    /// Longest accepted item name, in characters.
-    const MAX_NAME_CHARS: usize = 120;
-    /// Longest accepted category, in characters.
-    const MAX_CATEGORY_CHARS: usize = 60;
-    /// Largest accepted quantity (pieces or weighed units).
-    const MAX_QTY: f64 = 100_000.0;
-    /// Largest accepted unit price: CHF 1'000'000, in centimes.
-    const MAX_UNIT_PRICE_CENTIMES: i64 = 100_000_000;
 
     /// How far apart (relative) two quantities may be and still count as the
     /// same displayed value. A float that crossed the wire twice can land an
@@ -566,8 +561,16 @@ mod line_fix {
         raw == stored || raw.trim() == stored
     }
 
+    /// A date input's `YYYY-MM-DD` value, or the field's fixed hint. Shared by
+    /// the NEW form (required) and the EDIT form (optional: the caller decides
+    /// what a blank value means), so both refuse an unparsable date the same way.
+    pub(crate) fn parse_date(raw: &str) -> Result<chrono::NaiveDate, String> {
+        chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map_err(|_| "Date: pick a date.".to_owned())
+    }
+
     /// A trimmed, non-empty, bounded, control-character-free label.
-    fn label(raw: &str, what: &str, max_chars: usize) -> Result<String, PhoskError> {
+    pub(crate) fn label(raw: &str, what: &str, max_chars: usize) -> Result<String, PhoskError> {
         let value = raw.trim();
         if value.is_empty() {
             return Err(invalid(format!("{what} cannot be empty.")));
@@ -587,7 +590,7 @@ mod line_fix {
 
     /// A typed quantity: plain digits with an optional `.`/`,` decimal part (no
     /// sign, exponent, `inf` or `NaN`). The bounds are [`check_qty`]'s job.
-    fn parse_qty(raw: &str) -> Result<f64, PhoskError> {
+    pub(crate) fn parse_qty(raw: &str) -> Result<f64, PhoskError> {
         const SHAPE: &str = "Quantity must be a number such as 2 or 0.5.";
         let text = raw.trim().replace(',', ".");
         let (whole, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
@@ -598,7 +601,7 @@ mod line_fix {
     }
 
     /// A new quantity must be greater than zero and at most [`MAX_QTY`].
-    fn check_qty(qty: f64) -> Result<f64, PhoskError> {
+    pub(crate) fn check_qty(qty: f64) -> Result<f64, PhoskError> {
         if qty <= 0.0 {
             return Err(invalid("Quantity must be greater than zero."));
         }
@@ -661,7 +664,7 @@ mod line_fix {
     }
 
     /// A new unit price must be at most [`MAX_UNIT_PRICE_CENTIMES`].
-    fn check_unit_price(centimes: i64) -> Result<i64, PhoskError> {
+    pub(crate) fn check_unit_price(centimes: i64) -> Result<i64, PhoskError> {
         if centimes > MAX_UNIT_PRICE_CENTIMES {
             return Err(unit_price_too_large());
         }

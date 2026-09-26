@@ -17,7 +17,7 @@
     clippy::case_sensitive_file_extension_comparisons,
     clippy::cast_possible_truncation
 )]
-//! RED tests for `phosk_ledger::signals` — tracked item-signals, candidates,
+//! Tests for `phosk_ledger::signals` — tracked item-signals, candidates,
 //! movers, the inspector detail, and the track/dismiss write paths.
 //!
 //! These assert the EXACT wire-spec shapes (`dioxus-app/src/data/signals.rs`)
@@ -27,8 +27,8 @@
 //! (candidate). Every money field is exact i64 centimes; momentum (`deltaPct`)
 //! is the trailing-N=3 baseline; `series` is the 12-point spark.
 //!
-//! All six service bodies are `todo!()`, so each test COMPILES and FAILS at
-//! runtime (the panic from `todo!()`). No production logic lives here.
+//! All six services are implemented against `&dyn DatabaseAdapter`, so each test
+//! exercises the real read/write paths against the seed.
 
 use chrono::NaiveDate;
 use phosk_adapter_db::DatabaseAdapter;

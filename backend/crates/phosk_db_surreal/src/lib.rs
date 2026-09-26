@@ -29,9 +29,10 @@
 //!
 //! A table scan comes back in record-key order, not insertion order, so reads
 //! the port documents as oldest→newest sort on the entity's date after
-//! filtering. Rows that share a date keep scan order. Chat messages are the
-//! exception: they are stamped with an insertion sequence (see [`store`]) and
-//! read back in append order, same-day lines included.
+//! filtering. Rows that share a date keep scan order. Chat messages, budget
+//! changes and a receipt's line items are the exception: they are stamped with
+//! an insertion sequence (see [`store`]) and read back in insertion order,
+//! same-day lines included; an in-place edit keeps its position.
 //!
 //! ## No panics (ADR §0)
 //!
@@ -65,10 +66,13 @@ use phosk_id::{
     SubscriptionId, SuggestionId,
 };
 use phosk_model::{
-    AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
-    CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Provenance, Receipt, Signal, SignalOccurrence, Source, Subscription, Transaction,
+    AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
+    CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
+    PersonalIou, Preference, Provenance, Receipt, ReceiptProposal, Signal, SignalOccurrence,
+    Source, Subscription, Transaction,
 };
+use std::sync::Arc;
+
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
 
@@ -83,9 +87,13 @@ use store::{Bucket, Store};
 /// Holds an owned [`Surreal<Db>`] connection to an embedded engine. Cheap to
 /// share behind `Arc<dyn DatabaseAdapter>`; the handle is internally
 /// reference-counted, so [`Clone`] yields another view of the same store.
+///
+/// A file-backed handle also holds the store's exclusive lockfile (see
+/// [`SurrealDb::file`]); it is released when the last clone is dropped.
 #[derive(Debug, Clone)]
 pub struct SurrealDb {
     store: Store,
+    _lock: Option<Arc<std::fs::File>>,
 }
 
 impl SurrealDb {
@@ -108,13 +116,54 @@ impl SurrealDb {
     /// Open a **file-backed** store (`kv-surrealkv`) at `path` — the prod path.
     /// The directory is created by the engine if absent. Runs the migration.
     ///
+    /// **Single process.** surrealkv serves reads from an in-memory index built
+    /// at open and takes no inter-process lock, so a second process opening the
+    /// same store would never see the first one's writes and both would append
+    /// to one commit log. This constructor therefore takes an exclusive lock on
+    /// `<path>.lock` (held until the last clone of the handle is dropped) and
+    /// refuses to open a store that is already open — e.g. the daemon in
+    /// `PHOSK_INGEST=pipeline` mode and the UI cannot share one data dir.
+    ///
     /// # Errors
-    /// [`PhoskError`] if the engine fails to open `path` or the migration fails.
+    /// [`PhoskError::Invalid`] if the store is already open (in this or another
+    /// process), the lockfile cannot be created, the engine fails to open
+    /// `path`, or the migration fails.
     pub async fn file(path: &str) -> Result<Self, PhoskError> {
+        let lock = Self::lock_store(path)?;
         let db = Surreal::new::<SurrealKv>(path)
             .await
             .map_err(|e| PhoskError::Invalid(format!("surreal file engine at {path}: {e}")))?;
-        Self::init(db).await
+        Ok(Self {
+            _lock: Some(Arc::new(lock)),
+            ..Self::init(db).await?
+        })
+    }
+
+    /// Create `<path>.lock` and take an exclusive, non-blocking lock on it.
+    fn lock_store(path: &str) -> Result<std::fs::File, PhoskError> {
+        let lock_path = format!("{path}.lock");
+        if let Some(parent) = std::path::Path::new(&lock_path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| PhoskError::Invalid(format!("create store dir: {e}")))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| PhoskError::Invalid(format!("open store lockfile: {e}")))?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => Err(PhoskError::Invalid(format!(
+                "surreal store at {path} is already open by another process or handle \
+                 (the UI and the pipeline daemon cannot share one data dir)"
+            ))),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(PhoskError::Invalid(format!("lock store: {e}")))
+            }
+        }
     }
 
     /// Select the namespace/database and run the versioned migration.
@@ -125,9 +174,12 @@ impl SurrealDb {
             .map_err(|e| PhoskError::Invalid(format!("surreal use ns/db: {e}")))?;
         let store = Store::new(db);
         migrate::run(&store).await?;
-        // Chat lines written from now on must sort after the stored ones.
+        // Chat lines, budget changes and receipt lines written from now on
+        // must sort after the stored ones.
         store.resume_sequence(Bucket::Message).await?;
-        Ok(Self { store })
+        store.resume_sequence(Bucket::BudgetChange).await?;
+        store.resume_sequence(Bucket::LineItem).await?;
+        Ok(Self { store, _lock: None })
     }
 
     /// An in-memory adapter loaded with the deterministic Swiss seed — the
@@ -178,7 +230,7 @@ impl SurrealDb {
 impl DatabaseAdapter for SurrealDb {
     // ── Dashboard slice ────────────────────────────────────────────────────────
 
-    #[tracing::instrument(level = "debug", skip(self))]
+    #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
     async fn transactions_between(
         &self,
         from: NaiveDate,
@@ -205,6 +257,27 @@ impl DatabaseAdapter for SurrealDb {
             .get::<BudgetConfig>(Bucket::BudgetConfig, "singleton")
             .await?
             .ok_or_else(|| PhoskError::NotFound("budget config".to_owned()))
+    }
+
+    async fn set_budget_config(
+        &self,
+        cfg: BudgetConfig,
+        change: BudgetChange,
+    ) -> Result<(), PhoskError> {
+        // History first, keyed by the change id: a retry after a fault
+        // between the two writes replaces the entry instead of duplicating it.
+        self.store
+            .put_in_sequence(Bucket::BudgetChange, &change.id.to_string(), &change)
+            .await?;
+        self.store
+            .put(Bucket::BudgetConfig, "singleton", &cfg)
+            .await
+    }
+
+    async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError> {
+        self.store
+            .list_in_insertion_order(Bucket::BudgetChange, |c: &BudgetChange| c.at)
+            .await
     }
 
     // ── Ledger ─────────────────────────────────────────────────────────────────
@@ -241,7 +314,12 @@ impl DatabaseAdapter for SurrealDb {
     }
 
     async fn line_items(&self, receipt: ReceiptId) -> Result<Vec<LineItem>, PhoskError> {
-        let all: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        // Lines written before sequencing (no `seq`) have no recorded order;
+        // they come first, by id, so the result is at least deterministic.
+        let all: Vec<LineItem> = self
+            .store
+            .list_in_insertion_order(Bucket::LineItem, |l: &LineItem| l.id.to_string())
+            .await?;
         Ok(all
             .into_iter()
             .filter(|l| l.receipt_id == receipt)
@@ -282,7 +360,7 @@ impl DatabaseAdapter for SurrealDb {
         for mut line in lines {
             line.receipt_id = stable_id;
             self.store
-                .put(Bucket::LineItem, &line.id.to_string(), &line)
+                .put_in_sequence(Bucket::LineItem, &line.id.to_string(), &line)
                 .await?;
         }
 
@@ -304,6 +382,30 @@ impl DatabaseAdapter for SurrealDb {
         Ok(stable_id)
     }
 
+    async fn delete_receipt(&self, id: ReceiptId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self
+            .store
+            .get::<Receipt>(Bucket::Receipt, &key)
+            .await?
+            .is_none()
+        {
+            return Err(PhoskError::NotFound(format!("receipt {id}")));
+        }
+        let lines: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
+        for line in lines.into_iter().filter(|l| l.receipt_id == id) {
+            self.store
+                .delete(Bucket::LineItem, &line.id.to_string())
+                .await?;
+        }
+        // The dashboard projection `insert_receipt` maintains is keyed on the
+        // receipt id, so deleting that key removes the spend from
+        // `transactions_between` without touching the seeded rows (keyed on a
+        // content digest). Mirrors `phosk_db_memory`.
+        self.store.delete(Bucket::Transaction, &key).await?;
+        self.store.delete(Bucket::Receipt, &key).await
+    }
+
     async fn update_line_item(&self, line: LineItem) -> Result<(), PhoskError> {
         let key = line.id.to_string();
         if self
@@ -314,7 +416,10 @@ impl DatabaseAdapter for SurrealDb {
         {
             return Err(PhoskError::NotFound(format!("line item {}", line.id)));
         }
-        self.store.put(Bucket::LineItem, &key, &line).await
+        // In place: the line keeps its position on the receipt.
+        self.store
+            .put_keeping_sequence(Bucket::LineItem, &key, &line)
+            .await
     }
 
     async fn record_correction(&self, ev: CorrectionEvent) -> Result<(), PhoskError> {
@@ -447,7 +552,7 @@ impl DatabaseAdapter for SurrealDb {
         for mut l in lines.into_iter().filter(|l| l.category == from) {
             l.category = to.to_owned();
             self.store
-                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .put_keeping_sequence(Bucket::LineItem, &l.id.to_string(), &l)
                 .await?;
         }
         let subs: Vec<Subscription> = self.store.list(Bucket::Subscription).await?;
@@ -526,7 +631,7 @@ impl DatabaseAdapter for SurrealDb {
         for mut l in lines.into_iter().filter(|l| l.category == from) {
             l.category = into.to_owned();
             self.store
-                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .put_keeping_sequence(Bucket::LineItem, &l.id.to_string(), &l)
                 .await?;
             moved = moved.saturating_add(1);
         }
@@ -599,7 +704,7 @@ impl DatabaseAdapter for SurrealDb {
             l.category = new.name.clone();
             l.provenance = Provenance::user_modified();
             self.store
-                .put(Bucket::LineItem, &l.id.to_string(), &l)
+                .put_keeping_sequence(Bucket::LineItem, &l.id.to_string(), &l)
                 .await?;
             moved = moved.saturating_add(1);
         }
@@ -642,6 +747,18 @@ impl DatabaseAdapter for SurrealDb {
             .await?
             .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
         a.status = status.to_owned();
+        self.store.put(Bucket::Alert, &key, &a).await
+    }
+
+    async fn snooze_alert(&self, id: AlertId, snooze: AlertSnooze) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        let mut a = self
+            .store
+            .get::<Alert>(Bucket::Alert, &key)
+            .await?
+            .ok_or_else(|| PhoskError::NotFound(format!("alert {id}")))?;
+        a.status = "snoozed".to_owned();
+        a.snooze = Some(snooze);
         self.store.put(Bucket::Alert, &key, &a).await
     }
 
@@ -740,6 +857,21 @@ impl DatabaseAdapter for SurrealDb {
         Ok(id)
     }
 
+    async fn delete_debt(&self, id: DebtId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self.store.get::<Debt>(Bucket::Debt, &key).await?.is_none() {
+            return Err(PhoskError::NotFound(format!("debt {id}")));
+        }
+        // Cascade: a payment without its debt is an orphan.
+        let payments: Vec<DebtPayment> = self.store.list(Bucket::DebtPayment).await?;
+        for p in payments.iter().filter(|p| p.debt_id == id) {
+            self.store
+                .delete(Bucket::DebtPayment, &p.id.to_string())
+                .await?;
+        }
+        self.store.delete(Bucket::Debt, &key).await
+    }
+
     async fn record_debt_payment(&self, p: DebtPayment) -> Result<(), PhoskError> {
         self.store
             .put(Bucket::DebtPayment, &p.id.to_string(), &p)
@@ -750,12 +882,32 @@ impl DatabaseAdapter for SurrealDb {
         self.store.list(Bucket::PersonalIou).await
     }
 
+    async fn personal_iou_by_slug(&self, slug: &str) -> Result<PersonalIou, PhoskError> {
+        let all: Vec<PersonalIou> = self.store.list(Bucket::PersonalIou).await?;
+        all.into_iter()
+            .find(|i| i.slug == slug)
+            .ok_or_else(|| PhoskError::NotFound(format!("personal iou slug {slug}")))
+    }
+
     async fn upsert_personal_iou(&self, i: PersonalIou) -> Result<PersonalIouId, PhoskError> {
         let id = i.id;
         self.store
             .put(Bucket::PersonalIou, &id.to_string(), &i)
             .await?;
         Ok(id)
+    }
+
+    async fn delete_personal_iou(&self, id: PersonalIouId) -> Result<(), PhoskError> {
+        let key = id.to_string();
+        if self
+            .store
+            .get::<PersonalIou>(Bucket::PersonalIou, &key)
+            .await?
+            .is_none()
+        {
+            return Err(PhoskError::NotFound(format!("personal iou {id}")));
+        }
+        self.store.delete(Bucket::PersonalIou, &key).await
     }
 
     // ── Analytics support ──────────────────────────────────────────────────────
@@ -912,6 +1064,20 @@ impl DatabaseAdapter for SurrealDb {
             .ok_or_else(|| PhoskError::NotFound(format!("suggestion {id}")))?;
         s.status = status.to_owned();
         self.store.put(Bucket::AiSuggestion, &key, &s).await
+    }
+
+    async fn stage_receipt_proposal(&self, p: ReceiptProposal) -> Result<(), PhoskError> {
+        let key = p.suggestion_id.to_string();
+        self.store.put(Bucket::ReceiptProposal, &key, &p).await
+    }
+
+    async fn receipt_proposal(
+        &self,
+        id: SuggestionId,
+    ) -> Result<Option<ReceiptProposal>, PhoskError> {
+        self.store
+            .get(Bucket::ReceiptProposal, &id.to_string())
+            .await
     }
 }
 
@@ -1100,6 +1266,41 @@ mod tests {
             .map(|m| m.text)
             .collect();
         assert_eq!(texts, ["older legacy", "newer legacy", "sequenced"]);
+    }
+
+    /// Line items stored before sequencing (no `seq`) still load, ahead of
+    /// sequenced lines of the same receipt and ordered among themselves by id.
+    #[tokio::test]
+    async fn unsequenced_line_items_load_first() {
+        let db = SurrealDb::memory().await.expect("mem engine");
+        let receipt_id = ReceiptId::new();
+        let line = |name: &str| LineItem {
+            id: LineItemId::new(),
+            receipt_id,
+            name: name.to_owned(),
+            qty: 1.0,
+            unit_price: Money::from_centimes(100),
+            line_total: Money::from_centimes(100),
+            category: "Groceries".to_owned(),
+            signal_id: None,
+            provenance: Provenance::user_modified(),
+        };
+        let mut legacy = vec![line("legacy one"), line("legacy two")];
+        legacy.sort_by_key(|l| l.id.to_string());
+        for l in legacy.iter().rev() {
+            db.store
+                .put(Bucket::LineItem, &l.id.to_string(), l)
+                .await
+                .expect("legacy write");
+        }
+        let fresh = line("sequenced");
+        db.store
+            .put_in_sequence(Bucket::LineItem, &fresh.id.to_string(), &fresh)
+            .await
+            .expect("sequenced write");
+        let mut want = legacy;
+        want.push(fresh);
+        assert_eq!(db.line_items(receipt_id).await.expect("lines"), want);
     }
 
     /// A tiny random suffix so concurrent test runs use distinct store dirs

@@ -81,7 +81,9 @@ pub(crate) async fn load(store: &Store) -> Result<(), PhoskError> {
         store.put(Bucket::Receipt, &r.id.to_string(), r).await?;
     }
     for l in &lines {
-        store.put(Bucket::LineItem, &l.id.to_string(), l).await?;
+        store
+            .put_in_sequence(Bucket::LineItem, &l.id.to_string(), l)
+            .await?;
     }
 
     // ── Signals ─────────────────────────────────────────────────────────────
@@ -705,6 +707,7 @@ fn alerts() -> Result<Vec<Alert>, PhoskError> {
             target: Some("going-out".to_owned()),
             actions: vec![view.clone(), raise, dismiss.clone()],
             created,
+            snooze: None,
         },
         Alert {
             id: AlertId::new(),
@@ -719,6 +722,7 @@ fn alerts() -> Result<Vec<Alert>, PhoskError> {
             target: Some("groceries".to_owned()),
             actions: vec![view.clone(), dismiss.clone()],
             created,
+            snooze: None,
         },
         Alert {
             id: AlertId::new(),
@@ -733,6 +737,7 @@ fn alerts() -> Result<Vec<Alert>, PhoskError> {
             target: None,
             actions: vec![view, snooze, dismiss],
             created,
+            snooze: None,
         },
     ])
 }

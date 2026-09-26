@@ -34,9 +34,10 @@ use phosk_id::{
     SubscriptionId, SuggestionId,
 };
 use phosk_model::{
-    AiSuggestion, Alert, BudgetConfig, BudgetHistory, Category, CategoryCap, Charge, Chat,
-    CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message, PersonalIou, Preference,
-    Receipt, Signal, SignalOccurrence, Subscription, Transaction,
+    AiSuggestion, Alert, AlertSnooze, BudgetChange, BudgetConfig, BudgetHistory, Category,
+    CategoryCap, Charge, Chat, CorrectionEvent, Debt, DebtPayment, FeedItem, LineItem, Message,
+    PersonalIou, Preference, Receipt, ReceiptProposal, Signal, SignalOccurrence, Subscription,
+    Transaction,
 };
 
 /// The single fat database port (ADR-000): one async, object-safe trait covering
@@ -84,6 +85,36 @@ pub trait DatabaseAdapter: Send + Sync {
     /// Returns a [`PhoskError`] if no config exists or the store fails to
     /// answer.
     async fn budget_config(&self) -> Result<BudgetConfig, PhoskError>;
+
+    /// Replace the global [`BudgetConfig`] with `cfg` and append `change` to
+    /// the budget-change history, in one call (two writes, not a transaction).
+    ///
+    /// The history entry is written first and keyed by its id, so a fault
+    /// between the two writes leaves an entry the caller can re-send unchanged
+    /// (re-appending the same id replaces it where it stands rather than
+    /// duplicating or moving it) — the history never misses a config it did
+    /// not record.
+    ///
+    /// `cfg` is a whole record the caller built from an earlier
+    /// [`budget_config`](Self::budget_config) read; nothing here checks that
+    /// read is still current. Two concurrent read-modify-writes of different
+    /// fields can therefore lose one field's value while the history records
+    /// both changes.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store rejects either write.
+    async fn set_budget_config(
+        &self,
+        cfg: BudgetConfig,
+        change: BudgetChange,
+    ) -> Result<(), PhoskError>;
+
+    /// The global budget's change history, oldest→newest in append order
+    /// (same-day entries included). An untouched store yields an empty `Vec`.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store fails to answer.
+    async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError>;
 
     // ── Ledger ───────────────────────────────────────────────────────────────
 
@@ -141,6 +172,25 @@ pub trait DatabaseAdapter: Send + Sync {
         r: Receipt,
         lines: Vec<LineItem>,
     ) -> Result<ReceiptId, PhoskError>;
+
+    /// Remove a [`Receipt`], its [`LineItem`]s and its dashboard projection.
+    ///
+    /// The counterpart of [`insert_receipt`](Self::insert_receipt): whatever
+    /// that call wrote, this one takes back. A deleted spend must stop counting
+    /// everywhere at once — it leaves [`Self::all_receipts`],
+    /// [`Self::receipts_between`], [`Self::line_items`] (no orphan lines) and
+    /// the [`Transaction`] projection behind [`Self::transactions_between`], so
+    /// the cycle aggregates cannot keep a ghost amount. Seeded demo rows of the
+    /// dashboard view have no receipt behind them and are not touched.
+    ///
+    /// The correction audit log ([`Self::record_correction`]) is deliberately
+    /// **not** cleaned up: it records what happened, including to records that
+    /// no longer exist.
+    ///
+    /// # Errors
+    /// - [`PhoskError::NotFound`] if no receipt carries that id.
+    /// - [`PhoskError`] if the store rejects a write.
+    async fn delete_receipt(&self, id: ReceiptId) -> Result<(), PhoskError>;
 
     /// Replace a stored [`LineItem`] with a corrected version.
     ///
@@ -363,6 +413,14 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError::NotFound`] if no such alert.
     async fn update_alert_status(&self, id: AlertId, status: &str) -> Result<(), PhoskError>;
 
+    /// Snooze an alert: set its `status` to `"snoozed"` and its `snooze` to
+    /// `snooze`, leaving every other field alone. Snoozing an already-snoozed
+    /// alert replaces the previous term.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no such alert.
+    async fn snooze_alert(&self, id: AlertId, snooze: AlertSnooze) -> Result<(), PhoskError>;
+
     // ── Recurring ────────────────────────────────────────────────────────────
 
     /// Every [`Subscription`].
@@ -442,6 +500,16 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError`] if the store rejects the write.
     async fn upsert_debt(&self, d: Debt) -> Result<DebtId, PhoskError>;
 
+    /// Delete a [`Debt`] **and every [`DebtPayment`] recorded against it** — a
+    /// payment has no meaning without the debt it reduced, so the cascade is
+    /// part of the port contract rather than the caller's job (mirrors
+    /// [`delete_subscription`](Self::delete_subscription)).
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no debt has that id (so a second delete of
+    /// the same id reports it), or any store failure.
+    async fn delete_debt(&self, id: DebtId) -> Result<(), PhoskError>;
+
     /// Record a [`DebtPayment`].
     ///
     /// # Errors
@@ -454,11 +522,25 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError`] if the store fails to answer.
     async fn personal_ious(&self) -> Result<Vec<PersonalIou>, PhoskError>;
 
+    /// One [`PersonalIou`] by its stable `slug` — the id the UI addresses it by.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no IOU has that slug, or any store failure.
+    async fn personal_iou_by_slug(&self, slug: &str) -> Result<PersonalIou, PhoskError>;
+
     /// Insert or update a [`PersonalIou`]; returns its id.
     ///
     /// # Errors
     /// [`PhoskError`] if the store rejects the write.
     async fn upsert_personal_iou(&self, i: PersonalIou) -> Result<PersonalIouId, PhoskError>;
+
+    /// Delete a [`PersonalIou`]. Nothing hangs off an IOU, so there is no
+    /// cascade.
+    ///
+    /// # Errors
+    /// [`PhoskError::NotFound`] if no IOU has that id (so a second delete of
+    /// the same id reports it), or any store failure.
+    async fn delete_personal_iou(&self, id: PersonalIouId) -> Result<(), PhoskError>;
 
     // ── Analytics support ────────────────────────────────────────────────────
 
@@ -547,11 +629,13 @@ pub trait DatabaseAdapter: Send + Sync {
 
     /// Append a machine-proposed [`AiSuggestion`] to the approval queue.
     ///
-    /// This is the ONLY write path AI-derived proposals take: the receipt-intake
-    /// pipeline and the AI write-tools build a candidate suggestion (always
-    /// `status == "open"`) and enqueue it here for human approval — they never
-    /// mutate domain state directly. Idempotency is the caller's concern (the
-    /// pipeline keys off a content hash); this method appends what it is given.
+    /// AI-derived proposals only ever reach the store through the approval queue
+    /// — this method, plus [`Self::stage_receipt_proposal`] for a receipt
+    /// suggestion's payload: the receipt-intake pipeline and the AI write-tools
+    /// build a candidate suggestion (always `status == "open"`) and enqueue it
+    /// here for human approval — they never mutate domain state directly.
+    /// Idempotency is the caller's concern (the pipeline keys off a content
+    /// hash); this method appends what it is given.
     ///
     /// # Errors
     /// [`PhoskError`] if the store rejects the write.
@@ -566,6 +650,24 @@ pub trait DatabaseAdapter: Send + Sync {
         id: SuggestionId,
         status: &str,
     ) -> Result<(), PhoskError>;
+
+    /// Stage the payload of a `kind == "receipt"` suggestion, keyed by its
+    /// `suggestion_id`. Staging is NOT a ledger write: the receipt only reaches
+    /// the ledger when the approval service applies it. Re-staging the same
+    /// suggestion id replaces the stored payload.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store rejects the write.
+    async fn stage_receipt_proposal(&self, p: ReceiptProposal) -> Result<(), PhoskError>;
+
+    /// The staged [`ReceiptProposal`] of a suggestion, or `None` if none was staged.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store fails to answer.
+    async fn receipt_proposal(
+        &self,
+        id: SuggestionId,
+    ) -> Result<Option<ReceiptProposal>, PhoskError>;
 }
 
 #[cfg(test)]
@@ -577,8 +679,8 @@ mod tests {
 
     /// A minimal stand-in adapter proving the trait is object-safe and that an
     /// `Arc<dyn DatabaseAdapter>` can be built from it and driven. This is *not*
-    /// the real in-memory adapter (that is `phosk_db_memory`, a later stage) —
-    /// it returns fixed, trivial answers just to exercise the contract shape.
+    /// the real in-memory adapter (that is `phosk_db_memory`) — it returns
+    /// fixed, trivial answers just to exercise the contract shape.
     struct DummyAdapter;
 
     #[async_trait]
@@ -603,6 +705,16 @@ mod tests {
                 monthly_budget: Money::from_chf(4200, 0).expect("valid budget"),
                 savings_target: Money::from_chf(900, 0).expect("valid target"),
             })
+        }
+        async fn set_budget_config(
+            &self,
+            _cfg: BudgetConfig,
+            _change: BudgetChange,
+        ) -> Result<(), PhoskError> {
+            Ok(())
+        }
+        async fn budget_changes(&self) -> Result<Vec<BudgetChange>, PhoskError> {
+            Ok(Vec::new())
         }
 
         async fn receipts_between(
@@ -630,6 +742,9 @@ mod tests {
             _lines: Vec<LineItem>,
         ) -> Result<ReceiptId, PhoskError> {
             Ok(ReceiptId::new())
+        }
+        async fn delete_receipt(&self, _id: ReceiptId) -> Result<(), PhoskError> {
+            Ok(())
         }
         async fn update_line_item(&self, _line: LineItem) -> Result<(), PhoskError> {
             Ok(())
@@ -707,6 +822,9 @@ mod tests {
         async fn update_alert_status(&self, _id: AlertId, _status: &str) -> Result<(), PhoskError> {
             Ok(())
         }
+        async fn snooze_alert(&self, _id: AlertId, _snooze: AlertSnooze) -> Result<(), PhoskError> {
+            Ok(())
+        }
         async fn subscriptions(&self) -> Result<Vec<Subscription>, PhoskError> {
             Ok(Vec::new())
         }
@@ -749,14 +867,23 @@ mod tests {
         async fn upsert_debt(&self, _d: Debt) -> Result<DebtId, PhoskError> {
             Ok(DebtId::new())
         }
+        async fn delete_debt(&self, _id: DebtId) -> Result<(), PhoskError> {
+            Ok(())
+        }
         async fn record_debt_payment(&self, _p: DebtPayment) -> Result<(), PhoskError> {
             Ok(())
         }
         async fn personal_ious(&self) -> Result<Vec<PersonalIou>, PhoskError> {
             Ok(Vec::new())
         }
+        async fn personal_iou_by_slug(&self, _slug: &str) -> Result<PersonalIou, PhoskError> {
+            Err(PhoskError::NotFound("personal iou".to_owned()))
+        }
         async fn upsert_personal_iou(&self, _i: PersonalIou) -> Result<PersonalIouId, PhoskError> {
             Ok(PersonalIouId::new())
+        }
+        async fn delete_personal_iou(&self, _id: PersonalIouId) -> Result<(), PhoskError> {
+            Ok(())
         }
         async fn spend_history(
             &self,
@@ -811,6 +938,15 @@ mod tests {
             _status: &str,
         ) -> Result<(), PhoskError> {
             Ok(())
+        }
+        async fn stage_receipt_proposal(&self, _p: ReceiptProposal) -> Result<(), PhoskError> {
+            Ok(())
+        }
+        async fn receipt_proposal(
+            &self,
+            _id: SuggestionId,
+        ) -> Result<Option<ReceiptProposal>, PhoskError> {
+            Ok(None)
         }
     }
 

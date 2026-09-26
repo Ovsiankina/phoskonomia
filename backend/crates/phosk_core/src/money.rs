@@ -132,7 +132,7 @@ impl Money {
     }
 
     /// Checked addition. [`PhoskError::Overflow`] on i64 overflow, never wrapping.
-    #[tracing::instrument(level = "trace", skip_all, fields(lhs = self.centimes, rhs = rhs.centimes))]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn checked_add(self, rhs: Self) -> Result<Self, PhoskError> {
         self.centimes
             .checked_add(rhs.centimes)
@@ -146,7 +146,7 @@ impl Money {
     }
 
     /// Checked subtraction. [`PhoskError::Overflow`] on i64 overflow, never wrapping.
-    #[tracing::instrument(level = "trace", skip_all, fields(lhs = self.centimes, rhs = rhs.centimes))]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn checked_sub(self, rhs: Self) -> Result<Self, PhoskError> {
         self.centimes
             .checked_sub(rhs.centimes)

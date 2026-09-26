@@ -328,8 +328,13 @@ pub struct SubscriptionDetailDto {
     pub recent: Vec<SubChargeDto>,
     /// AI guidance.
     pub guidance: SubGuidanceDto,
-    /// `true` for an AI candidate (CONFIRM/DISMISS instead of cancel).
+    /// `true` for an OPEN AI candidate, not yet dismissed or confirmed
+    /// (CONFIRM/DISMISS instead of cancel).
     pub candidate: bool,
+    /// The lifecycle transitions the backend accepts right now, primary first.
+    pub actions: Vec<crate::lifecycle::LifecycleAction>,
+    /// Whether a charge can be recorded against it right now.
+    pub can_record_charge: bool,
 }
 
 /// Subscription list options for `list_subscriptions`.
@@ -378,7 +383,7 @@ pub struct RecurringListDto {
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from the port or the derivations.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(as_of = %as_of))]
 pub async fn list_subscriptions(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
@@ -403,7 +408,7 @@ pub async fn list_subscriptions(
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from the port or the derivations.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(as_of = %as_of))]
 pub async fn subscription_stats(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
@@ -473,7 +478,7 @@ pub async fn subscription_stats(
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from the port or the derivations.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(as_of = %as_of))]
 pub async fn billing_sweep(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
@@ -560,7 +565,7 @@ pub async fn billing_sweep(
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if `slug` resolves to no subscription;
 /// otherwise propagates any port/derivation error.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(as_of = %as_of))]
 pub async fn subscription_detail(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,
@@ -597,13 +602,19 @@ pub async fn subscription_detail(
         },
     };
 
-    let candidate = source_str(sub.source) == "llm";
+    // Reuses the detector's own openness test so this flag and the
+    // detection feed (`recurring_detect::detect`) can never disagree about
+    // which records are still-open candidates.
+    let candidate = crate::recurring_detect::is_open_candidate(&sub);
+    let actions = crate::lifecycle::available_actions(&sub, &charges, as_of)?;
 
     Ok(SubscriptionDetailDto {
         subscription: dto,
         recent,
         guidance,
         candidate,
+        actions,
+        can_record_charge: crate::lifecycle::can_record_charge(&sub),
     })
 }
 
@@ -611,7 +622,7 @@ pub async fn subscription_detail(
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from the port or the derivations.
-#[tracing::instrument(skip(db))]
+#[tracing::instrument(skip_all, fields(as_of = %as_of))]
 pub async fn recurring_summary(
     db: &dyn DatabaseAdapter,
     as_of: NaiveDate,

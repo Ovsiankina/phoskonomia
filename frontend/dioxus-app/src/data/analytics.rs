@@ -196,7 +196,7 @@ pub async fn get_spend_history() -> Result<SpendHistoryDto, ServerFnError> {
             HISTORY_CYCLES,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(crate::data::server_err)?;
         Ok(SpendHistoryDto {
             points: h.points.into_iter().map(map_point).collect(),
         })
@@ -221,7 +221,7 @@ pub async fn get_spend_stats() -> Result<SpendStatsDto, ServerFnError> {
             HISTORY_CYCLES,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(crate::data::server_err)?;
         Ok(SpendStatsDto {
             months: s.months,
             avg: s.avg,
@@ -252,7 +252,7 @@ pub async fn get_category_momentum() -> Result<Vec<MomentumDto>, ServerFnError> 
         let cards =
             phosk_insights::analytics::category_momentum(session.db(), crate::data::today())
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .map_err(crate::data::server_err)?;
         Ok(cards
             .into_iter()
             .map(|c| MomentumDto {
@@ -282,7 +282,7 @@ pub async fn get_rhythm() -> Result<RhythmDto, ServerFnError> {
         let session = crate::data::build_session().await?;
         let r = phosk_insights::analytics::weekday_rhythm(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(RhythmDto {
             weekday: r
                 .weekday
@@ -320,7 +320,7 @@ pub async fn get_analytics_insight() -> Result<AnalyticsInsightDto, ServerFnErro
         let session = crate::data::build_session().await?;
         let i = phosk_insights::analytics::analytics_insight(session.db(), crate::data::today())
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(crate::data::server_err)?;
         Ok(AnalyticsInsightDto {
             model: i.model,
             text: i.text,

@@ -15,6 +15,8 @@ edition.workspace = true
 [dependencies]
 phosk_core = { path = "../phosk_core" }
 phosk_adapter_db = { path = "../phosk_adapter_db" }
+# phosk_id: typed ids for the budget-change history entries this crate writes.
+phosk_id = { path = "../phosk_id" }
 # phosk_model: the budgets/alerts service DTOs serialize their Money fields via
 # `phosk_model::money_centimes` (the locked exact-i64-centimes wire form).
 phosk_model = { path = "../phosk_model" }
