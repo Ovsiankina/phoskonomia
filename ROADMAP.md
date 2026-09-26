@@ -65,7 +65,7 @@ Each task: `#[server]` fn(s) in `src/data/` + the page interaction + loading/err
 - [ ] **T38** — Subscriptions create / edit / lifecycle actions (needs: T15)
 - [ ] **T39** — Debts + personal IOUs create / edit / payments (needs: T17, T18)
 - [ ] **T40** — `/categories` route: list, create, rename, merge; token-seeded colour picker (no raw hex input) (needs: T13)
-- [ ] **T41** — `/receipt` route: photo upload → `intake_receipt` → per-line review screen (needs: T20)
+- [x] **T41** — `/receipt` route: photo upload → `intake_receipt` → per-line review screen (needs: T20)
 - [x] **T42** — Approval queue UI: pending AI proposals, approve / reject / bulk-approve (needs: T20)
 - [x] **T43** — Frontend tests: unit tests for `chf()`, data-layer view-struct mapping, and every `#[server]` fn against the memory stack (needs: T01)
 

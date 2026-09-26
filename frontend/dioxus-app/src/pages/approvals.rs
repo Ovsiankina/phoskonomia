@@ -45,7 +45,7 @@ impl Decision {
 
 /// The client-side text of a failed call: the server's fixed user-facing
 /// message, or a generic transport note (never a raw transport error).
-fn error_text(e: &ServerFnError) -> String {
+pub(crate) fn error_text(e: &ServerFnError) -> String {
     match e {
         ServerFnError::ServerError { message, .. } => message.clone(),
         _ => "Could not reach the server. Refresh to see the current state.".to_string(),
@@ -372,7 +372,7 @@ fn ProposalRow(
 /// Shop, date, total, then one line per proposed item with the amount it
 /// books (`line_total`), flagged when that is not `qty × unit`.
 #[component]
-fn ReceiptHead(receipt: ProposedReceiptDto) -> Element {
+pub(crate) fn ReceiptHead(receipt: ProposedReceiptDto) -> Element {
     let total = chf2(receipt.total);
     rsx! {
         div { class: "cand-id", style: "cursor:default",

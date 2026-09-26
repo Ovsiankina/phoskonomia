@@ -35,6 +35,9 @@ phosk_ai = { path = "../../backend/crates/phosk_ai", optional = true }
 # rule table the `data::settings` write fns validate user input against.
 # Server-only, like the services above.
 phosk_settings = { path = "../../backend/crates/phosk_settings", optional = true }
+# The zero-trust receipt intake behind `/receipt`: validates, strips EXIF,
+# stores encrypted, dedups and STAGES a proposal (it never books). Server-only.
+phosk_pipeline_receipt = { path = "../../backend/crates/phosk_pipeline_receipt", optional = true }
 # The L2 database PORT trait — the seam through which the server context (`Session`)
 # hands feature services a `&dyn DatabaseAdapter`. Server-only (the trait and the
 # concrete adapter live behind `server-deps`; neither enters the WASM client bundle).
@@ -93,7 +96,10 @@ uuid = { workspace = true, features = ["js"] }
 # backend crates: `tokio` drives the async `#[server]` fn tests and the
 # data-layer tests on a fresh seeded `MemoryDb` (`#[tokio::test]`),
 # `serde_json` asserts the view structs' wire form.
+# `async-trait` (workspace dep, the port traits' own) lets the `/receipt` tests
+# script an `LlmAdapter` with a fixed structured answer.
 [dev-dependencies]
+async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 
@@ -111,6 +117,7 @@ server-deps = [
     "dep:phosk_debts",
     "dep:phosk_ai",
     "dep:phosk_settings",
+    "dep:phosk_pipeline_receipt",
     "dep:phosk_adapter_db",
     "dep:phosk_db_memory",
     "dep:chrono",
