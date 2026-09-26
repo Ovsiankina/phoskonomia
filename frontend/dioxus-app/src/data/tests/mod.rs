@@ -20,6 +20,8 @@ mod ai;
 #[cfg(feature = "server")]
 mod analytics;
 #[cfg(feature = "server")]
+mod approvals;
+#[cfg(feature = "server")]
 mod budgets;
 #[cfg(feature = "server")]
 mod categories;

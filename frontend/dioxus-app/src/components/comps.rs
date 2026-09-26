@@ -95,6 +95,13 @@ pub fn phosk_pages() -> Vec<PhoskPage> {
             route: Route::AnalyticsPage {},
         },
         PhoskPage {
+            key: "APPROVALS",
+            abbr: "APPR",
+            glyph: "⊻",
+            desc: "Review AI receipt proposals",
+            route: Route::ApprovalsPage {},
+        },
+        PhoskPage {
             key: "CONFIG",
             abbr: "CFG",
             glyph: "⊙",
