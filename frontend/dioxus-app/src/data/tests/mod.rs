@@ -37,6 +37,8 @@ mod debts;
 mod edit_transaction;
 #[cfg(feature = "server")]
 mod new_transaction;
+#[cfg(feature = "server")]
+mod receipt;
 #[cfg(feature = "server-deps")]
 mod server_err;
 #[cfg(feature = "server")]

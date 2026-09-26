@@ -1670,6 +1670,7 @@ dependencies = [
 name = "dioxus-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dioxus",
  "phosk_adapter_db",
@@ -1687,6 +1688,7 @@ dependencies = [
  "phosk_model",
  "phosk_ocr_paddle",
  "phosk_ocr_vision",
+ "phosk_pipeline_receipt",
  "phosk_planning",
  "phosk_recurring",
  "phosk_settings",

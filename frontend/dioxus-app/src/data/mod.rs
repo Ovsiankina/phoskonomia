@@ -64,6 +64,7 @@ pub mod debt_actions;
 pub mod debts;
 pub mod edit_transaction;
 pub mod new_transaction;
+pub mod receipt;
 pub mod settings;
 pub mod signals;
 pub mod subscriptions;
@@ -251,13 +252,11 @@ impl Session {
     }
 
     /// The encrypted photo-storage port the receipt pipeline writes to.
-    #[allow(dead_code)]
     pub(crate) fn storage(&self) -> &dyn phosk_adapter_storage::PhotoStorage {
         self.stack.storage.as_ref()
     }
 
     /// The OCR port the receipt pipeline transcribes with.
-    #[allow(dead_code)]
     pub(crate) fn ocr(&self) -> &dyn phosk_adapter_ocr::OcrAdapter {
         self.stack.ocr.as_ref()
     }

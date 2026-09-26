@@ -102,6 +102,13 @@ pub fn phosk_pages() -> Vec<PhoskPage> {
             route: Route::ApprovalsPage {},
         },
         PhoskPage {
+            key: "RECEIPT",
+            abbr: "RCPT",
+            glyph: "⎙",
+            desc: "Upload & review a receipt photo",
+            route: Route::ReceiptPage {},
+        },
+        PhoskPage {
             key: "CONFIG",
             abbr: "CFG",
             glyph: "⊙",
