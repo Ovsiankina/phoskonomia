@@ -28,6 +28,8 @@ mod cycle;
 #[cfg(feature = "server")]
 mod dashboard;
 #[cfg(feature = "server")]
+mod debt_actions;
+#[cfg(feature = "server")]
 mod debts;
 #[cfg(feature = "server")]
 mod edit_transaction;

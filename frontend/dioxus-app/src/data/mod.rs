@@ -58,6 +58,7 @@ pub mod categories;
 pub mod csv_export;
 pub mod cycle;
 pub mod dashboard;
+pub mod debt_actions;
 pub mod debts;
 pub mod edit_transaction;
 pub mod new_transaction;
