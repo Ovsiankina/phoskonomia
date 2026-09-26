@@ -3,14 +3,22 @@
 
 use phosk_debts::{debts as svc, personal_ious};
 
-use super::support::{fresh_db, money, server_error as msg, today};
+use super::support::{fresh_db, money, server_error, today};
 use crate::data::debt_actions::{
     create_debt_with, create_iou_with, delete_debt_with, delete_iou_with, edit_debt_with,
     edit_iou_with, pay_debt_extra_with, pay_debt_with, pay_iou_with, settle_iou_with, DebtForm,
     IouForm, DEBT_KINDS,
 };
 use crate::data::debts::{map_debt, map_iou};
+use dioxus::prelude::ServerFnError;
 use phosk_db_memory::MemoryDb;
+
+/// The text of a refused action. Every `debt_actions` failure is one of its
+/// fixed texts built with `ServerFnError::new`, i.e. status 500, which
+/// `server_error` asserts along the way.
+fn msg<T: std::fmt::Debug>(r: Result<T, ServerFnError>) -> String {
+    server_error(r, 500)
+}
 
 fn form() -> DebtForm {
     DebtForm {
