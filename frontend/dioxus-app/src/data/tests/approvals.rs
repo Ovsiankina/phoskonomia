@@ -297,6 +297,20 @@ fn line_mismatch_rounds_once_to_centimes_with_one_centime_tolerance() {
     assert!(!line_mismatch(0.5, money(245), money(122)), "tolerance");
     assert!(line_mismatch(0.5, money(245), money(121)));
     assert!(line_mismatch(f64::NAN, money(245), money(245)));
+    // Out of the service's qty range: a mismatch, never a panic or a wrap.
+    assert!(line_mismatch(0.0, money(245), money(0)));
+    assert!(line_mismatch(-1.0, money(245), money(-245)));
+    assert!(line_mismatch(10_000.5, money(1), money(10_001)));
+    assert!(line_mismatch(f64::INFINITY, money(245), money(245)));
+    // Fractional quantities that have no exact binary form still round once.
+    assert!(!line_mismatch(0.1, money(1_005), money(101)), "100.5 → 101");
+    assert!(!line_mismatch(1.235, money(1_000), money(1_235)));
+    // Largest in-range product stays exact in integers.
+    assert!(!line_mismatch(
+        10_000.0,
+        money(10_000_000),
+        money(100_000_000_000)
+    ));
     assert!(line_mismatch(f64::INFINITY, money(245), money(245)));
 }
 

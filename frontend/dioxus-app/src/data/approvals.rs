@@ -195,7 +195,9 @@ pub async fn approve_receipt_proposals(
 #[cfg(feature = "server-deps")]
 use phosk_adapter_db::DatabaseAdapter;
 #[cfg(feature = "server-deps")]
-use phosk_ai::ai_approval::{is_unsafe_text_char, MAX_LINES, MAX_TEXT_CHARS, RECEIPT_KIND};
+use phosk_ai::ai_approval::{
+    is_unsafe_text_char, MAX_LINES, MAX_QTY, MAX_TEXT_CHARS, RECEIPT_KIND,
+};
 #[cfg(feature = "server-deps")]
 use phosk_core::error::PhoskError;
 
@@ -305,21 +307,30 @@ async fn resolve(
 }
 
 /// `qty × unit` rounded once to centimes (half away from zero) differs from
-/// `total` by more than one centime. Money stays integer; only the model's
-/// `f64` quantity forces one float product, which is exact at the service's
-/// bounds (`MAX_QTY × MAX_AMOUNT_CENTIMES` < 2^53). Non-finite → mismatch.
+/// `total` by more than one centime. Money stays integer: the model's `f64`
+/// quantity is quantized once to millionths and multiplied in `i128`, so no
+/// money amount ever passes through a float. A quantity that is not finite or
+/// outside `(0, MAX_QTY]` (the service's own bound) counts as a mismatch.
 #[cfg(feature = "server-deps")]
 pub(crate) fn line_mismatch(qty: f64, unit: Money, total: Money) -> bool {
-    #[allow(clippy::cast_precision_loss)] // |centimes| ≤ 2^53 at the service's bounds
-    let product = (qty * unit.centimes() as f64).round();
-    #[allow(clippy::cast_precision_loss)]
-    let fits = product.is_finite() && product.abs() < i64::MAX as f64;
-    if !fits {
+    if !qty.is_finite() || qty <= 0.0 || qty > MAX_QTY {
         return true;
     }
-    #[allow(clippy::cast_possible_truncation)] // finite, in range, already rounded
-    let expected = product as i64;
-    expected.abs_diff(total.centimes()) > 1
+    // In range, so `qty × 10⁶ ≤ 10¹⁰`: the cast cannot saturate.
+    let micro = i128::from((qty * 1_000_000.0).round() as i64);
+    let expected = div_round_half_away(i128::from(unit.centimes()) * micro, 1_000_000);
+    expected.abs_diff(i128::from(total.centimes())) > 1
+}
+
+/// `n / d` rounded half away from zero, in integers (`d > 0`).
+#[cfg(feature = "server-deps")]
+fn div_round_half_away(n: i128, d: i128) -> i128 {
+    let (q, r) = (n / d, n % d);
+    if 2 * r.abs() >= d {
+        q + n.signum()
+    } else {
+        q
+    }
 }
 
 #[cfg(feature = "server-deps")]
