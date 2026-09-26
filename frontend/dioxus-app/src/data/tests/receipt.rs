@@ -165,7 +165,7 @@ async fn an_oversize_upload_is_refused_before_intake() {
 
     let err = upload(&p, &receipt_llm(), &big).await;
 
-    assert_eq!(server_error(err), TOO_LARGE);
+    assert_eq!(server_error(err, 500), TOO_LARGE);
     assert_eq!(open_receipt_suggestions(&p.db).await, 0);
     assert!(p.storage.is_empty().expect("len"), "nothing stored");
 }
@@ -175,12 +175,12 @@ async fn non_image_bytes_are_refused_with_a_fixed_text() {
     let p = ports();
     for bytes in [b"%PDF-1.7 synthetic".as_slice(), b"just text".as_slice()] {
         assert_eq!(
-            server_error(upload(&p, &receipt_llm(), bytes).await),
+            server_error(upload(&p, &receipt_llm(), bytes).await, 500),
             NOT_JPEG_PNG
         );
     }
     assert_eq!(
-        server_error(upload(&p, &receipt_llm(), &[]).await),
+        server_error(upload(&p, &receipt_llm(), &[]).await, 500),
         NO_PHOTO
     );
     assert_eq!(open_receipt_suggestions(&p.db).await, 0);
@@ -193,7 +193,7 @@ async fn unusable_model_output_is_refused_without_staging() {
 
     let err = upload(&p, &hostile, &jpeg(3)).await;
 
-    assert_eq!(server_error(err), UNREADABLE);
+    assert_eq!(server_error(err, 500), UNREADABLE);
     assert_eq!(open_receipt_suggestions(&p.db).await, 0);
 }
 
@@ -203,7 +203,7 @@ async fn a_model_outage_does_not_blame_the_photo() {
 
     let err = upload(&p, &DownLlm, &jpeg(6)).await;
 
-    assert_eq!(server_error(err), UNREADABLE);
+    assert_eq!(server_error(err, 500), UNREADABLE);
     assert_eq!(open_receipt_suggestions(&p.db).await, 0);
 }
 
@@ -241,7 +241,7 @@ async fn images_intake_cannot_strip_are_refused_before_storage() {
     let p = ports();
     for (kind, bytes) in [("tiff", tiff_with_exif()), ("webp", webp_with_exif())] {
         assert_eq!(
-            server_error(upload(&p, &receipt_llm(), &bytes).await),
+            server_error(upload(&p, &receipt_llm(), &bytes).await, 500),
             NOT_JPEG_PNG,
             "{kind}"
         );
@@ -357,12 +357,12 @@ async fn the_streaming_read_stops_at_the_cap() {
     assert_eq!(at_cap.expect("at cap").len(), MAX_UPLOAD_BYTES);
 
     let over = read_capped(stream(None, vec![0; MAX_UPLOAD_BYTES + 1])).await;
-    assert_eq!(server_error(over), CUT);
+    assert_eq!(server_error(over, 500), CUT);
 }
 
 #[tokio::test]
 async fn a_declared_oversize_is_refused_before_reading() {
     let declared = u64::try_from(MAX_UPLOAD_BYTES + 1).expect("fits");
     let err = read_capped(stream(Some(declared), jpeg(10))).await;
-    assert_eq!(server_error(err), TOO_LARGE);
+    assert_eq!(server_error(err, 500), TOO_LARGE);
 }
