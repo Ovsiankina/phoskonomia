@@ -124,6 +124,10 @@ async fn an_edit_rewrites_the_named_fields_and_stamps_user_modified() {
 
     assert_eq!(edited.id, slug, "the slug is the stable identity");
     assert_eq!(edited.amount.centimes(), 1_220, "untouched by a field edit");
+    assert_eq!(
+        edited.date, "12 JUN",
+        "the caller gets the stored date's label, not the pre-edit one"
+    );
 
     let after = db.receipt_by_slug(&slug).await.expect("still stored");
     assert_eq!(after.id, before.id, "the receipt keeps its typed id");
@@ -180,6 +184,10 @@ async fn an_edit_that_changes_nothing_leaves_the_record_alone() {
     .expect("edit ok");
 
     assert!(edited.changed.is_empty(), "nothing actually changed");
+    assert_eq!(
+        edited.date, "10 JUN",
+        "a no-op edit still reports the record's real date"
+    );
     let after = db.receipt_by_slug(&slug).await.expect("stored");
     assert_eq!(
         after.provenance.source,

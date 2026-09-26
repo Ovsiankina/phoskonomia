@@ -30,6 +30,8 @@ mod dashboard;
 #[cfg(feature = "server")]
 mod debts;
 #[cfg(feature = "server")]
+mod edit_transaction;
+#[cfg(feature = "server")]
 mod new_transaction;
 #[cfg(feature = "server-deps")]
 mod server_err;

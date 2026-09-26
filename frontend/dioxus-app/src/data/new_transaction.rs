@@ -129,8 +129,7 @@ pub(crate) async fn create_transaction_with(
 /// the ledger's `Overflow` cannot be reached from this form. The ledger stays
 /// the authority and re-checks everything.
 #[cfg(feature = "server-deps")]
-mod entry {
-    use chrono::NaiveDate;
+pub(crate) mod entry {
     use dioxus::prelude::ServerFnError;
     use phosk_core::error::PhoskError;
     use phosk_core::money::Money;
@@ -138,7 +137,8 @@ mod entry {
 
     use super::{NewTxnForm, NewTxnLineForm};
     use crate::data::transactions::line_fix::{
-        check_qty, check_unit_price, label, parse_qty, MAX_CATEGORY_CHARS, MAX_NAME_CHARS,
+        check_qty, check_unit_price, label, parse_date, parse_qty, MAX_CATEGORY_CHARS,
+        MAX_NAME_CHARS,
     };
 
     /// Most line items one entry may carry.
@@ -149,8 +149,7 @@ mod entry {
     /// The typed form → the ledger's input, or the first problem found.
     pub(super) fn parse(form: &NewTxnForm) -> Result<NewTransaction, String> {
         let shop = label(&form.shop, "Shop", MAX_NAME_CHARS).map_err(hint)?;
-        let date = NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d")
-            .map_err(|_| "Date: pick a date.".to_owned())?;
+        let date = parse_date(form.date.trim())?;
         let category = label(&form.category, "Category", MAX_CATEGORY_CHARS).map_err(hint)?;
         let amount = match form.total.trim() {
             "" => None,
@@ -197,7 +196,7 @@ mod entry {
     }
 
     /// A stated total: CHF text, not negative, at most [`MAX_TOTAL_CENTIMES`].
-    fn total(raw: &str) -> Result<Money, String> {
+    pub(crate) fn total(raw: &str) -> Result<Money, String> {
         let amount = chf(raw)?;
         if amount.centimes() > MAX_TOTAL_CENTIMES {
             return Err("too large (at most CHF 1'000'000).".to_owned());
@@ -217,14 +216,14 @@ mod entry {
 
     /// The text of a check's refusal. The parsers and `line_fix` checks return
     /// fixed hints that never repeat the input.
-    fn hint(err: PhoskError) -> String {
+    pub(crate) fn hint(err: PhoskError) -> String {
         match err {
             PhoskError::Invalid(hint) => hint,
             _ => "not a valid number.".to_owned(),
         }
     }
 
-    pub(super) fn reply(code: u16, message: &str) -> ServerFnError {
+    pub(crate) fn reply(code: u16, message: &str) -> ServerFnError {
         ServerFnError::ServerError {
             message: message.to_owned(),
             code,

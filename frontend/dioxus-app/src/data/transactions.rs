@@ -561,6 +561,14 @@ pub(crate) mod line_fix {
         raw == stored || raw.trim() == stored
     }
 
+    /// A date input's `YYYY-MM-DD` value, or the field's fixed hint. Shared by
+    /// the NEW form (required) and the EDIT form (optional: the caller decides
+    /// what a blank value means), so both refuse an unparsable date the same way.
+    pub(crate) fn parse_date(raw: &str) -> Result<chrono::NaiveDate, String> {
+        chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map_err(|_| "Date: pick a date.".to_owned())
+    }
+
     /// A trimmed, non-empty, bounded, control-character-free label.
     pub(crate) fn label(raw: &str, what: &str, max_chars: usize) -> Result<String, PhoskError> {
         let value = raw.trim();

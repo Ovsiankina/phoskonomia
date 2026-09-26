@@ -41,6 +41,7 @@
 use dioxus::prelude::*;
 use phosk_core::money::Money;
 
+use crate::components::edit_transaction::TxnActions;
 use crate::components::new_transaction::NewTransactionForm;
 use crate::components::prims::{Dot, ScannerBg};
 use crate::components::shell::{AiPanel, Sig, SigOcc, SignalPanel, TopBar};
@@ -909,6 +910,10 @@ fn ReceiptItem(
 /// Lines are reviewable here too. A saved correction tells the page
 /// (`on_changed`), which bumps [`LinesRev`]: the lines and the detail (average
 /// confidence) refetch here, and so do the accordion rows open underneath.
+///
+/// EDIT / DELETE of the whole transaction ([`TxnActions`]) sit under the
+/// meta row: `on_edited` hands the page the patched row, `on_deleted` lets it
+/// close this overlay.
 #[component]
 fn ReceiptScreen(
     t: TransactionDto,
@@ -916,11 +921,22 @@ fn ReceiptScreen(
     on_close: EventHandler<()>,
     on_select_sig: EventHandler<String>,
     on_changed: EventHandler<()>,
+    on_edited: EventHandler<TransactionDto>,
+    on_deleted: EventHandler<()>,
 ) -> Element {
     let id = t.id.clone();
     let id2 = t.id.clone();
     let receipt_id = t.id.clone();
     let mut editing = use_signal(|| Option::<usize>::None);
+    // Guards against the T11 write race between an EDIT/DELETE save here and a
+    // line correction below: `edit_transaction` re-inserts the line list it
+    // read earlier, so a line fix landing mid-save would be silently reverted.
+    // `txn_open` blocks a line pick while the EDIT/DELETE panel is open;
+    // `txn_busy` blocks this screen's own close (backdrop and ✕) while a
+    // save/delete is in flight, so it can't be dropped with no refresh to
+    // show for it.
+    let mut txn_open = use_signal(|| false);
+    let mut txn_busy = use_signal(|| false);
     let rev = try_use_context::<LinesRev>();
     let lines_res = use_resource(move || {
         track_lines_rev(rev);
@@ -994,7 +1010,11 @@ fn ReceiptScreen(
     let sigs_word = if sigs_count > 1 { "signals" } else { "signal" };
 
     rsx! {
-        div { class: "rscreen-back", onclick: move |_| on_close.call(()),
+        div {
+            class: "rscreen-back",
+            onclick: move |_| if !txn_busy() {
+                on_close.call(());
+            },
             div {
                 class: "rscreen",
                 onclick: move |e: Event<MouseData>| e.stop_propagation(),
@@ -1007,7 +1027,9 @@ fn ReceiptScreen(
                     span {
                         class: "x",
                         title: "Close",
-                        onclick: move |_| on_close.call(()),
+                        onclick: move |_| if !txn_busy() {
+                            on_close.call(());
+                        },
                         "✕"
                     }
                 }
@@ -1060,6 +1082,16 @@ fn ReceiptScreen(
                             }
                             span { class: "badge", "{badge_str}" }
                         }
+                        TxnActions {
+                            key: "{t.id}",
+                            t: t.clone(),
+                            itemised: has_lines || t.item_count > 0,
+                            line_editing: editing().is_some(),
+                            on_open_change: move |open| txn_open.set(open),
+                            on_busy_change: move |busy| txn_busy.set(busy),
+                            on_edited,
+                            on_deleted,
+                        }
                         div { class: "conf-sum",
                             span { "READING CONFIDENCE" }
                             div { class: "bar",
@@ -1104,6 +1136,9 @@ fn ReceiptScreen(
                                     index: i,
                                     editing: editing() == Some(i),
                                     on_pick: move |pick: usize| {
+                                        if txn_open() {
+                                            return;
+                                        }
                                         let next = if editing() == Some(pick) { None } else { Some(pick) };
                                         editing.set(next);
                                     },
@@ -1207,6 +1242,25 @@ pub fn TransactionsPage() -> Element {
             q: q(),
         };
         list_transactions(filter)
+    });
+
+    // An open detail follows the refetched list (after an EDIT the list has
+    // the server's own row, e.g. the new date label). A row that left the
+    // filtered list keeps the snapshot `on_edited` patched in.
+    use_effect(move || {
+        let fresh = txns
+            .read()
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|l| {
+                let open = detail.peek().as_ref().map(|t| t.id.clone())?;
+                l.transactions.iter().find(|t| t.id == open).cloned()
+            });
+        if let Some(row) = fresh {
+            if detail.peek().as_ref() != Some(&row) {
+                detail.set(Some(row));
+            }
+        }
     });
 
     // ---- read resources into local snapshots ----
@@ -1428,6 +1482,18 @@ pub fn TransactionsPage() -> Element {
                         drawer_sig.set(true);
                     },
                     on_changed: move |()| {
+                        txns.restart();
+                        lines_rev += 1;
+                    },
+                    on_edited: move |row: TransactionDto| {
+                        detail.set(Some(row));
+                        txns.restart();
+                        lines_rev += 1;
+                    },
+                    on_deleted: move |()| {
+                        if let Some(gone) = detail.take() {
+                            open_ids.write().retain(|id| *id != gone.id);
+                        }
                         txns.restart();
                         lines_rev += 1;
                     },
