@@ -230,8 +230,12 @@ photo content itself, not the network channel.
 - Pi stores **opaque blobs** in a persistent FIFO queue. If
   client-side encryption is enabled (option below), the Pi never
   sees plaintext photos — compromise leaks ciphertext only.
-- Desktop drains queue on its own schedule, ACKs delivery, Pi
-  deletes — limits blast radius of any single compromise.
+- Desktop drains queue on its own schedule. There is no ACK: the pop
+  is destructive (the Pi deletes a blob as it hands it over), so the
+  desktop holds the only copy from then on — limits how long a photo
+  sits on the Pi. The daemon therefore checks OCR + LLM health before
+  each pop and leaves photos queued while either is down; a photo whose
+  ingest still fails is dropped (counted as failed, not re-queued).
 
 **Inbound (iPhone Shortcut → Pi):**
 
