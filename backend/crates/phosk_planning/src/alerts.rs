@@ -17,8 +17,17 @@
 //! - `savings`: savings on track vs target ⇒ tone `"info"`.
 //! - `recurring_missing`: an expected charge not seen this cycle.
 //!
-//! `actions` carry labels (`VIEW` / `RAISE CAP` / `DISMISS` / `SNOOZE` /
-//! `MARK PAID`); the page routes a non-navigation press through [`act_on_alert`].
+//! `actions` carry a label (`VIEW` / `RAISE CAP` / `DISMISS` / `SNOOZE` /
+//! `MARK PAID`) and the backend verb `kind` (`navigate` / `apply` / `dismiss` /
+//! `snooze`); the page routes a non-navigation press's `kind` through
+//! [`act_on_alert`].
+//!
+//! Persisted alerts are listed whenever at least one of them is shown; only
+//! when none is (e.g. the user dismissed them all) does the list fall back to
+//! the generated `gen-over-*` / `gen-risk-*` items above. Those have no stored
+//! row, so [`act_on_alert`] cannot find them and nothing can record a dismiss
+//! or snooze for them: they offer `VIEW` only, until the port can persist a
+//! generated alert.
 //!
 //! ## Snooze and re-trigger
 //!
@@ -47,6 +56,17 @@ use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_model::{Alert, AlertSnooze};
 
+/// One action button on an [`AlertDto`] (`GET /alerts` element).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertActionDto {
+    /// Button label, e.g. `"VIEW"`, `"RAISE CAP"`, `"DISMISS"`, `"SNOOZE"`.
+    pub label: String,
+    /// The backend verb [`act_on_alert`] accepts for this button:
+    /// `"navigate" | "dismiss" | "snooze" | "apply"`.
+    pub kind: String,
+}
+
 /// One attention item (`GET /alerts` element).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,9 +81,10 @@ pub struct AlertDto {
     pub head: String,
     /// Supporting body line.
     pub body: String,
-    /// Action button labels (first is the primary), e.g. `VIEW` / `RAISE CAP` /
-    /// `DISMISS` / `SNOOZE` / `MARK PAID`.
-    pub actions: Vec<String>,
+    /// Action buttons (first is the primary), e.g. `VIEW` / `RAISE CAP` /
+    /// `DISMISS` / `SNOOZE` / `MARK PAID`, each carrying the verb kind
+    /// [`act_on_alert`] expects back.
+    pub actions: Vec<AlertActionDto>,
 }
 
 /// The dashboard alerts list (`GET /alerts`), generated from cap/spend data.
@@ -94,7 +115,14 @@ pub async fn alerts(
                 tag: a.tag,
                 head: a.head,
                 body: a.body,
-                actions: a.actions.into_iter().map(|act| act.label).collect(),
+                actions: a
+                    .actions
+                    .into_iter()
+                    .map(|act| AlertActionDto {
+                        label: act.label,
+                        kind: act.kind,
+                    })
+                    .collect(),
             });
         }
     }
@@ -163,9 +191,11 @@ async fn category_spend_receipts(
 ///
 /// # Errors
 /// Returns [`PhoskError::NotFound`] if no alert matches `alert`; returns
-/// [`PhoskError::Invalid`] for an unknown `action`; propagates any adapter
-/// [`PhoskError`].
-#[tracing::instrument(level = "debug", skip_all)]
+/// [`PhoskError::Invalid`] if the alert is dismissed, or for an `action` this
+/// alert does not itself offer (an unknown verb, or a legal verb behind a
+/// button this alert doesn't show — e.g. `apply` on an alert with no RAISE CAP
+/// action); propagates any adapter [`PhoskError`].
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn act_on_alert(
     db: &dyn DatabaseAdapter,
     alert: &str,
@@ -179,6 +209,20 @@ pub async fn act_on_alert(
         .into_iter()
         .find(|a| a.slug == alert)
         .ok_or_else(|| PhoskError::NotFound(format!("alert {alert}")))?;
+
+    // A dismissed alert is off the list for good; a stale press (another tab,
+    // a double click) must not still act on it.
+    if entity.status == "dismissed" {
+        return Err(PhoskError::Invalid(format!("alert {alert} is dismissed")));
+    }
+
+    // The client sends the pressed button's verb `kind`, never its label; only
+    // accept a verb this alert's own action list actually offers.
+    if !entity.actions.iter().any(|act| act.kind == action) {
+        return Err(PhoskError::Invalid(format!(
+            "alert {alert} does not offer action {action}"
+        )));
+    }
 
     match action {
         "dismiss" => db.update_alert_status(entity.id, "dismissed").await,
@@ -335,11 +379,7 @@ fn eval_category_rules(
             tag,
             head: format!("{name} over budget"),
             body: format!("{name} spend has crossed its cap this cycle."),
-            actions: vec![
-                "VIEW".to_owned(),
-                "RAISE CAP".to_owned(),
-                "DISMISS".to_owned(),
-            ],
+            actions: generated_actions(),
         });
     } else if level == LEVEL_AT_RISK {
         out.push(AlertDto {
@@ -348,9 +388,19 @@ fn eval_category_rules(
             tag,
             head: format!("{name} run-rate above cap"),
             body: format!("{name} is on pace to exceed its cap by month-end."),
-            actions: vec!["VIEW".to_owned(), "DISMISS".to_owned()],
+            actions: generated_actions(),
         });
     }
+}
+
+/// The buttons of a generated alert: `VIEW` only. It has no stored row, so
+/// [`act_on_alert`] could not act on it and a dismiss or snooze could not be
+/// recorded (module docs).
+fn generated_actions() -> Vec<AlertActionDto> {
+    vec![AlertActionDto {
+        label: "VIEW".to_owned(),
+        kind: "navigate".to_owned(),
+    }]
 }
 
 /// Rules-engine level: `at_risk`.
