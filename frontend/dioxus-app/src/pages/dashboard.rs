@@ -35,7 +35,7 @@ use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::budgets::{get_categories, CategoryDto};
 use crate::data::dashboard::{
     act_on_alert, get_alerts, get_insight, get_recurring, get_spend_series, get_top_shops,
-    get_totals, AlertDto, RecurringDto, ALERT_ACTION_FAILED,
+    get_totals, AlertDto, RecurringDto, TotalsDto, ALERT_ACTION_FAILED,
 };
 use crate::data::signals::{
     dismiss_signal, get_signal, get_signal_candidates, get_signals, track_signal, SignalDetailDto,
@@ -63,6 +63,40 @@ fn pct_str(r: Option<f64>) -> String {
 /// `Money` series → presentation `f64` CHF, for the chart/spark primitives.
 fn money_chf_series(v: &[Money]) -> Vec<f64> {
     v.iter().map(|m| m.as_chf_f64()).collect()
+}
+
+/// "vs last cycle": the signed percent and its colour token. More spend than
+/// last cycle is a warning, less is good, and with no last cycle on record
+/// there is nothing to compare (`—`, neutral).
+fn vs_last_cycle(t: &TotalsDto) -> (String, &'static str) {
+    if t.last_cycle_spent.centimes() <= 0 {
+        return ("—".to_string(), "var(--ink-2)");
+    }
+    let v = t.vs_last_cycle_pct;
+    match v.signum() {
+        1 => (format!("+{v}%"), "var(--warn)"),
+        -1 => (format!("−{}%", v.unsigned_abs()), "var(--ok)"),
+        _ => ("0%".to_string(), "var(--ink-2)"),
+    }
+}
+
+/// The RECURRING header from the charges' due dates: how many are due now,
+/// else how many fall within a week, else that none is close.
+fn recurring_header(list: &[RecurringDto]) -> String {
+    let due = list.iter().filter(|r| r.days_until <= 0).count();
+    let soon = list
+        .iter()
+        .filter(|r| r.days_until > 0 && r.days_until <= 7)
+        .count();
+    if list.is_empty() {
+        "RECURRING".to_string()
+    } else if due > 0 {
+        format!("RECURRING · {due} DUE")
+    } else if soon > 0 {
+        format!("RECURRING · {soon} THIS WEEK")
+    } else {
+        "RECURRING · NONE DUE THIS WEEK".to_string()
+    }
 }
 
 // ── DTO → F2 component-struct mappers ────────────────────────────────────────
@@ -347,6 +381,7 @@ pub fn DashboardPage() -> Element {
     let txns_loading = txns.read().is_none();
     let recurring_loading = recurring.read().is_none();
     let alerts_loading = alerts.read().is_none();
+    let alerts_failed = matches!(&*alerts.read(), Some(Err(_)));
     let insight_loading = insight.read().is_none();
 
     // tracked signals + AI candidates (candidates carry candidate=true already).
@@ -390,7 +425,13 @@ pub fn DashboardPage() -> Element {
 
     // category lists.
     let categories: Vec<CategoryDto> = cats_v.clone().unwrap_or_default();
-    let channels: Vec<CategoryDto> = categories.iter().take(5).cloned().collect();
+    // The five busiest categories this cycle (stable on ties, so an empty store
+    // keeps its own order).
+    let channels: Vec<CategoryDto> = {
+        let mut by_spend = categories.clone();
+        by_spend.sort_by_key(|c| std::cmp::Reverse(c.spent.centimes()));
+        by_spend.into_iter().take(5).collect()
+    };
     let cat_rows: Vec<Cat> = categories.iter().map(cat_of).collect();
 
     // recent txns.
@@ -406,10 +447,15 @@ pub fn DashboardPage() -> Element {
     // and `map_or("—".to_string(), ..)` (string literals + closures inside a
     // segment). So every compound / dash-defaulted display string is built here.
     const DASH: &str = "—";
-    let vs_last_str = totals_v.as_ref().map(|t| {
-        let sign = if t.vs_last_cycle_pct > 0 { "+" } else { "" };
-        format!("{sign}{}%", t.vs_last_cycle_pct)
-    });
+    // A new store has no monthly budget / savings target yet: every "of
+    // budget" figure would be made up, so those read as "not set".
+    let budget_set = totals_v.as_ref().is_some_and(|t| t.budget.centimes() > 0);
+    let target_set = totals_v
+        .as_ref()
+        .is_some_and(|t| t.savings_target.centimes() > 0);
+    let (vs_last_str, vs_last_col) = totals_v
+        .as_ref()
+        .map_or((DASH.to_string(), "var(--ink-2)"), vs_last_cycle);
     // Terminal LEFT-rail KPI numerals + sub-lines.
     let kpi_budget = totals_v
         .as_ref()
@@ -419,24 +465,48 @@ pub fn DashboardPage() -> Element {
     } else {
         format!("{}-day cycle · day {}", c.days, c.day)
     };
-    let kpi_spent_pct = totals_v.as_ref().map_or(DASH.to_string(), |t| {
-        pct_str(Some(f64::from(t.spent_pct) / 100.0))
-    });
+    let kpi_spent_pct = if budget_set {
+        totals_v.as_ref().map_or(DASH.to_string(), |t| {
+            pct_str(Some(f64::from(t.spent_pct) / 100.0))
+        })
+    } else {
+        String::new()
+    };
     let kpi_spent = totals_v
         .as_ref()
         .map_or(DASH.to_string(), |t| chf0(t.spent));
     let kpi_spent_sub = totals_v
         .as_ref()
         .map_or(DASH.to_string(), |t| format!("CHF {}", chf2(t.spent)));
-    let kpi_remaining = totals_v
+    let kpi_remaining = if budget_set {
+        totals_v
+            .as_ref()
+            .map_or(DASH.to_string(), |t| chf0(t.remaining))
+    } else {
+        DASH.to_string()
+    };
+    let kpi_remaining_sub = if budget_set {
+        totals_v.as_ref().map_or(DASH.to_string(), |t| {
+            if t.remaining.centimes() >= 0 {
+                format!(
+                    "CHF {}/day to stay on budget",
+                    chf0(t.per_day_to_stay_on_budget)
+                )
+            } else {
+                "over the monthly budget".to_string()
+            }
+        })
+    } else {
+        "set a monthly budget to track what is left".to_string()
+    };
+    let saved_str = totals_v
         .as_ref()
-        .map_or(DASH.to_string(), |t| chf0(t.remaining));
-    let kpi_remaining_sub = totals_v.as_ref().map_or(DASH.to_string(), |t| {
-        format!(
-            "CHF {}/day to stay on budget",
-            chf0(t.per_day_to_stay_on_budget)
-        )
-    });
+        .filter(|_| budget_set)
+        .map_or(DASH.to_string(), |t| format!("CHF {}", chf0(t.saved)));
+    let savings_rate_str = totals_v
+        .as_ref()
+        .filter(|_| budget_set)
+        .map_or(DASH.to_string(), |t| pct_str(Some(t.savings_rate)));
     // Header counts + insight model + monthly run-rate.
     let cats_count_str = if cats_v.is_some() {
         categories.len().to_string()
@@ -455,13 +525,25 @@ pub fn DashboardPage() -> Element {
         .map_or("GEMMA4".to_string(), |i| i.model.clone());
     // Spend-trace HUD numerals.
     let trace_hud = totals_v.as_ref().map_or(DASH.to_string(), |t| {
-        format!(
-            "CHF {} / {} · {}",
-            chf0(t.spent),
-            chf0(t.budget),
-            pct_str(Some(f64::from(t.spent_pct) / 100.0))
-        )
+        if budget_set {
+            format!(
+                "CHF {} / {} · {}",
+                chf0(t.spent),
+                chf0(t.budget),
+                pct_str(Some(f64::from(t.spent_pct) / 100.0))
+            )
+        } else {
+            format!("CHF {} · NO BUDGET SET", chf0(t.spent))
+        }
     });
+    // Nothing spent this cycle and no budget to draw: the chart has no scale.
+    let trace_empty = !budget_set
+        && series_v
+            .as_ref()
+            .is_some_and(|s| s.cumulative.iter().all(|m| m.centimes() == 0));
+    let recurring_hdr = recurring_v
+        .as_ref()
+        .map_or("RECURRING".to_string(), |r| recurring_header(&r.recurring));
 
     // cycle convenience.
     let cycle_label = c.label.clone();
@@ -505,8 +587,18 @@ pub fn DashboardPage() -> Element {
                             div { class: "c-dock glass",
                                 // hero remaining
                                 div { class: "c-hero",
-                                    div { class: "lbl", "REMAINING · {cycle_label}" }
-                                    if let Some(t) = &totals_v {
+                                    if let Some(t) = totals_v.as_ref().filter(|_| !budget_set) {
+                                        div { class: "lbl", "SPENT · {cycle_label}" }
+                                        div { class: "big",
+                                            span { class: "cur", "CHF" }
+                                            "{chf0(t.spent)}"
+                                        }
+                                        div { class: "sub",
+                                            "no monthly budget set · {days_left} days left · "
+                                            Link { class: "gbtn", to: Route::BudgetsPage {}, "SET BUDGET ↗" }
+                                        }
+                                    } else if let Some(t) = &totals_v {
+                                        div { class: "lbl", "REMAINING · {cycle_label}" }
                                         div { class: "big",
                                             span { class: "cur", "CHF" }
                                             "{chf0(t.remaining)}"
@@ -515,6 +607,7 @@ pub fn DashboardPage() -> Element {
                                             "of CHF {chf0(t.budget)} budget · {pct_str(Some(f64::from(t.spent_pct) / 100.0))} spent · {days_left} days left"
                                         }
                                     } else {
+                                        div { class: "lbl", "REMAINING · {cycle_label}" }
                                         div { class: "big",
                                             span { class: "cur", "CHF" }
                                             "—"
@@ -523,7 +616,16 @@ pub fn DashboardPage() -> Element {
                                 }
                                 // savings dial
                                 div { style: "display:flex;justify-content:center;padding:4px 0",
-                                    if let Some(t) = &totals_v {
+                                    if totals_v.is_some() && !(budget_set && target_set) {
+                                        // A dial against a zero target would read 100%.
+                                        div { class: "osc-bkt blue", style: "padding:var(--s-3) var(--s-4);text-align:center",
+                                            span { class: "osc-leg", "SAVINGS" }
+                                            div { class: "dim", style: "font-size:var(--t-xs);line-height:var(--lh-body);margin-bottom:var(--s-2)",
+                                                if budget_set { "No savings target set." } else { "No budget or savings target set." }
+                                            }
+                                            Link { class: "gbtn", to: Route::BudgetsPage {}, "SET IN BUDGETS ↗" }
+                                        }
+                                    } else if let Some(t) = &totals_v {
                                         SavingsDial {
                                             size: 150.0,
                                             saved: t.saved.as_chf_f64(),
@@ -544,17 +646,15 @@ pub fn DashboardPage() -> Element {
                                         }
                                         div { class: "ministat",
                                             span { class: "k", "Saved" }
-                                            span { class: "v", "CHF {chf0(t.saved)}" }
+                                            span { class: "v", "{saved_str}" }
                                         }
                                         div { class: "ministat",
                                             span { class: "k", "Savings rate" }
-                                            span { class: "v", "{pct_str(Some(t.savings_rate))}" }
+                                            span { class: "v", "{savings_rate_str}" }
                                         }
                                         div { class: "ministat",
                                             span { class: "k", "vs last cycle" }
-                                            span { class: "v", style: "color:var(--ok)",
-                                                "{vs_last_str.clone().unwrap_or_default()}"
-                                            }
+                                            span { class: "v", style: "color:{vs_last_col}", "{vs_last_str}" }
                                         }
                                     } else {
                                         Awaiting { label: "SNAPSHOT".to_string(), loading: totals_loading }
@@ -626,12 +726,21 @@ pub fn DashboardPage() -> Element {
                                         span { class: "hud", "SPEND TRACE · {cycle_label}" }
                                         span { class: "hud", style: "color:var(--neon-dim)", "{trace_hud}" }
                                     }
-                                    if let Some(s) = &series_v {
+                                    if trace_empty {
+                                        div { style: "padding:var(--s-8) var(--s-4)",
+                                            Awaiting {
+                                                label: "SPEND TRACE".to_string(),
+                                                legend: "NO SPEND YET".to_string(),
+                                                message: "Nothing spent this cycle yet. Add a receipt and the trace starts here.".to_string(),
+                                                tone: "coral".to_string(),
+                                            }
+                                        }
+                                    } else if let Some(s) = &series_v {
                                         PhoskChart {
                                             width: 1150.0,
                                             height: 300.0,
                                             show_bars: false,
-                                            show_pace: true,
+                                            show_pace: budget_set,
                                             show_area: true,
                                             show_last: true,
                                             pad_t: 34.0,
@@ -652,7 +761,9 @@ pub fn DashboardPage() -> Element {
                                     }
                                     div { style: "position:absolute;bottom:8px;left:16px;display:flex;gap:16px",
                                         span { class: "hud sm", style: "color:var(--neon)", "━ THIS CYCLE" }
-                                        span { class: "hud sm", style: "color:var(--indigo-neon)", "┄ BUDGET PACE" }
+                                        if budget_set {
+                                            span { class: "hud sm", style: "color:var(--indigo-neon)", "┄ BUDGET PACE" }
+                                        }
                                         span { class: "hud sm", style: "color:rgba(143,125,255,.7)", "┄ LAST CYCLE" }
                                     }
                                 }
@@ -664,7 +775,7 @@ pub fn DashboardPage() -> Element {
                                     } else {
                                         for cc in channels.iter() {
                                             {
-                                                let p = if cc.budget.centimes() > 0 {
+                                                let p = if cc.capped && cc.budget.centimes() > 0 {
                                                     cc.spent.as_chf_f64() / cc.budget.as_chf_f64()
                                                 } else {
                                                     0.0
@@ -673,6 +784,17 @@ pub fn DashboardPage() -> Element {
                                                 let spark_tone = if tone == "alert" { "neon" } else { "indigo" };
                                                 let has_spark = cc.spark.len() > 1;
                                                 let pct_cls = format!("p pct {tone}");
+                                                // An uncapped category has no "% used" and no "/ cap".
+                                                let pct_txt = if cc.capped && cc.budget.centimes() > 0 {
+                                                    format!("{}%", cc.used_pct)
+                                                } else {
+                                                    DASH.to_string()
+                                                };
+                                                let amt_txt = if cc.capped {
+                                                    format!("CHF {} / {}", chf0(cc.spent), chf0(cc.budget))
+                                                } else {
+                                                    format!("CHF {} · NO CAP", chf0(cc.spent))
+                                                };
                                                 rsx! {
                                                     div { key: "{cc.name}", class: "chan",
                                                         span { class: "cn", "{cc.name}" }
@@ -682,8 +804,8 @@ pub fn DashboardPage() -> Element {
                                                             div { style: "height:28px" }
                                                         }
                                                         div { class: "cv",
-                                                            span { class: "{pct_cls}", "{cc.used_pct}%" }
-                                                            span { class: "s", "CHF {chf0(cc.spent)} / {chf0(cc.budget)}" }
+                                                            span { class: "{pct_cls}", "{pct_txt}" }
+                                                            span { class: "s", "{amt_txt}" }
                                                         }
                                                     }
                                                 }
@@ -695,10 +817,12 @@ pub fn DashboardPage() -> Element {
                                 // watch line
                                 div { class: "c-watch",
                                     span { class: "hud sm", style: "flex:0 0 auto", "WATCH" }
-                                    if alerts_v.is_none() {
-                                        span { class: "dim", if alerts_loading { "Loading…" } else { "awaiting backend (/alerts)" } }
+                                    if alerts_loading {
+                                        span { class: "dim", "Loading…" }
+                                    } else if alerts_failed || alerts_v.is_none() {
+                                        span { class: "dim", "Could not load alerts. Reload to try again." }
                                     } else if watch_items.is_empty() {
-                                        span { class: "dim", "No active alerts." }
+                                        span { class: "dim", "All clear: no category is over or near its cap." }
                                     } else {
                                         for (i , a) in watch_items.iter().enumerate() {
                                             {
@@ -753,8 +877,16 @@ pub fn DashboardPage() -> Element {
                                     div { class: "b-kpi osc-bkt blue",
                                         span { class: "osc-leg", "BUDGET" }
                                         div { class: "lbl", style: "justify-content:flex-end", span { "{cycle_label}" } }
-                                        div { class: "big", "CHF {kpi_budget}" }
-                                        div { class: "sub", "{kpi_budget_sub}" }
+                                        if budget_set || totals_v.is_none() {
+                                            div { class: "big", "CHF {kpi_budget}" }
+                                            div { class: "sub", "{kpi_budget_sub}" }
+                                        } else {
+                                            div { class: "big", "{DASH}" }
+                                            div { class: "sub",
+                                                "not set · "
+                                                Link { to: Route::BudgetsPage {}, "set it in Budgets ↗" }
+                                            }
+                                        }
                                     }
                                     div { class: "b-kpi accent osc-bkt coral",
                                         span { class: "osc-leg", "SPENT" }
@@ -775,13 +907,11 @@ pub fn DashboardPage() -> Element {
                                         if let Some(t) = &totals_v {
                                             div { class: "ministat",
                                                 span { class: "k", "Savings rate" }
-                                                span { class: "v", "{pct_str(Some(t.savings_rate))}" }
+                                                span { class: "v", "{savings_rate_str}" }
                                             }
                                             div { class: "ministat",
                                                 span { class: "k", "vs last cycle" }
-                                                span { class: "v", style: "color:var(--ok)",
-                                                    "{vs_last_str.clone().unwrap_or_default()}"
-                                                }
+                                                span { class: "v", style: "color:{vs_last_col}", "{vs_last_str}" }
                                             }
                                             div { class: "ministat",
                                                 span { class: "k", "Last cycle spent" }
@@ -916,7 +1046,7 @@ pub fn DashboardPage() -> Element {
                                         InlineStatus { error: alert_error() }
                                     }
                                     div { class: "hud", style: "display:flex;justify-content:space-between;align-items:center;margin-top:4px",
-                                        span { "RECURRING · CLEAN" }
+                                        span { "{recurring_hdr}" }
                                         span { class: "dim", "{monthly_total_str}" }
                                     }
                                     if !recurring_ok {
@@ -1104,7 +1234,74 @@ fn AiPanelDash(
 mod tests {
     use dioxus::prelude::ServerFnError;
 
-    use super::{signal_action_error_text, SIGNAL_ACTION_FAILED};
+    use phosk_core::money::Money;
+
+    use super::{
+        recurring_header, signal_action_error_text, vs_last_cycle, RecurringDto, TotalsDto,
+        SIGNAL_ACTION_FAILED,
+    };
+
+    fn totals(last_cycle: i64, vs_pct: i32) -> TotalsDto {
+        TotalsDto {
+            budget: Money::ZERO,
+            spent: Money::ZERO,
+            remaining: Money::ZERO,
+            allocated: Money::ZERO,
+            savings_target: Money::ZERO,
+            saved: Money::ZERO,
+            savings_projected: Money::ZERO,
+            savings_rate: 0.0,
+            last_cycle_spent: Money::from_centimes(last_cycle),
+            spent_pct: 0,
+            vs_last_cycle_pct: vs_pct,
+            per_day_to_stay_on_budget: Money::ZERO,
+        }
+    }
+
+    #[test]
+    fn spending_more_than_last_cycle_is_not_coloured_good() {
+        assert_eq!(
+            vs_last_cycle(&totals(10_000, 12)),
+            ("+12%".to_string(), "var(--warn)")
+        );
+        assert_eq!(
+            vs_last_cycle(&totals(10_000, -17)),
+            ("−17%".to_string(), "var(--ok)")
+        );
+        assert_eq!(
+            vs_last_cycle(&totals(10_000, 0)),
+            ("0%".to_string(), "var(--ink-2)")
+        );
+        // No last cycle on record: nothing to compare, not "0%".
+        assert_eq!(vs_last_cycle(&totals(0, 0)).0, "—");
+    }
+
+    fn charge(days_until: i32) -> RecurringDto {
+        RecurringDto {
+            id: format!("r{days_until}"),
+            name: "Charge".to_string(),
+            amount: Money::from_centimes(1_000),
+            next: String::new(),
+            days_until,
+        }
+    }
+
+    #[test]
+    fn the_recurring_header_follows_the_due_dates() {
+        assert_eq!(recurring_header(&[]), "RECURRING");
+        assert_eq!(
+            recurring_header(&[charge(0), charge(3)]),
+            "RECURRING · 1 DUE"
+        );
+        assert_eq!(
+            recurring_header(&[charge(3), charge(5), charge(20)]),
+            "RECURRING · 2 THIS WEEK"
+        );
+        assert_eq!(
+            recurring_header(&[charge(20)]),
+            "RECURRING · NONE DUE THIS WEEK"
+        );
+    }
 
     /// A failed signal track/dismiss shows one fixed line, never the server's
     /// message (a `PhoskError` or session error can embed a data path or
