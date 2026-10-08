@@ -56,8 +56,11 @@ pub struct SubscriptionDto {
     pub since: String,
     /// `true` if the last charge rose vs the prior one.
     pub price_rose: bool,
-    /// Price-history bars (raw chart numbers).
+    /// Price-history bars (raw chart numbers), oldest charge first.
     pub hist: Vec<f64>,
+    /// One axis label per `hist` bar, from that charge's date (`"MAR"`, or
+    /// `"'25"` for a yearly charge).
+    pub hist_labels: Vec<String>,
     /// One-line note / AI guidance.
     pub note: String,
 }
@@ -410,6 +413,7 @@ fn map_sub(s: phosk_recurring::subscriptions::SubscriptionDto) -> SubscriptionDt
         since: s.since,
         price_rose: s.price_rose,
         hist: s.hist,
+        hist_labels: s.hist_labels,
         note: s.note,
     }
 }
@@ -887,6 +891,8 @@ pub enum SubAction {
     Pause,
     Resume,
     Cancel,
+    /// Clear a review flag: the user looked at the charge and keeps it.
+    ClearReview,
 }
 
 impl SubAction {
@@ -898,6 +904,7 @@ impl SubAction {
             Self::Pause => "PAUSE",
             Self::Resume => "RESUME",
             Self::Cancel => "CANCEL",
+            Self::ClearReview => "KEEP · CLEAR REVIEW",
         }
     }
 }
@@ -911,6 +918,7 @@ impl From<phosk_recurring::lifecycle::LifecycleAction> for SubAction {
             L::Pause => Self::Pause,
             L::Resume => Self::Resume,
             L::Cancel => Self::Cancel,
+            L::ClearReview => Self::ClearReview,
         }
     }
 }
@@ -1233,6 +1241,7 @@ pub(crate) async fn run_subscription_action_with(
         SubAction::Pause => lifecycle::pause_subscription(db, id).await,
         SubAction::Resume => lifecycle::resume_subscription(db, id, as_of).await,
         SubAction::Cancel => lifecycle::cancel_subscription(db, id).await,
+        SubAction::ClearReview => lifecycle::clear_review(db, id, as_of).await,
     };
     result.map_err(|e| sub_store_error(&e, sub_msg::UNAVAILABLE))
 }

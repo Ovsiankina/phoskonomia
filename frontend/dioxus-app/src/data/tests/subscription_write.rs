@@ -263,6 +263,29 @@ async fn mark_paid_settles_the_cycle_once() {
 }
 
 #[tokio::test]
+async fn clear_review_drops_the_flag_and_is_offered_only_while_flagged() {
+    let db = fresh_db();
+    let before = get_subscription_with(&db, today(), "gym")
+        .await
+        .expect("detail");
+    assert!(
+        before.actions.contains(&SubAction::ClearReview),
+        "the seed flags the gym for review"
+    );
+    run_subscription_action_with(&db, today(), "gym", SubAction::ClearReview)
+        .await
+        .expect("cleared");
+    assert_ne!(stored(&db, "gym").await.status, "watch");
+    let after = get_subscription_with(&db, today(), "gym")
+        .await
+        .expect("detail");
+    assert!(!after.actions.contains(&SubAction::ClearReview));
+    let again =
+        rejected(run_subscription_action_with(&db, today(), "gym", SubAction::ClearReview).await);
+    assert!(again.contains("not available"), "{again}");
+}
+
+#[tokio::test]
 async fn cancel_is_final() {
     let db = fresh_db();
     run_subscription_action_with(&db, today(), "spotify", SubAction::Cancel)
@@ -327,7 +350,7 @@ async fn record_charge_rejects_bad_input() {
 /// CHARGE) exactly when running it on a fresh store is then accepted.
 #[tokio::test]
 async fn offered_actions_are_exactly_the_accepted_ones() {
-    use SubAction::{Cancel, MarkPaid, Pause, Resume};
+    use SubAction::{Cancel, ClearReview, MarkPaid, Pause, Resume};
     let db = fresh_db();
     let ids: Vec<String> = db
         .subscriptions()
@@ -341,7 +364,7 @@ async fn offered_actions_are_exactly_the_accepted_ones() {
         let detail = get_subscription_with(&db, today(), id)
             .await
             .expect("detail");
-        for action in [MarkPaid, Pause, Resume, Cancel] {
+        for action in [MarkPaid, Pause, Resume, Cancel, ClearReview] {
             let accepted = run_subscription_action_with(&fresh_db(), today(), id, action)
                 .await
                 .is_ok();

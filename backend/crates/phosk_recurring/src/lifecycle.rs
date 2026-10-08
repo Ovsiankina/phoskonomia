@@ -20,8 +20,8 @@
 //! `due` ("not seen"), otherwise the charge is `soon` within
 //! [`SOON_DAYS`] of the next billing day and `ok` beyond it. `watch` is a
 //! review flag about the charge's *value*, not its cycle, so paying or
-//! recording a charge leaves it alone; only an explicit resume — a fresh
-//! decision by the user — clears it.
+//! recording a charge leaves it alone; only an explicit decision by the user —
+//! a resume, or [`clear_review`] — clears it.
 //!
 //! **Cancel is not delete.** Cancelling ends a standing charge but keeps its
 //! recorded history for the ledger; [`crate::subscription_write::delete_subscription`]
@@ -85,6 +85,8 @@ pub enum LifecycleAction {
     Resume,
     /// [`cancel_subscription`].
     Cancel,
+    /// [`clear_review`].
+    ClearReview,
 }
 
 /// The transitions the lifecycle would accept for `sub` at `as_of`, primary
@@ -103,6 +105,9 @@ pub fn available_actions(
         let billed_on = last_charge_date(as_of, sub.day, &sub.cadence, &sub.month)?;
         if !cycle_settled(charges, billed_on, as_of) {
             actions.push(LifecycleAction::MarkPaid);
+        }
+        if sub.status == STATUS_WATCH {
+            actions.push(LifecycleAction::ClearReview);
         }
         actions.push(LifecycleAction::Pause);
     }
@@ -168,6 +173,32 @@ pub async fn resume_subscription(
     }
     let charges = db.subscription_charges(sub.id).await?;
     // No previous status: a resume re-derives the cycle from scratch.
+    let status = derive_status("", &sub, &charges, as_of)?;
+    set_status(db, sub, &status).await
+}
+
+/// Clear a [`STATUS_WATCH`] review flag: the user looked at the charge and
+/// keeps it as it is. Its status is recomputed from the billing cycle as it
+/// stands at `as_of`, exactly as a resume would. Write path.
+///
+/// # Errors
+/// [`PhoskError::NotFound`] if `slug` resolves to no subscription,
+/// [`PhoskError::Invalid`] if it is not flagged for review; otherwise any port
+/// error.
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
+pub async fn clear_review(
+    db: &dyn DatabaseAdapter,
+    slug: &str,
+    as_of: NaiveDate,
+) -> Result<(), PhoskError> {
+    let sub = db.subscription_by_slug(slug).await?;
+    if sub.status != STATUS_WATCH {
+        return Err(PhoskError::Invalid(format!(
+            "{:?} is not flagged for review (status {:?})",
+            sub.name, sub.status
+        )));
+    }
+    let charges = db.subscription_charges(sub.id).await?;
     let status = derive_status("", &sub, &charges, as_of)?;
     set_status(db, sub, &status).await
 }
