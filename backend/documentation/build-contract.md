@@ -558,7 +558,7 @@ Budget totals:
 - `remaining` = `budget − spent`. `overAllocated` = `max(0, allocated − budget)`.
 - `unallocated` = `max(0, budget − allocated)`. `envelopeCount` = count of caps.
 
-Allocation segments: `cap` (width), `share = cap / Σcaps`, `fixed`. `aiAdvice` = canned line.
+Allocation segments: `cap` (width), `share = cap / Σcaps`, `fixed`. `aiAdvice` = computed from caps vs budget (unassigned, over-allocated, uncapped categories); `source = "COMPUTED"`, empty when there are no categories.
 
 Alerts engine rules (generate from data; tone/kind per todo §2):
 - over_budget: category `spent > cap` ⇒ tone `alert`.
@@ -682,7 +682,7 @@ pub struct PreferenceRule { pub key: &'static str, pub default: &'static str, pu
 pub const PREFERENCE_RULES: &[PreferenceRule]; // the known keys, factory defaults, allowed values
 
 pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>, PhoskError>;
-pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummaryDto, PhoskError>;
+pub async fn settings_summary(db: &dyn DatabaseAdapter, engine: &str, model: &str) -> Result<SettingsSummaryDto, PhoskError>; // engine/model = the session's live LLM
 pub async fn set_preference(db: &dyn DatabaseAdapter, key: &str, value: &str) -> Result<(), PhoskError>;
 pub async fn reset_preference(db: &dyn DatabaseAdapter, key: &str) -> Result<(), PhoskError>;
 /// The rule for a known key, else Invalid("unknown preference key"):
@@ -704,22 +704,29 @@ reads the preference instead of its hard-coded 0.7 floor.
 `Cargo.toml` deps: `phosk_core`, `phosk_model`, `phosk_adapter_db`, `phosk_id`, `serde`, `tracing`;
 dev: `phosk_db_memory`, `serde_json`, `tokio`.
 
-## 5.7 `phosk_ai` (NEW crate — read slice only for now)
+## 5.7 `phosk_ai`
 
-Spec: `ai.rs`. DTOs: `AiFeedItemDto`, `AiChatMsgDto`, `AiStatusDto`, `AiPanelDto`. The real
-Ollama/GEMMA wiring is deferred; this crate composes the panel from the port (feed items, chat,
-status) and exposes the suggestion/feed write skeletons.
+Spec: `ai.rs`. DTOs: `AiFeedItemDto`, `AiChatMsgDto`, `AiStatusDto`, `AiPanelDto`. Composes the
+panel from the port (feed items, chat) plus the live `LlmAdapter` status, answers chat through the
+model with a read-only data snapshot, and owns the approval service (the only path from a model
+proposal to the ledger).
 
 ```rust
-pub async fn ai_panel(db: &dyn DatabaseAdapter) -> Result<AiPanelDto, PhoskError>;
+pub async fn ai_status(llm: &dyn LlmAdapter, engine: &str) -> AiStatusDto; // model = llm.model(), online = llm.health()
+pub async fn ai_panel(db: &dyn DatabaseAdapter, llm: &dyn LlmAdapter, engine: &str) -> Result<AiPanelDto, PhoskError>;
 pub async fn dismiss_feed_item(db: &dyn DatabaseAdapter, id: &str) -> Result<(), PhoskError>;
-pub async fn send_message(db: &dyn DatabaseAdapter, text: &str) -> Result<AiChatMsgDto, PhoskError>; // canned reply for now
 pub async fn clear_chat(db: &dyn DatabaseAdapter) -> Result<(), PhoskError>;
-pub async fn dashboard_insight(db: &dyn DatabaseAdapter, as_of: NaiveDate) -> Result<InsightDto, PhoskError>;
+pub async fn dashboard_insight(db: &dyn DatabaseAdapter, as_of: NaiveDate) -> Result<InsightDto, PhoskError>; // computed, no model call
+// ai_tools:
+pub async fn chat_context(db: &dyn DatabaseAdapter, as_of: NaiveDate) -> Result<String, PhoskError>;
+pub async fn chat_reply(db: &dyn DatabaseAdapter, llm: &dyn LlmAdapter, text: &str, as_of: NaiveDate) -> Result<AiChatMsgDto, PhoskError>;
 ```
 
-`AiStatusDto` is seeded (`online`, model "GEMMA4", engine "OLLAMA", location "LOCAL"). `InsightDto`
-carries `estimatedSavings` as `money_centimes`.
+`AiStatusDto` is live: `model` is the adapter's model id, `online` its health probe; `engine` /
+`location` come from the composition root ("OLLAMA" / "LOCAL"). `InsightDto`, `AllocAdviceDto` and
+`AnalyticsInsightDto` carry `source`: `"COMPUTED"` for deterministic text, otherwise the model id
+that wrote it. `InsightDto.estimatedSavings` is `money_centimes`. No canned text anywhere: a blank
+model reply is an error and nothing is saved.
 
 `Cargo.toml` deps: `phosk_core`, `phosk_model`, `phosk_adapter_db`, `phosk_id`, `serde`, `chrono`,
 `tracing`; dev: `phosk_db_memory`, `serde_json`, `tokio`.
