@@ -566,6 +566,12 @@ fn movers_read(cards: &[MomentumDto], n: u32) -> Result<MoversRead, PhoskError> 
         return Ok(none("No trend yet."));
     };
     let name = &top.name;
+    // The card knows how many cycles its own average really covers.
+    let n = if top.baseline_cycles > 0 {
+        top.baseline_cycles
+    } else {
+        n
+    };
     let cycles = if n == 1 {
         "last cycle".to_owned()
     } else {
@@ -771,6 +777,8 @@ mod movers_read_tests {
             series: Vec::new(),
             delta_pct: delta,
             prior_avg: Money::from_centimes(prior * 100),
+            // 0 = unknown here, so the read falls back to the setting's count.
+            baseline_cycles: 0,
             fixed: false,
         }
     }
