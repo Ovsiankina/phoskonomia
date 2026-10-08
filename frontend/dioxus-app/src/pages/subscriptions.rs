@@ -255,7 +255,14 @@ fn BillingSweep(
             }
 
             if !ok {
-                Awaiting { label: "BILLING SWEEP".to_string(), loading, tone: "blue".to_string(), style: awaiting_margin }
+                Awaiting {
+                    label: "BILLING SWEEP".to_string(),
+                    loading,
+                    legend: (!loading).then(|| "EMPTY".to_string()),
+                    message: (!loading).then(|| "No charges land in this cycle yet.".to_string()),
+                    tone: "blue".to_string(),
+                    style: awaiting_margin,
+                }
             } else {
                 svg {
                     width: "100%",
@@ -1437,6 +1444,7 @@ fn CandidateSection(
             Some(list) if list.is_empty() => rsx! {
                 Awaiting {
                     label: "AI CANDIDATES".to_string(),
+                    legend: Some("EMPTY".to_string()),
                     message: Some("No open candidates. Nothing is waiting for your approval.".to_string()),
                     style: state_style,
                 }
