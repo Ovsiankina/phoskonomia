@@ -16,7 +16,7 @@ use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::approvals::{approve_proposal, reject_proposal};
 use crate::data::cycle::get_cycle;
 use crate::data::receipt::{upload_receipt, IntakeStatus, ReceiptIntakeDto, MAX_UPLOAD_BYTES};
-use crate::pages::approvals::{error_text, ReceiptHead};
+use crate::pages::approvals::{error_text, unbookable_text, ReceiptHead};
 use crate::Route;
 
 /// Where the review stands after the user's decision.
@@ -202,7 +202,7 @@ pub fn ReceiptPage() -> Element {
                                             }
                                         }
                                         div { class: "cand-row",
-                                            match p.receipt {
+                                            match p.receipt.clone() {
                                                 Some(r) => rsx! { ReceiptHead { receipt: r } },
                                                 None => rsx! {
                                                     span { class: "cand-ev", "The staged receipt could not be read · reject it" }
@@ -231,7 +231,7 @@ pub fn ReceiptPage() -> Element {
                                                 div { class: "cand-row",
                                                     if !p.bookable {
                                                         span { class: "cand-conf low", style: "flex:1 1 auto",
-                                                            "INVALID · this proposal can't be booked as read · reject it"
+                                                            {unbookable_text(&p)}
                                                         }
                                                     } else if conflicting {
                                                         span { class: "cand-conf low", style: "flex:1 1 auto",

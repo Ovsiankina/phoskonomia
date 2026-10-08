@@ -52,6 +52,24 @@ pub(crate) fn error_text(e: &ServerFnError) -> String {
     }
 }
 
+/// Why a proposal cannot be booked, for the line under it: a category the
+/// user does not have (fixable by creating it), else a failed validation.
+pub(crate) fn unbookable_text(p: &ProposalDto) -> String {
+    if p.unknown_categories.is_empty() {
+        return "INVALID · this proposal can't be booked as read · reject it".to_string();
+    }
+    let names = p.unknown_categories.join(", ");
+    let (noun, verb) = if p.unknown_categories.len() == 1 {
+        ("category", "is")
+    } else {
+        ("categories", "are")
+    };
+    format!(
+        "UNKNOWN {} · {names} {verb} not one of your categories · create it on Categories, or reject",
+        noun.to_uppercase()
+    )
+}
+
 /// `/approvals` — pending AI receipt proposals, one card per receipt.
 #[component]
 pub fn ApprovalsPage() -> Element {
@@ -308,11 +326,14 @@ fn ProposalRow(
     let rejecting = pending == Some(Decision::Reject(id.clone()));
     let (id_ok, id_no) = (id.clone(), id);
     let bookable = proposal.bookable;
+    let unbookable = unbookable_text(&proposal);
     let mismatch = proposal
         .receipt
         .as_ref()
         .is_some_and(|r| r.lines.iter().any(|l| l.mismatch));
-    let approve_title = if !bookable {
+    let approve_title = if !bookable && !proposal.unknown_categories.is_empty() {
+        "It names a category you do not have · create it on Categories, or reject"
+    } else if !bookable {
         "This proposal failed validation · reject it"
     } else if conflicting {
         "Another open proposal targets this receipt · reject all but one"
@@ -347,9 +368,7 @@ fn ProposalRow(
                 }
             }
             if !bookable {
-                span { class: "cand-conf low", style: "flex-basis:100%",
-                    "INVALID · this proposal can't be booked as read · reject it"
-                }
+                span { class: "cand-conf low", style: "flex-basis:100%", "{unbookable}" }
             }
             if mismatch {
                 span { class: "cand-conf low", style: "flex-basis:100%",
