@@ -193,7 +193,10 @@ async fn merge_preview_counts_the_line_items_the_merge_repoints() {
         .expect("merged");
     assert_eq!(moved, preview.records, "the preview told the truth");
     assert_eq!(
-        db.category_cap_by_name("Groceries").await.expect("kept").cap,
+        db.category_cap_by_name("Groceries")
+            .await
+            .expect("kept")
+            .cap,
         preview.cap_after,
         "the preview told the folded cap"
     );

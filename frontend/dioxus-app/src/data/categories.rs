@@ -455,8 +455,8 @@ pub(crate) async fn merge_preview_with(
     };
     let (source, target) = (find(from)?, find(into)?);
     let cap_of = |n: &str| caps.iter().find(|c| c.name == n).and_then(|c| c.cap);
-    let cap_after = phosk_adapter_db::merged_cap(cap_of(&target), cap_of(&source))
-        .map_err(store_error)?;
+    let cap_after =
+        phosk_adapter_db::merged_cap(cap_of(&target), cap_of(&source)).map_err(store_error)?;
     if source == target {
         return Err(ServerFnError::new(format!(
             "category {from} cannot be merged into itself"
