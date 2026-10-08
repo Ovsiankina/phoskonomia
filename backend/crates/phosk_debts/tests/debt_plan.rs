@@ -928,3 +928,39 @@ async fn refinance_rejects_unusable_terms_and_leaves_the_store_alone() {
     assert_eq!(db.debt_by_slug("bike-loan").await.expect("stored"), before);
     assert!(db.corrections().expect("audit log").is_empty());
 }
+
+// ── pays_off: the plan rule a caller can check first ─────────────────────────
+
+#[tokio::test]
+async fn pays_off_agrees_with_what_adjust_plan_accepts() {
+    let balance = Money::from_centimes(500_000);
+    // 6 %: 2 500 c interest in the first month. 2 600 c clears it only after
+    // the 600-month horizon; 3 000 c in about 360 months.
+    for (monthly, ok) in [
+        (0, false),
+        (2_500, false),
+        (2_600, false),
+        (3_000, true),
+        (20_000, true),
+    ] {
+        let m = Money::from_centimes(monthly);
+        let says = debt_plan::pays_off(balance, m, 0.06).expect("no overflow");
+        let db = db_with_bike().await;
+        let accepted = debt_plan::adjust_plan(
+            &db,
+            "bike-loan",
+            as_of(),
+            PlanAdjust {
+                monthly: Some(m),
+                ..PlanAdjust::default()
+            },
+        )
+        .await
+        .is_ok();
+        assert_eq!(says, ok, "{monthly} c");
+        assert_eq!(
+            says, accepted,
+            "{monthly} c: pays_off <=> adjust_plan accepts"
+        );
+    }
+}

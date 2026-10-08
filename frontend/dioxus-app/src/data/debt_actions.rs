@@ -15,6 +15,12 @@
 //! Which actions a row offers (a payment on a paid-off debt, settling a
 //! settled IOU) is decided server-side too, and travels on the read DTOs as
 //! `actions` (see [`crate::data::debts`]).
+//!
+//! The plan of an existing debt — instalment, payment day, remaining term —
+//! and its rate change through [`adjust_debt_plan`] and [`refinance_debt`]
+//! (T17's `phosk_debts::debt_plan`), effective today. Each blank field keeps
+//! the current value; the instalment and the remaining term derive each other,
+//! so a request gives at most one of them.
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -40,8 +46,8 @@ pub struct DebtForm {
     /// Original amount, CHF text.
     pub orig: String,
     /// Scheduled monthly payment, CHF text. Create only, like `apr`, `day`
-    /// and `term`: afterwards the plan and the rate change through T17's
-    /// `phosk_debts::debt_plan` rules, which this form does not run.
+    /// and `term`: afterwards the plan and the rate change through
+    /// [`adjust_debt_plan`] / [`refinance_debt`] ([`PlanForm`]).
     pub monthly: String,
     /// APR in percent, e.g. `"4.9"`. Create only.
     pub apr: String,
@@ -51,6 +57,28 @@ pub struct DebtForm {
     pub term: String,
     /// Free note.
     pub note: String,
+}
+
+/// The ADJUST PLAN / REFINANCE form, exactly as typed. Parsed server-side.
+///
+/// A blank field keeps the current value. `monthly` and `term` derive each
+/// other (one sets the instalment, the other follows), so at most one may be
+/// filled. `apr` and `lender` are read by [`refinance_debt`] only, where the
+/// APR is required.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanForm {
+    /// New APR in percent, e.g. `"3.9"` (refinance only, required there).
+    pub apr: String,
+    /// New lender (refinance only); blank keeps the current one.
+    pub lender: String,
+    /// New monthly payment, CHF text; blank keeps it or derives it from `term`.
+    pub monthly: String,
+    /// Months still to pay from today; blank keeps the plan or derives it
+    /// from `monthly`.
+    pub term: String,
+    /// New payment day of month, `1..=31`; blank keeps it.
+    pub day: String,
 }
 
 /// The personal-IOU create/edit form, exactly as typed. Parsed server-side.
@@ -124,6 +152,16 @@ delegate!(
     pay_debt_extra => pay_debt_extra_with(id: String, amount: String) -> ()
 );
 delegate!(
+    /// Change a debt's plan (instalment / day / remaining term), effective
+    /// today. REAL: `phosk_debts::debt_plan::adjust_plan`.
+    adjust_debt_plan => adjust_debt_plan_with(id: String, form: PlanForm) -> ()
+);
+delegate!(
+    /// Refinance a debt's outstanding balance at a new APR (optionally a new
+    /// lender and plan), effective today. REAL: `phosk_debts::debt_plan::refinance`.
+    refinance_debt => refinance_debt_with(id: String, form: PlanForm) -> ()
+);
+delegate!(
     /// Create a personal IOU; returns its id. REAL: `phosk_debts::iou_write::create_personal_iou`.
     create_iou => create_iou_with(form: IouForm) -> String
 );
@@ -155,10 +193,12 @@ mod inner {
     use phosk_adapter_db::DatabaseAdapter;
     use phosk_core::error::PhoskError;
     use phosk_core::money::Money;
+    use phosk_debts::debt_plan::{self, PlanAdjust, Refinance};
     use phosk_debts::debt_write::{self, DebtEdit, NewDebt, NewDebtPayment};
     use phosk_debts::iou_write::{self, NewPersonalIou, PersonalIouEdit};
+    use phosk_model::Debt;
 
-    use super::{msg, DebtForm, IouForm, DEBT_KINDS};
+    use super::{msg, DebtForm, IouForm, PlanForm, DEBT_KINDS};
 
     /// Largest amount any field accepts: CHF 100'000'000.00.
     const MAX_AMOUNT: Money = Money::from_centimes(10_000_000_000);
@@ -379,6 +419,129 @@ mod inner {
             .map_err(|e| store_error(msg::DEBT_GONE, msg::PAYMENT_RANGE, &e))
     }
 
+    /// Longest remaining term a plan may run, in months (the read side's
+    /// revolving horizon is 600).
+    const MAX_REMAINING: u32 = 599;
+
+    /// The plan fields of a [`PlanForm`], parsed; `None` = keep.
+    struct PlanFields {
+        monthly: Option<Money>,
+        term: Option<u32>,
+        day: Option<u32>,
+    }
+
+    /// `None` for a blank field, else `parse(text)`.
+    fn optional<T>(
+        text: &str,
+        parse: impl FnOnce(&str) -> Result<T, ServerFnError>,
+    ) -> Result<Option<T>, ServerFnError> {
+        if text.trim().is_empty() {
+            Ok(None)
+        } else {
+            parse(text).map(Some)
+        }
+    }
+
+    fn plan_fields(f: &PlanForm) -> Result<PlanFields, ServerFnError> {
+        let monthly = optional(&f.monthly, |t| match amount(t, msg::PLAN_MONTHLY)? {
+            m if m > Money::ZERO => Ok(m),
+            _ => Err(fail(msg::PLAN_MONTHLY)),
+        })?;
+        let term = optional(&f.term, |t| number(t, 1..=MAX_REMAINING, msg::REMAINING))?;
+        let day = optional(&f.day, |t| number(t, 1..=31, msg::DAY))?;
+        if monthly.is_some() && term.is_some() {
+            return Err(fail(msg::PLAN_BOTH));
+        }
+        Ok(PlanFields { monthly, term, day })
+    }
+
+    /// The debt behind `id`, provided something is still owed on it.
+    async fn open_debt(db: &dyn DatabaseAdapter, id: &str) -> Result<Debt, ServerFnError> {
+        let debt = db
+            .debt_by_slug(id)
+            .await
+            .map_err(|e| store_error(msg::DEBT_GONE, msg::PLAN_INVALID, &e))?;
+        if debt.balance <= Money::ZERO {
+            return Err(fail(msg::PAID_OFF));
+        }
+        Ok(debt)
+    }
+
+    /// `monthly` must pay `debt` off at `apr`, else `text`.
+    fn must_pay_off(
+        debt: &Debt,
+        monthly: Money,
+        apr: f64,
+        text: &'static str,
+    ) -> Result<(), ServerFnError> {
+        match debt_plan::pays_off(debt.balance, monthly, apr) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(fail(text)),
+            Err(_) => Err(fail(msg::RETRY)),
+        }
+    }
+
+    pub(crate) async fn adjust_debt_plan_with(
+        db: &dyn DatabaseAdapter,
+        id: String,
+        form: PlanForm,
+    ) -> Result<(), ServerFnError> {
+        let id = slug(msg::DEBT_GONE, &id)?;
+        let p = plan_fields(&form)?;
+        if p.monthly.is_none() && p.term.is_none() && p.day.is_none() {
+            return Err(fail(msg::PLAN_EMPTY));
+        }
+        let debt = open_debt(db, id).await?;
+        if let Some(m) = p.monthly {
+            must_pay_off(&debt, m, debt.apr, msg::NEVER_PAYS)?;
+        }
+        let adjust = PlanAdjust {
+            monthly: p.monthly,
+            day: p.day,
+            remaining_term: p.term,
+        };
+        debt_plan::adjust_plan(db, id, crate::data::today(), adjust)
+            .await
+            .map_err(|e| store_error(msg::DEBT_GONE, msg::PLAN_INVALID, &e))
+    }
+
+    pub(crate) async fn refinance_debt_with(
+        db: &dyn DatabaseAdapter,
+        id: String,
+        form: PlanForm,
+    ) -> Result<(), ServerFnError> {
+        let id = slug(msg::DEBT_GONE, &id)?;
+        if form.apr.trim().is_empty() {
+            return Err(fail(msg::APR));
+        }
+        let rate = apr(&form.apr)?;
+        let lender = optional(&form.lender, |t| {
+            bounded(t.trim().to_owned(), MAX_NAME, msg::LENDER)
+        })?;
+        let p = plan_fields(&form)?;
+        let debt = open_debt(db, id).await?;
+        match (p.monthly, p.term) {
+            (Some(m), _) => must_pay_off(&debt, m, rate, msg::NEVER_PAYS)?,
+            (None, None) if rate.to_bits() != debt.apr.to_bits() => {
+                if debt.monthly <= Money::ZERO {
+                    return Err(fail(msg::REFI_NO_INSTALMENT));
+                }
+                must_pay_off(&debt, debt.monthly, rate, msg::NEVER_PAYS_KEPT)?;
+            }
+            _ => {}
+        }
+        let refi = Refinance {
+            apr: rate,
+            lender,
+            monthly: p.monthly,
+            day: p.day,
+            remaining_term: p.term,
+        };
+        debt_plan::refinance(db, id, crate::data::today(), refi)
+            .await
+            .map_err(|e| store_error(msg::DEBT_GONE, msg::PLAN_INVALID, &e))
+    }
+
     /// `"in"` / `"out"`, else the fixed direction text.
     fn dir(text: &str) -> Result<String, ServerFnError> {
         let d = text.trim().to_ascii_lowercase();
@@ -488,4 +651,21 @@ mod msg {
     pub(super) const DEBT_GONE: &str = "This debt no longer exists.";
     pub(super) const IOU_GONE: &str = "This IOU no longer exists.";
     pub(super) const RETRY: &str = "Could not save, please try again.";
+    pub(super) const PLAN_MONTHLY: &str =
+        "Monthly payment: enter an amount above zero in CHF, like 250.";
+    pub(super) const REMAINING: &str =
+        "Remaining term: enter a whole number of months, from one to five hundred ninety-nine.";
+    pub(super) const PLAN_BOTH: &str = "Give the monthly payment or the remaining term, not \
+        both: one sets the other.";
+    pub(super) const PLAN_EMPTY: &str =
+        "Nothing to change: fill in a new monthly payment, remaining term or payment day.";
+    pub(super) const PAID_OFF: &str = "This debt is paid off; there is no plan to change.";
+    pub(super) const NEVER_PAYS: &str = "That monthly payment does not cover the interest, so \
+        the debt would never be paid off. Enter a higher amount or a remaining term instead.";
+    pub(super) const NEVER_PAYS_KEPT: &str = "At the new rate the current monthly payment no \
+        longer pays the debt off. Enter a higher monthly payment or a remaining term.";
+    pub(super) const REFI_NO_INSTALMENT: &str = "This debt has no monthly payment to keep: \
+        enter a new monthly payment or a remaining term.";
+    pub(super) const PLAN_INVALID: &str = "Could not change the plan: check the monthly \
+        payment, the remaining term and the payment day.";
 }

@@ -185,6 +185,20 @@ pub async fn refinance(
     commit(db, &current, next).await
 }
 
+/// Whether a positive instalment of `monthly` pays `balance` off at `apr`
+/// within the read side's horizon — the rule [`adjust_plan`] and [`refinance`]
+/// apply to a plan. A caller can check a request against it first and explain
+/// a refusal in its own words.
+///
+/// # Errors
+/// [`PhoskError::Overflow`] if the amortisation leaves the centime range.
+pub fn pays_off(balance: Money, monthly: Money, apr: f64) -> Result<bool, PhoskError> {
+    if monthly.centimes() <= 0 {
+        return Ok(false);
+    }
+    Ok(months_to_payoff(balance, monthly, apr / 12.0)? < REVOLVING_MONTHS)
+}
+
 /// The debt behind `slug`, provided something is still owed on it.
 async fn outstanding(db: &dyn DatabaseAdapter, slug: &str) -> Result<Debt, PhoskError> {
     let debt = db.debt_by_slug(slug).await?;

@@ -1,5 +1,6 @@
 //! The Debts page's write UI (T39): the debt and IOU create/edit forms, the
-//! inline payment fields, and the confirm-before-delete step.
+//! ADJUST PLAN / REFINANCE form, the inline payment fields, and the
+//! confirm-before-delete step.
 //!
 //! Every panel keeps its state in its own page-level [`Panel`] signal, so a
 //! save in one panel (and the refetch that follows it) never closes or resets
@@ -14,7 +15,8 @@ use dioxus::prelude::*;
 use crate::components::states::InlineStatus;
 use crate::data::budgets::cap_input_text;
 use crate::data::debt_actions::{
-    action_error_text, create_debt, create_iou, edit_debt, edit_iou, DebtForm, IouForm, DEBT_KINDS,
+    action_error_text, adjust_debt_plan, create_debt, create_iou, edit_debt, edit_iou,
+    refinance_debt, DebtForm, IouForm, PlanForm, DEBT_KINDS,
 };
 use crate::data::debts::{DebtDto, PersonalIouDto};
 
@@ -103,8 +105,49 @@ where
     });
 }
 
+/// The ADJUST PLAN / REFINANCE draft: which of the two, and the typed values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanDraft {
+    /// `true` for REFINANCE (new APR, optionally a new lender), `false` for
+    /// ADJUST PLAN.
+    pub refinance: bool,
+    /// The typed values; blank = keep.
+    pub form: PlanForm,
+}
+
+/// An APR rate (`0.039`) as the percent text the forms take (`"3.9"`).
+pub fn apr_percent_text(apr: f64) -> String {
+    if !apr.is_finite() {
+        return String::new();
+    }
+    let bp = (apr * 10_000.0).round() as i64;
+    let (whole, frac) = (bp / 100, bp % 100);
+    match frac {
+        0 => whole.to_string(),
+        f if f % 10 == 0 => format!("{whole}.{}", f / 10),
+        f => format!("{whole}.{f:02}"),
+    }
+}
+
+/// The plan form's starting values for `d`: every field blank (= keep), except
+/// a refinance's APR, which starts at the current rate.
+pub fn plan_draft(d: &DebtDto, refinance: bool) -> PlanDraft {
+    PlanDraft {
+        refinance,
+        form: PlanForm {
+            apr: if refinance {
+                apr_percent_text(d.apr)
+            } else {
+                String::new()
+            },
+            ..PlanForm::default()
+        },
+    }
+}
+
 /// The edit form's starting values for `d`. Balance, plan and APR are
-/// create-only (see `DebtForm`), so the edit draft leaves them blank.
+/// changed elsewhere (payments, ADJUST PLAN, REFINANCE), so the edit draft
+/// leaves them blank.
 pub fn debt_draft(d: &DebtDto) -> DebtForm {
     DebtForm {
         name: d.name.clone(),
@@ -145,13 +188,15 @@ pub fn new_iou_draft() -> IouForm {
     }
 }
 
-/// One labelled text field. `num` sets it in Pilowlava with a decimal keypad.
+/// One labelled text field. `num` sets it in Pilowlava with a decimal keypad;
+/// `placeholder` shows the current value a blank field keeps.
 #[component]
 fn Field(
     label: String,
     value: String,
     #[props(default = false)] num: bool,
     #[props(default = false)] wide: bool,
+    #[props(default)] placeholder: String,
     busy: bool,
     on_input: EventHandler<String>,
 ) -> Element {
@@ -163,6 +208,7 @@ fn Field(
                 r#type: "text",
                 inputmode: if num { "decimal" } else { "text" },
                 autocomplete: "off",
+                placeholder: "{placeholder}",
                 value: "{value}",
                 readonly: busy,
                 oninput: move |e: Event<FormData>| on_input.call(e.value()),
@@ -236,8 +282,8 @@ pub fn DebtFormPanel(panel: Signal<Panel<DebtForm>>, on_saved: Callback<()>) -> 
                 }
             }
             // The balance is set once; afterwards only payments move it. The
-            // plan and the APR are set once too: changing them is T17's
-            // adjust-plan / refinance, which has no UI yet.
+            // plan and the APR change through ADJUST PLAN / REFINANCE
+            // (`PlanFormPanel`), which run T17's plan rules.
             if target.is_empty() {
                 Field { label: "Balance · CHF", value: f.balance, num: true, busy, on_input: set(|d, v| d.balance = v) }
             }
@@ -249,6 +295,80 @@ pub fn DebtFormPanel(panel: Signal<Panel<DebtForm>>, on_saved: Callback<()>) -> 
                 Field { label: "Term · months", value: f.term, num: true, busy, on_input: set(|d, v| d.term = v) }
             }
             Field { label: "Note", value: f.note, wide: true, busy, on_input: set(|d, v| d.note = v) }
+            FormActions { busy, error: p.error, on_cancel: move |()| panel.write().close() }
+        }
+    }
+}
+
+/// The ADJUST PLAN / REFINANCE form for `d`; renders nothing unless open for
+/// it. Blank fields keep their value (the placeholders show the current one);
+/// the server checks the plan and answers a refusal with a fixed text shown
+/// inline.
+#[component]
+pub fn PlanFormPanel(
+    panel: Signal<Panel<PlanDraft>>,
+    d: DebtDto,
+    on_saved: Callback<()>,
+) -> Element {
+    let p = panel.read().clone();
+    if !p.is_open_for(&d.id) {
+        return rsx! {};
+    }
+    let busy = p.saving;
+    let refi = p.draft.refinance;
+    let f = p.draft.form;
+    let head = if refi {
+        format!("∿ REFINANCE · {}", d.name)
+    } else {
+        format!("∿ ADJUST PLAN · {}", d.name)
+    };
+    let cur_monthly = cap_input_text(d.monthly);
+    let cur_term = if d.months_to_payoff >= 600 {
+        String::new()
+    } else {
+        d.months_to_payoff.to_string()
+    };
+    let cur_day = d.day.to_string();
+    let cur_lender = d.lender.clone();
+    let save = move |()| {
+        let (id, draft) = {
+            let p = panel.read();
+            (p.open.clone().unwrap_or_default(), p.draft.clone())
+        };
+        let action = async move {
+            if draft.refinance {
+                refinance_debt(id, draft.form).await
+            } else {
+                adjust_debt_plan(id, draft.form).await
+            }
+        };
+        submit(panel, action, on_saved);
+    };
+    let set = move |apply: fn(&mut PlanForm, String)| {
+        move |v: String| apply(&mut panel.write().draft.form, v)
+    };
+
+    rsx! {
+        form {
+            class: "dx-form",
+            onclick: move |e: Event<MouseData>| e.stop_propagation(),
+            onsubmit: move |e: Event<FormData>| {
+                e.prevent_default();
+                save(());
+            },
+            div { class: "dx-h", "{head}" }
+            if refi {
+                Field { label: "New APR · %", value: f.apr, num: true, busy, on_input: set(|d, v| d.apr = v) }
+                Field { label: "Lender", value: f.lender, placeholder: cur_lender, busy, on_input: set(|d, v| d.lender = v) }
+            }
+            Field { label: "Monthly · CHF", value: f.monthly, num: true, placeholder: cur_monthly, busy, on_input: set(|d, v| d.monthly = v) }
+            Field { label: "Months left", value: f.term, num: true, placeholder: cur_term, busy, on_input: set(|d, v| d.term = v) }
+            Field { label: "Payment day", value: f.day, num: true, placeholder: cur_day, busy, on_input: set(|d, v| d.day = v) }
+            div {
+                class: "dx-fld wide dim",
+                style: "font-size:var(--t-xs);line-height:var(--lh-body)",
+                "Blank keeps the current value. Give a monthly payment or the months left — the other follows. Effective today."
+            }
             FormActions { busy, error: p.error, on_cancel: move |()| panel.write().close() }
         }
     }
@@ -375,5 +495,20 @@ pub fn DeleteConfirm(
             button { class: "gbtn", r#type: "button", disabled: busy, onclick: move |_| panel.write().open(&t_arm, true), "DELETE" }
         }
         InlineStatus { pending: busy, error }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apr_percent_text;
+
+    #[test]
+    fn apr_percent_text_is_what_the_apr_field_parses() {
+        assert_eq!(apr_percent_text(0.039), "3.9");
+        assert_eq!(apr_percent_text(0.129), "12.9");
+        assert_eq!(apr_percent_text(0.0525), "5.25");
+        assert_eq!(apr_percent_text(0.05), "5");
+        assert_eq!(apr_percent_text(0.0), "0");
+        assert_eq!(apr_percent_text(f64::NAN), "");
     }
 }
