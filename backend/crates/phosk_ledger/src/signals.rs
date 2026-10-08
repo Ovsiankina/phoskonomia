@@ -179,27 +179,25 @@ pub async fn signal_candidates(
     Ok(out)
 }
 
-/// The fastest riser / faller pair + the momentum-ranked full list.
+/// The fastest riser / faller pair + the momentum-ranked full list, or `None`
+/// while nothing is tracked yet (a normal state for a new store, not an error).
+///
+/// # Errors
+/// Propagates any adapter [`PhoskError`].
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn movers(
     db: &dyn DatabaseAdapter,
     as_of: chrono::NaiveDate,
-) -> Result<MoversDto, PhoskError> {
+) -> Result<Option<MoversDto>, PhoskError> {
     let mut all = list_signals(db, as_of).await?;
     // Momentum-ranked descending (riser first, faller last); ties on id for a
     // deterministic order.
     all.sort_by(|a, b| b.delta_pct.cmp(&a.delta_pct).then_with(|| a.id.cmp(&b.id)));
 
-    let riser = all
-        .first()
-        .cloned()
-        .ok_or_else(|| PhoskError::NotFound("no tracked signals for movers".to_owned()))?;
-    let faller = all
-        .last()
-        .cloned()
-        .ok_or_else(|| PhoskError::NotFound("no tracked signals for movers".to_owned()))?;
-
-    Ok(MoversDto { riser, faller, all })
+    let (Some(riser), Some(faller)) = (all.first().cloned(), all.last().cloned()) else {
+        return Ok(None);
+    };
+    Ok(Some(MoversDto { riser, faller, all }))
 }
 
 /// One signal's full inspector payload, resolved by its seed `slug`.
