@@ -13,6 +13,7 @@
 use chrono::{Datelike, Duration, Months, NaiveDate};
 
 use crate::error::PhoskError;
+use crate::money::Money;
 
 /// A budgeting/reporting cadence. The dashboard's "current cycle" is
 /// [`Period::Month`]; the transactions horizon filter uses the others.
@@ -110,6 +111,40 @@ impl CycleWindow {
     }
 }
 
+impl CycleWindow {
+    /// Linear run-rate projection of spend-to-date `spent` to the window's
+    /// end: `spent · len_days / day_index`, in exact (truncated) centimes.
+    ///
+    /// Only for spend that accrues over the cycle. A fixed/standing charge is
+    /// paid once per cycle and must not be scaled; use [`Self::project_spend`]
+    /// for a figure that mixes both.
+    ///
+    /// # Errors
+    /// [`PhoskError::Overflow`] if the scaled amount leaves the `i64` centime
+    /// range.
+    pub fn project_linear(&self, spent: Money) -> Result<Money, PhoskError> {
+        let day_index = i64::from(self.day_index().max(1));
+        let len_days = i64::from(self.len_days());
+        let scaled = spent.centimes().checked_mul(len_days).ok_or_else(|| {
+            PhoskError::Overflow(format!("projecting {spent} over {len_days} days"))
+        })?;
+        Ok(Money::from_centimes(scaled / day_index))
+    }
+
+    /// The end-of-window projection of a spend-to-date split into its `fixed`
+    /// part (standing charges: rent paid on day 1 is the whole month's rent,
+    /// so it is carried over unchanged) and its `variable` part (projected
+    /// linearly, see [`Self::project_linear`]): `fixed + variable · N / d`.
+    ///
+    /// The one projection rule every "on pace for" / "projected" figure uses.
+    ///
+    /// # Errors
+    /// [`PhoskError::Overflow`] if a step leaves the `i64` centime range.
+    pub fn project_spend(&self, fixed: Money, variable: Money) -> Result<Money, PhoskError> {
+        fixed.checked_add(self.project_linear(variable)?)
+    }
+}
+
 /// First day of a calendar month, or [`PhoskError::InvalidDate`] if the
 /// year/month pair cannot exist.
 fn first_of_month(year: i32, month: u32) -> Result<NaiveDate, PhoskError> {
@@ -191,6 +226,44 @@ mod tests {
         let w = resolve(Period::Month, d(2026, 6, 1));
         assert_eq!(w.day_index(), 1);
         assert_eq!(w.days_left(), 29);
+    }
+
+    // ── Projection ───────────────────────────────────────────────────────
+    #[test]
+    fn linear_projection_scales_to_the_window_end() {
+        // Day 10 of 30: ×3, truncated to the centime.
+        let w = resolve(Period::Month, d(2026, 6, 10));
+        let p = w.project_linear(Money::from_centimes(10_001)).expect("fits");
+        assert_eq!(p, Money::from_centimes(30_003));
+        let day1 = resolve(Period::Month, d(2026, 6, 1));
+        let p = day1.project_linear(Money::from_centimes(100)).expect("fits");
+        assert_eq!(p, Money::from_centimes(3_000));
+    }
+
+    #[test]
+    fn a_fixed_charge_is_never_projected() {
+        // Rent CHF 1680 paid on day 1, CHF 30 of groceries by day 1: the rent
+        // stays 1680, only the groceries run at ×30.
+        let w = resolve(Period::Month, d(2026, 6, 1));
+        let p = w
+            .project_spend(Money::from_centimes(168_000), Money::from_centimes(3_000))
+            .expect("fits");
+        assert_eq!(p, Money::from_centimes(168_000 + 90_000));
+        // Nothing variable → the fixed total, whatever the day.
+        let mid = resolve(Period::Month, d(2026, 6, 18));
+        let p = mid
+            .project_spend(Money::from_centimes(168_000), Money::ZERO)
+            .expect("fits");
+        assert_eq!(p, Money::from_centimes(168_000));
+    }
+
+    #[test]
+    fn projection_overflow_is_an_error() {
+        let w = resolve(Period::Month, d(2026, 6, 1));
+        assert!(matches!(
+            w.project_linear(Money::from_centimes(i64::MAX)),
+            Err(PhoskError::Overflow(_))
+        ));
     }
 
     // ── Day ──────────────────────────────────────────────────────────────
