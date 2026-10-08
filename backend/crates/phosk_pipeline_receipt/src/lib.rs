@@ -420,8 +420,22 @@ async fn transcribe_and_extract(
     parse_extraction(ocr_result, &out)
 }
 
+/// What a line's `confidence` means, shared by the prompt and the schema.
+const LINE_CONFIDENCE_RUBRIC: &str = "how sure you are that you read this line's name \
+     and price correctly from the transcription (not how sure you are of its category): \
+     0.9 to 1.0 when both are printed clearly and completely; 0.5 to 0.8 when either is \
+     partly illegible, garbled or had to be pieced together; below 0.5 when either is \
+     guessed. A price that is missing from the transcription and that you worked out \
+     (from the total, from other lines, or from what such an item usually costs) is \
+     guessed";
+
 /// JSON Schema for the structured receipt-extraction output (ADR-008). The
 /// adapter guarantees the returned `Value` validates against this.
+///
+/// The `description`s document the fields for the repair retry, which quotes
+/// the schema back to the model. Ollama turns `format` into a decoding
+/// grammar and does not show the schema to the model, so everything the
+/// model must know is also in [`extraction_prompt`].
 fn extraction_schema(categories: &[String]) -> serde_json::Value {
     // With a configured category list the model may only answer one of them.
     let category = if categories.is_empty() {
@@ -433,7 +447,10 @@ fn extraction_schema(categories: &[String]) -> serde_json::Value {
         "type": "object",
         "properties": {
             "shop": { "type": "string" },
-            "date": { "type": "string" },
+            "date": {
+                "type": "string",
+                "description": "purchase date as YYYY-MM-DD, empty if not printed"
+            },
             "category": category,
             "lineItems": {
                 "type": "array",
@@ -442,9 +459,15 @@ fn extraction_schema(categories: &[String]) -> serde_json::Value {
                     "properties": {
                         "name": { "type": "string" },
                         "qty": { "type": "number" },
-                        "unitPriceCentimes": { "type": "integer" },
+                        "unitPriceCentimes": {
+                            "type": "integer",
+                            "description": "price of one unit in integer centimes (CHF)"
+                        },
                         "category": category,
-                        "confidence": { "type": "number" }
+                        "confidence": {
+                            "type": "number",
+                            "description": LINE_CONFIDENCE_RUBRIC
+                        }
                     },
                     "required": ["name", "qty", "unitPriceCentimes", "confidence"]
                 }
@@ -455,20 +478,29 @@ fn extraction_schema(categories: &[String]) -> serde_json::Value {
 }
 
 /// Build the extraction prompt from the OCR transcription.
+///
+/// The confidence rubric is spelled out here, line by line: given only the
+/// bare field name, a model answers one flat value for every line (a live
+/// run gave `0.6` throughout a clean printed receipt, which flagged all of
+/// it for review).
 fn extraction_prompt(ocr_text: &str, categories: &[String]) -> String {
     let list = if categories.is_empty() {
         String::new()
     } else {
         format!(
-            " Every category (overall and per line) must be one of: {}.",
+            "\nEvery category (overall and per line) must be one of: {}.",
             categories.join(", ")
         )
     };
     format!(
-        "Extract the shop, the purchase date (YYYY-MM-DD, empty if not printed), \
+        "Extract the shop, the purchase date (as YYYY-MM-DD, so 07.10.2026 on the \
+         slip is 2026-10-07; empty if not printed), \
          an overall category, and the line items from this Swiss receipt \
          transcription. Reply as JSON matching the schema; amounts are integer \
-         centimes (CHF); skip totals, payment, change and VAT lines.{list} \
+         centimes (CHF); skip totals, payment, change and VAT lines.{list}\n\
+         For each line item, `confidence` is {LINE_CONFIDENCE_RUBRIC}. Rate every \
+         line on its own: a clean printed receipt has most lines at 0.9 or above, \
+         and only the lines you really struggled to read go lower.\n\
          Transcription:\n{ocr_text}"
     )
 }
@@ -546,7 +578,7 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
     let date = out
         .get("date")
         .and_then(serde_json::Value::as_str)
-        .and_then(|d| chrono::NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").ok());
+        .and_then(parse_receipt_date);
 
     Ok(Extracted {
         ocr,
@@ -556,6 +588,17 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
         category_guessed: false,
         lines,
     })
+}
+
+/// The model's purchase date: the asked-for `YYYY-MM-DD`, or the Swiss
+/// `DD.MM.YYYY` / `DD.MM.YY` a model sometimes copies off the slip instead
+/// (dropping it would silently book the receipt on the capture date).
+fn parse_receipt_date(raw: &str) -> Option<chrono::NaiveDate> {
+    let raw = raw.trim();
+    // `%y` before `%Y`: `%Y` would read "07.10.26" as the year 26.
+    ["%Y-%m-%d", "%d.%m.%y", "%d.%m.%Y"]
+        .iter()
+        .find_map(|fmt| chrono::NaiveDate::parse_from_str(raw, fmt).ok())
 }
 
 /// Placeholder name of a line the model could not read.
@@ -883,5 +926,38 @@ mod unit_tests {
     fn derive_line_total_rejects_bad_qty() {
         assert!(derive_line_total(f64::NAN, Money::from_centimes(100)).is_err());
         assert!(derive_line_total(-1.0, Money::from_centimes(100)).is_err());
+    }
+
+    #[test]
+    fn a_swiss_date_off_the_slip_is_still_read() {
+        let d = |y, m, day| chrono::NaiveDate::from_ymd_opt(y, m, day);
+        assert_eq!(parse_receipt_date("2026-10-07"), d(2026, 10, 7));
+        assert_eq!(parse_receipt_date(" 07.10.2026 "), d(2026, 10, 7));
+        assert_eq!(parse_receipt_date("07.10.26"), d(2026, 10, 7));
+        assert_eq!(parse_receipt_date(""), None);
+        assert_eq!(parse_receipt_date("10/07/2026"), None);
+        assert_eq!(parse_receipt_date("31.02.2026"), None);
+    }
+
+    /// The model is told what a line's confidence measures and how to scale
+    /// it, in the prompt (Ollama never shows it the schema) and in the
+    /// schema's description (the repair retry quotes the schema).
+    #[test]
+    fn the_confidence_rubric_reaches_the_model() {
+        let prompt = extraction_prompt("MIGROS", &["Groceries".to_owned()]);
+        assert!(prompt.contains(LINE_CONFIDENCE_RUBRIC));
+        assert!(prompt.contains("name and price"));
+        for band in ["0.9 to 1.0", "0.5 to 0.8", "below 0.5"] {
+            assert!(prompt.contains(band), "missing band {band}");
+        }
+        assert!(prompt.ends_with("Transcription:\nMIGROS"));
+
+        assert!(prompt.contains("worked out"), "a derived price is a guess");
+
+        let schema = extraction_schema(&[]);
+        assert_eq!(
+            schema["properties"]["lineItems"]["items"]["properties"]["confidence"]["description"],
+            LINE_CONFIDENCE_RUBRIC
+        );
     }
 }
