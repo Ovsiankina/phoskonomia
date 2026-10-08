@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# phosk — start Phoskonomia for daily use.
+#
+#   scripts/phosk           your own data (PHOSK_DB=surreal, real date)
+#   scripts/phosk --demo    the seeded demo (2026-06-18, in-memory, port 3718)
+#   scripts/phosk --build   force a fresh release build first
+#   scripts/phosk --no-open do not open a browser
+#
+# It checks Ollama, builds the release app once (again only when a source is
+# newer than the binary), runs the server on 127.0.0.1 only, waits until it
+# answers and opens the browser. Ctrl-C stops the server.
+#
+# Every default below can be overridden from the environment; see
+# docs/USING.md for the full list.
+set -euo pipefail
+
+repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+app="$repo/frontend/dioxus-app"
+
+ip="${PHOSK_IP:-127.0.0.1}"
+ollama_url="${PHOSK_OLLAMA_URL:-http://127.0.0.1:11434}"
+target_dir="${CARGO_TARGET_DIR:-$repo/target}"
+out_dir="$target_dir/dx/dioxus-app/release/web"
+server_bin="$out_dir/server"
+
+demo=0
+force_build=0
+open_browser=1
+for arg in "$@"; do
+    case "$arg" in
+        --demo) demo=1 ;;
+        --build | --rebuild) force_build=1 ;;
+        --no-open) open_browser=0 ;;
+        -h | --help)
+            sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "phosk: unknown option: $arg (try --help)" >&2
+            exit 2
+            ;;
+    esac
+done
+
+# The demo gets its own port, so it can run next to your real instance (and a
+# running real instance is never mistaken for the demo).
+if [ "$demo" -eq 1 ]; then
+    port="${PHOSK_PORT:-3718}"
+else
+    port="${PHOSK_PORT:-3717}"
+fi
+
+say() { printf 'phosk: %s\n' "$*"; }
+
+# ── 1. Ollama ────────────────────────────────────────────────────────────────
+ollama_up() { curl -fsS --max-time 2 "$ollama_url/api/tags" >/dev/null 2>&1; }
+
+if ollama_up; then
+    say "Ollama is up at $ollama_url"
+elif command -v ollama >/dev/null 2>&1; then
+    say "Ollama is not answering; starting 'ollama serve' in the background"
+    models_dir="${OLLAMA_MODELS:-}"
+    if [ -z "$models_dir" ] && [ -d /var/lib/ollama ]; then
+        models_dir=/var/lib/ollama
+    fi
+    log="${XDG_STATE_HOME:-$HOME/.local/state}/phoskonomia/ollama.log"
+    mkdir -p "$(dirname -- "$log")"
+    if [ -n "$models_dir" ]; then
+        OLLAMA_MODELS="$models_dir" nohup ollama serve >"$log" 2>&1 &
+    else
+        nohup ollama serve >"$log" 2>&1 &
+    fi
+    for _ in $(seq 1 30); do
+        ollama_up && break
+        sleep 1
+    done
+    if ollama_up; then
+        say "Ollama started (log: $log)"
+    else
+        say "Ollama did not come up in 30 s (log: $log); the app will run without the assistant and receipt reading"
+    fi
+else
+    say "Ollama is not installed or not running. Start it with 'ollama serve'"
+    say "(or 'systemctl start ollama'); the app runs, but chat and receipt reading need it"
+fi
+
+# ── 2. Release build, only when needed ───────────────────────────────────────
+needs_build() {
+    [ "$force_build" -eq 1 ] && return 0
+    [ -x "$server_bin" ] || return 0
+    # Any app, backend crate or manifest newer than the built server?
+    [ -n "$(find "$app/src" "$app/assets" "$app/Cargo.toml" "$app/Dioxus.toml" \
+        "$repo/backend/crates" "$repo/Cargo.toml" "$repo/Cargo.lock" \
+        -newer "$server_bin" -type f \
+        \( -name '*.rs' -o -name '*.toml' -o -name '*.lock' -o -name '*.css' \
+        -o -name '*.woff2' -o -name '*.ttf' -o -name '*.otf' -o -name '*.svg' \
+        -o -name '*.png' -o -name '*.js' \) -print -quit 2>/dev/null)" ]
+}
+
+if needs_build; then
+    command -v dx >/dev/null 2>&1 || {
+        echo "phosk: 'dx' (dioxus-cli 0.7.6) is needed to build: cargo install dioxus-cli --version 0.7.6 --locked" >&2
+        exit 1
+    }
+    say "building the release app (first run or sources changed; this takes a while)"
+    (cd "$app" && CARGO_TARGET_DIR="$target_dir" dx build --release --platform web --fullstack true)
+fi
+[ -x "$server_bin" ] || {
+    echo "phosk: build finished but $server_bin is missing" >&2
+    exit 1
+}
+
+# ── 3. Run ──────────────────────────────────────────────────────────────────
+if curl -fsS --max-time 1 "http://$ip:$port/" >/dev/null 2>&1; then
+    say "something already answers on $ip:$port; opening it"
+    [ "$open_browser" -eq 1 ] && command -v xdg-open >/dev/null 2>&1 && xdg-open "http://$ip:$port/" >/dev/null 2>&1 &
+    exit 0
+fi
+
+if [ "$demo" -eq 1 ]; then
+    export PHOSK_DB="${PHOSK_DEMO_DB:-memory}"
+    export PHOSK_DEMO=1
+    say "demo mode: seeded data, nothing you enter is kept"
+else
+    export PHOSK_DB=surreal
+    unset PHOSK_DEMO
+    say "your data: ${PHOSK_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/phoskonomia}"
+fi
+
+# Dioxus 0.7 fullstack reads its bind address from IP / PORT.
+export IP="$ip" PORT="$port"
+cd "$out_dir"
+./server &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true' INT TERM EXIT
+
+url="http://$ip:$port/"
+for _ in $(seq 1 60); do
+    if curl -fsS --max-time 1 "$url" >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        echo "phosk: the server exited during start-up (is the data dir already open by another run?)" >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+curl -fsS --max-time 1 "$url" >/dev/null 2>&1 || {
+    echo "phosk: the server did not answer at $url within 30 s" >&2
+    exit 1
+}
+say "running at $url  (Ctrl-C to stop)"
+if [ "$open_browser" -eq 1 ] && command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 || true
+fi
+wait "$server_pid"
