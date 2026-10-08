@@ -135,22 +135,23 @@ pub async fn get_signal_candidates() -> Result<Vec<SignalDto>, ServerFnError> {
     }
 }
 
-/// The fastest mover pair + full list (`GET /signals/movers`).
+/// The fastest mover pair + full list (`GET /signals/movers`); `None` while
+/// nothing is tracked yet (an empty state, not an error).
 ///
 /// REAL: composes `phosk_ledger::signals::movers`.
 #[server]
-pub async fn get_movers() -> Result<MoversDto, ServerFnError> {
+pub async fn get_movers() -> Result<Option<MoversDto>, ServerFnError> {
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
         let m = phosk_ledger::signals::movers(session.db(), crate::data::today())
             .await
             .map_err(crate::data::server_err)?;
-        Ok(MoversDto {
+        Ok(m.map(|m| MoversDto {
             riser: map_signal(m.riser),
             faller: map_signal(m.faller),
             all: m.all.into_iter().map(map_signal).collect(),
-        })
+        }))
     }
     #[cfg(not(feature = "server-deps"))]
     {

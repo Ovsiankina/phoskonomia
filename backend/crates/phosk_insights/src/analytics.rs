@@ -24,6 +24,8 @@ use phosk_core::cycle::Period;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 
+use phosk_planning::budgets::category_history;
+
 use crate::momentum::{delta_pct, trailing_avg};
 
 /// One cycle's point on the spend-trend scope (`SpendHistoryDto::points` element).
@@ -73,31 +75,45 @@ pub struct CyclePointDto {
 }
 
 /// `GET /analytics/spend-history/stats` — the trend roll-ups.
+///
+/// "On record" means from the first cycle of the window that has any spend
+/// through the current one: months before the user started are not cycles.
+/// The averages, `totalSaved`, `peak` and `low` cover only *settled* cycles
+/// on record (the current one is still running); see [`spend_stats`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendStatsDto {
-    /// Cycles on record.
+    /// Cycles on record, the current one included (at least 1).
     pub months: u32,
-    /// 6-month average spend, exact i64 centimes.
+    /// Average spend of the last `avgCycles` settled cycles, exact i64
+    /// centimes (zero when there are none).
     #[serde(with = "phosk_model::money_centimes")]
     pub avg: Money,
-    /// Average savings rate, 0–1.
+    /// How many settled cycles `avg` / `avgRate` average (0–6).
+    pub avg_cycles: u32,
+    /// Average savings rate (saved / budget) over the same cycles, 0–1.
     pub avg_rate: f64,
-    /// Total saved over the window, exact i64 centimes.
+    /// Total saved over the settled cycles on record, exact i64 centimes.
     #[serde(with = "phosk_model::money_centimes")]
     pub total_saved: Money,
-    /// This cycle (run-rate).
+    /// This cycle so far.
     pub cur: CyclePointDto,
     /// Previous cycle.
     pub prev: CyclePointDto,
-    /// Peak (highest-spend) cycle.
+    /// Peak (highest-spend) settled cycle on record (`cur` if none).
     pub peak: CyclePointDto,
-    /// Leanest (lowest-spend) cycle.
+    /// Leanest (lowest-spend) settled cycle on record (`cur` if none).
     pub low: CyclePointDto,
-    /// Signed percent vs 6-mo avg.
+    /// Signed percent of `cur` vs `avg` (0 with no settled cycle).
     pub cur_vs_avg_pct: i32,
     /// Signed percent vs the previous cycle.
     pub cur_vs_prev_pct: i32,
+    /// This cycle's spend projected to its end at the pace so far
+    /// (spend-to-date · N / d), exact i64 centimes.
+    #[serde(with = "phosk_model::money_centimes")]
+    pub run_rate: Money,
+    /// Signed percent of `runRate` vs `avg` (0 with no settled cycle).
+    pub run_rate_vs_avg_pct: i32,
 }
 
 /// One category's momentum card (`GET /analytics/category-momentum` element).
@@ -119,6 +135,10 @@ pub struct MomentumDto {
     /// Trailing-N (default 3) cycle average spend, exact i64 centimes.
     #[serde(with = "phosk_model::money_centimes")]
     pub prior_avg: Money,
+    /// How many settled cycles `priorAvg` actually averages: the
+    /// `momentum_baseline_cycles` setting, or fewer when less history exists
+    /// (0 = no baseline yet, so `deltaPct` is 0 and means nothing).
+    pub baseline_cycles: u32,
     /// `true` for a fixed channel.
     pub fixed: bool,
 }
@@ -228,9 +248,14 @@ pub async fn spend_history(
 
 /// The spend-trend roll-ups (`GET /analytics/spend-history/stats`).
 ///
-/// `avg` = mean spend over the trailing 6 cycles; `cur`/`prev`/`peak`/`low` from
-/// the history points; `curVsAvgPct = pct_delta(cur, avg)`,
-/// `curVsPrevPct = pct_delta(cur, prev)` with
+/// Over the cycles *on record* (the first cycle of the window with any spend
+/// through the current one): `months` counts them; `avg`/`avgRate` average the
+/// last up-to-6 settled ones (`avgCycles`), `totalSaved` sums their savings and
+/// `peak`/`low` pick from them (falling back to `cur` when there is none yet).
+/// `cur`/`prev` are the last two history points; `runRate` projects the
+/// spend-to-date at `as_of` to the cycle end. `curVsAvgPct = pct_delta(cur,
+/// avg)`, `runRateVsAvgPct = pct_delta(runRate, avg)` (both 0 without a settled
+/// cycle), `curVsPrevPct = pct_delta(cur, prev)` with
 /// `pct_delta(a,b) = round(100·(a−b)/b)` (0 when `b == 0`).
 ///
 /// # Errors
@@ -255,23 +280,28 @@ pub async fn spend_stats(
         .get(points.len().wrapping_sub(2))
         .map_or_else(|| cur.clone(), cycle_point);
 
-    // peak = highest-spend cycle, low = leanest. Ties resolve to the first seen.
-    let peak = cycle_point(
-        points
-            .iter()
-            .max_by_key(|p| p.spend.centimes())
-            .ok_or_else(no_point)?,
-    );
-    let low = cycle_point(
-        points
-            .iter()
-            .min_by_key(|p| p.spend.centimes())
-            .ok_or_else(no_point)?,
-    );
+    // On record = from the first cycle with any spend through the current
+    // one; the settled ones are those before the current cycle.
+    let first_recorded = points
+        .iter()
+        .position(|p| p.spend > Money::ZERO)
+        .unwrap_or(points.len() - 1);
+    let recorded = &points[first_recorded..];
+    let settled = &recorded[..recorded.len() - 1];
 
-    // avg = mean spend over the trailing 6 cycles (or all if fewer).
-    let tail_start = points.len().saturating_sub(6);
-    let tail = &points[tail_start..];
+    // peak = highest-spend settled cycle, low = leanest; `cur` when none is
+    // settled yet. Ties resolve to the first seen.
+    let peak = settled
+        .iter()
+        .max_by_key(|p| p.spend.centimes())
+        .map_or_else(|| cur.clone(), cycle_point);
+    let low = settled
+        .iter()
+        .min_by_key(|p| p.spend.centimes())
+        .map_or_else(|| cur.clone(), cycle_point);
+
+    // avg = mean spend over the trailing (up to) 6 settled cycles.
+    let tail = &settled[settled.len().saturating_sub(6)..];
     let tail_count = i64::try_from(tail.len())
         .map_err(|_| PhoskError::Overflow("cycle count out of range".to_owned()))?;
     let avg_sum = Money::sum(tail.iter().map(|p| p.spend))?;
@@ -280,20 +310,28 @@ pub async fn spend_stats(
     // avgRate = mean savings rate over the same trailing window (0..1).
     let avg_rate = mean(&tail.iter().map(|p| p.rate).collect::<Vec<_>>());
 
-    // totalSaved = Σ max(0, budget − spend) over the whole window.
+    // totalSaved = Σ max(0, budget − spend) over the settled cycles on record.
     let mut total_saved = Money::ZERO;
-    for p in points {
+    for p in settled {
         let saved = p.budget.checked_sub(p.spend)?.max(Money::ZERO);
         total_saved = total_saved.checked_add(saved)?;
     }
 
-    let cur_vs_avg_pct = pct_delta(cur.spend, avg);
+    let run_rate = run_rate(db, as_of).await?;
+    let (cur_vs_avg_pct, run_rate_vs_avg_pct) = if tail.is_empty() {
+        (0, 0)
+    } else {
+        (pct_delta(cur.spend, avg), pct_delta(run_rate, avg))
+    };
     let cur_vs_prev_pct = pct_delta(cur.spend, prev.spend);
 
+    let count = |n: usize| {
+        u32::try_from(n).map_err(|_| PhoskError::Overflow("cycle count out of range".to_owned()))
+    };
     Ok(SpendStatsDto {
-        months: u32::try_from(points.len())
-            .map_err(|_| PhoskError::Overflow("cycle count out of range".to_owned()))?,
+        months: count(recorded.len())?,
         avg,
+        avg_cycles: count(tail.len())?,
         avg_rate,
         total_saved,
         cur,
@@ -302,7 +340,25 @@ pub async fn spend_stats(
         low,
         cur_vs_avg_pct,
         cur_vs_prev_pct,
+        run_rate,
+        run_rate_vs_avg_pct,
     })
+}
+
+/// The current cycle's spend-to-date at `as_of`, projected to its end:
+/// `S · N / d` (checked integer-centime math; `S` itself on day 0).
+async fn run_rate(db: &dyn DatabaseAdapter, as_of: chrono::NaiveDate) -> Result<Money, PhoskError> {
+    let window = Period::Month.resolve(as_of)?;
+    let to_date = sum_window(db, window.start, window.as_of).await?;
+    let day = i64::from(window.day_index());
+    if day == 0 {
+        return Ok(to_date);
+    }
+    let scaled = to_date
+        .centimes()
+        .checked_mul(i64::from(window.len_days()))
+        .ok_or_else(|| PhoskError::Overflow("projecting the run-rate".to_owned()))?;
+    Ok(Money::from_centimes(scaled / day))
 }
 
 /// Per-category momentum cards (`GET /analytics/category-momentum`).
@@ -321,6 +377,7 @@ pub async fn category_momentum(
     as_of: chrono::NaiveDate,
 ) -> Result<Vec<MomentumDto>, PhoskError> {
     let n = momentum_baseline_cycles(db).await?;
+    let n_cycles = usize::try_from(n).unwrap_or(usize::MAX);
     let caps = db.category_caps().await?;
 
     // Current-cycle spend per category, from this cycle's receipts.
@@ -338,10 +395,11 @@ pub async fn category_momentum(
         )?;
 
         // Prior-cycle spends (oldest → newest) drive the trailing-N average and
-        // the 12-point spark.
-        let history = db.budget_history(&cap.name).await?;
+        // the 12-point spark: the stored history, else derived from receipts.
+        let history = category_history(db, &cap.name, as_of).await?;
         let prior: Vec<Money> = history.iter().map(|h| h.spent).collect();
         let prior_avg = trailing_avg(&prior, n)?;
+        let baseline_cycles = u32::try_from(prior.len().min(n_cycles)).unwrap_or(u32::MAX);
         let delta = delta_pct(now, prior_avg);
 
         // 12-point spark: the prior cycles plus `now`, conformed to 12 points
@@ -358,6 +416,7 @@ pub async fn category_momentum(
             series,
             delta_pct: delta,
             prior_avg,
+            baseline_cycles,
             fixed: cap.fixed,
         });
     }
@@ -643,7 +702,9 @@ const fn round_pct(value: f64) -> i32 {
 }
 
 /// Lowercase, hyphenated slug of a category name (the suggestion's `signalId`).
-fn slugify(name: &str) -> String {
+/// Public so a caller can map a suggestion back to its category.
+#[must_use]
+pub fn slugify(name: &str) -> String {
     name.to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })

@@ -5587,6 +5587,7 @@ dependencies = [
  "phosk_adapter_db",
  "phosk_core",
  "phosk_db_memory",
+ "phosk_id",
  "phosk_ledger",
  "phosk_model",
  "phosk_planning",

@@ -337,6 +337,7 @@ async fn spend_stats_json_shape_is_camel_case() {
         keys(&v),
         vec![
             "avg",
+            "avgCycles",
             "avgRate",
             "cur",
             "curVsAvgPct",
@@ -345,6 +346,8 @@ async fn spend_stats_json_shape_is_camel_case() {
             "months",
             "peak",
             "prev",
+            "runRate",
+            "runRateVsAvgPct",
             "totalSaved",
         ],
         "stats camelCase keys"
@@ -361,13 +364,16 @@ async fn spend_stats_json_shape_is_camel_case() {
     assert!(v["cur"]["spend"].is_i64());
 }
 
-/// `months` is the count of cycles on record (12), and `cur`/`prev` are the
-/// June/May cycle points from the history.
+/// `months` counts the cycles on record — the seed's spend starts in May, so
+/// May and June (not the ten empty months before them) — and `cur`/`prev` are
+/// the June/May cycle points from the history.
 #[tokio::test]
 async fn spend_stats_cur_and_prev_track_the_history_tail() {
     let dto = spend_stats(&seeded(), today(), 12).await.expect("stats ok");
     let v = to_json(&dto);
-    assert_eq!(v["months"], json!(12), "12 cycles on record");
+    assert_eq!(v["months"], json!(2), "May and June are on record");
+    assert_eq!(v["avgCycles"], json!(1), "May is the one settled cycle");
+    assert_eq!(v["avg"], json!(378_770), "the average is May alone");
     assert_eq!(v["cur"]["m"], json!("JUN"));
     assert_eq!(v["prev"]["m"], json!("MAY"));
     assert_eq!(v["prev"]["spend"], json!(378_770), "May total");
@@ -387,8 +393,9 @@ async fn spend_stats_cur_vs_prev_pct_matches_formula() {
     );
 }
 
-/// `peak` is the highest-spend cycle and `low` the leanest; peak.spend ≥ every
-/// point and low.spend ≤ every point.
+/// `peak` is the highest-spend settled cycle on record and `low` the leanest:
+/// peak.spend ≥ and low.spend ≤ every settled recorded point. The running
+/// cycle and the empty months before the first spend take no part.
 #[tokio::test]
 async fn spend_stats_peak_and_low_bound_the_window() {
     let stats = spend_stats(&seeded(), today(), 12).await.expect("stats ok");
@@ -396,18 +403,17 @@ async fn spend_stats_peak_and_low_bound_the_window() {
         .await
         .expect("history ok");
 
-    let max = hist
-        .points
+    let settled: Vec<i64> = hist.points[..hist.points.len() - 1]
         .iter()
         .map(|p| p.spend.centimes())
-        .max()
-        .expect("nonempty");
-    let min = hist
-        .points
-        .iter()
-        .map(|p| p.spend.centimes())
-        .min()
-        .expect("nonempty");
+        .filter(|&c| c > 0)
+        .collect();
+    let max = *settled.iter().max().expect("nonempty");
+    let min = *settled.iter().min().expect("nonempty");
+    assert_eq!(
+        stats.low.m, "MAY",
+        "an empty month is not the leanest cycle"
+    );
     assert_eq!(
         stats.peak.spend.centimes(),
         max,
@@ -467,9 +473,21 @@ async fn category_momentum_json_shape_is_camel_case() {
     assert_eq!(
         keys(c),
         vec![
-            "budget", "deltaPct", "fixed", "name", "now", "priorAvg", "series"
+            "baselineCycles",
+            "budget",
+            "deltaPct",
+            "fixed",
+            "name",
+            "now",
+            "priorAvg",
+            "series"
         ],
         "card camelCase keys"
+    );
+    assert_eq!(
+        c["baselineCycles"],
+        json!(3),
+        "the default 3-cycle baseline"
     );
     assert!(c["now"].is_i64(), "now is i64 centimes");
     assert!(c["priorAvg"].is_i64(), "priorAvg is i64 centimes");
@@ -711,7 +729,7 @@ async fn analytics_services_work_through_the_port_trait_object() {
     assert_eq!(history.points.len(), 12);
 
     let stats = spend_stats(port, today(), 12).await.expect("stats ok");
-    assert_eq!(stats.months, 12);
+    assert_eq!(stats.months, 2);
 
     let cards = category_momentum(port, today()).await.expect("momentum ok");
     assert!(!cards.is_empty());
@@ -830,6 +848,100 @@ async fn export_services_work_through_the_port_trait_object() {
         .await
         .expect("subs ok");
     assert_eq!(subs.version, EXPORT_SCHEMA_VERSION);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// analytics on a new user's store (real-use mode)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// An empty store with one uncapped category and no budget.
+async fn new_user_store() -> MemoryDb {
+    let db = MemoryDb::new(
+        Vec::new(),
+        Vec::new(),
+        phosk_model::BudgetConfig {
+            monthly_budget: Money::ZERO,
+            savings_target: Money::ZERO,
+        },
+    );
+    db.insert_category(phosk_model::CategoryCap {
+        id: phosk_id::CategoryId::new(),
+        slug: "groceries".to_owned(),
+        name: "Groceries".to_owned(),
+        cap: None,
+        fixed: false,
+        glyph: String::new(),
+        note: String::new(),
+        provenance: phosk_model::Provenance::user_entered(),
+    })
+    .await
+    .expect("category inserted");
+    db
+}
+
+/// Record one Groceries spend of `centimes` on `date`.
+async fn groceries(db: &MemoryDb, date: NaiveDate, centimes: i64) {
+    db.insert_receipt(
+        phosk_model::Receipt {
+            id: phosk_id::ReceiptId::new(),
+            slug: format!("r-{date}-{centimes}"),
+            shop: "Shop".to_owned(),
+            date,
+            category: "Groceries".to_owned(),
+            amount: cents(centimes),
+            fixed: false,
+            provenance: phosk_model::Provenance::user_entered(),
+            source_kind: "MANUAL".to_owned(),
+            ocr_engine: String::new(),
+            ocr_regions: 0,
+        },
+        Vec::new(),
+    )
+    .await
+    .expect("receipt inserted");
+}
+
+/// A user in their first cycle has one cycle on record, nothing to average,
+/// and a run-rate projected from what they spent so far.
+#[tokio::test]
+async fn spend_stats_in_the_first_cycle_has_no_average_to_compare_to() {
+    let db = new_user_store().await;
+    groceries(&db, naive(2026, 6, 3), 9_000).await;
+
+    let s = spend_stats(&db, today(), 12).await.expect("stats ok");
+    assert_eq!(s.months, 1, "only June is on record");
+    assert_eq!(s.avg_cycles, 0);
+    assert_eq!(s.avg, Money::ZERO);
+    assert_eq!(s.cur_vs_avg_pct, 0, "nothing to compare to");
+    assert_eq!(s.run_rate_vs_avg_pct, 0);
+    assert_eq!(s.total_saved, Money::ZERO);
+    assert_eq!(s.low.m, "JUN", "no settled cycle: low falls back to cur");
+    // 9_000 spent by day 18 of 30 → 15_000 at this pace.
+    assert_eq!(s.run_rate.centimes(), 9_000 * 30 / 18);
+}
+
+/// Momentum without stored history uses the past months' receipts as its
+/// baseline, and says how many cycles that baseline covers.
+#[tokio::test]
+async fn category_momentum_baseline_comes_from_receipts_without_history() {
+    let db = new_user_store().await;
+    groceries(&db, naive(2026, 5, 10), 20_000).await;
+    groceries(&db, naive(2026, 6, 3), 25_000).await;
+
+    let cards = category_momentum(&db, today()).await.expect("momentum ok");
+    let g = &cards[0];
+    assert_eq!(g.prior_avg.centimes(), 20_000, "May is the baseline");
+    assert_eq!(g.baseline_cycles, 1, "one settled cycle so far");
+    assert_eq!(g.delta_pct, 25);
+}
+
+/// With no past spend there is no baseline at all.
+#[tokio::test]
+async fn category_momentum_on_a_new_store_has_no_baseline() {
+    let db = new_user_store().await;
+    let cards = category_momentum(&db, today()).await.expect("momentum ok");
+    assert_eq!(cards[0].baseline_cycles, 0);
+    assert_eq!(cards[0].delta_pct, 0);
 }
 
 /// The schema version constant is the pinned `"1"`.

@@ -53,7 +53,10 @@ async fn get_signal_candidates_offers_the_untracked_llm_proposal() {
 
 #[tokio::test]
 async fn get_movers_ranks_the_fastest_riser_and_faller() {
-    let m = get_movers().await.expect("movers");
+    let m = get_movers()
+        .await
+        .expect("movers")
+        .expect("the seed tracks signals");
     assert_eq!(m.riser.id, "coffee");
     assert_eq!(m.riser.delta_pct, 28);
     assert_eq!(m.faller.id, "beer");
@@ -61,7 +64,7 @@ async fn get_movers_ranks_the_fastest_riser_and_faller() {
     assert_eq!(m.all.len(), 4);
 
     let backend = svc::movers(&fresh_db(), today()).await.expect("backend");
-    assert_maps(&m, &backend);
+    assert_maps(&Some(m), &backend);
 }
 
 #[tokio::test]

@@ -156,3 +156,11 @@
   .isig { grid-template-columns: 22px 16px 1fr 58px 120px; }
   .isig .isig-spk, .isig .isig-go { display: none; }
 }
+
+/* ---- suggested cap: button → confirm → applied (tokens only) ---- */
+.an-cap { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1); margin-top: var(--s-3); }
+.an-cap-q { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-body); color: var(--ink); }
+.an-cap-acts { display: flex; gap: var(--s-1); }
+.an-cap .gbtn:disabled { opacity: .45; cursor: progress; }
+.an-cap-done { display: block; margin-top: var(--s-1); font-family: var(--font-body); font-size: var(--t-xs);
+  letter-spacing: var(--tracking-tag); text-transform: uppercase; color: var(--ok); }

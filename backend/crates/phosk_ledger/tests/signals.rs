@@ -260,7 +260,10 @@ async fn signal_candidates_json_flags_candidate() {
 #[tokio::test]
 async fn movers_picks_max_riser_and_min_faller() {
     let db = seeded();
-    let m = movers(&db, as_of()).await.expect("movers ok");
+    let m = movers(&db, as_of())
+        .await
+        .expect("movers ok")
+        .expect("the seed tracks signals");
 
     assert_eq!(m.riser.id, "coffee", "fastest riser is coffee");
     assert_eq!(m.riser.delta_pct, 28);
@@ -272,7 +275,10 @@ async fn movers_picks_max_riser_and_min_faller() {
 #[tokio::test]
 async fn movers_all_is_every_tracked_signal() {
     let db = seeded();
-    let m = movers(&db, as_of()).await.expect("movers ok");
+    let m = movers(&db, as_of())
+        .await
+        .expect("movers ok")
+        .expect("the seed tracks signals");
     assert_eq!(m.all.len(), 4, "all four tracked signals in the list");
     assert!(
         m.all.iter().all(|s| s.id != "energy-drink"),
@@ -285,7 +291,10 @@ async fn movers_all_is_every_tracked_signal() {
 #[tokio::test]
 async fn movers_all_is_ranked_descending_by_momentum() {
     let db = seeded();
-    let m = movers(&db, as_of()).await.expect("movers ok");
+    let m = movers(&db, as_of())
+        .await
+        .expect("movers ok")
+        .expect("the seed tracks signals");
     assert!(
         m.all.windows(2).all(|w| w[0].delta_pct >= w[1].delta_pct),
         "momentum is non-increasing down the list"
@@ -294,12 +303,33 @@ async fn movers_all_is_ranked_descending_by_momentum() {
     assert_eq!(m.all.last().expect("non-empty").id, "beer");
 }
 
+/// A store that tracks nothing yet (every new user) has no movers: that is an
+/// empty answer, not an error the page would show as "awaiting backend".
+#[tokio::test]
+async fn movers_on_a_store_without_signals_is_none_not_an_error() {
+    let db = MemoryDb::new(
+        Vec::new(),
+        Vec::new(),
+        phosk_model::BudgetConfig {
+            monthly_budget: phosk_core::money::Money::ZERO,
+            savings_target: phosk_core::money::Money::ZERO,
+        },
+    );
+    let m = movers(&db, as_of())
+        .await
+        .expect("no signals is not an error");
+    assert_eq!(m, None);
+}
+
 /// The riser carries the full headline record (it IS a `SignalDto`), not just an
 /// id — its cycle spend is the coffee value.
 #[tokio::test]
 async fn movers_riser_is_full_signal_record() {
     let db = seeded();
-    let m = movers(&db, as_of()).await.expect("movers ok");
+    let m = movers(&db, as_of())
+        .await
+        .expect("movers ok")
+        .expect("the seed tracks signals");
     assert_eq!(m.riser.cycle_spend.centimes(), 8_960);
     assert_eq!(m.riser.cycle_qty, 16.0);
     assert_eq!(m.riser.series.len(), 12);
@@ -517,6 +547,9 @@ async fn services_work_through_the_port_trait_object() {
     let port: &dyn DatabaseAdapter = &db;
     let signals = list_signals(port, as_of()).await.expect("list ok");
     assert_eq!(signals.len(), 4);
-    let m = movers(port, as_of()).await.expect("movers ok");
+    let m = movers(port, as_of())
+        .await
+        .expect("movers ok")
+        .expect("the seed tracks signals");
     assert_eq!(m.all.len(), 4);
 }

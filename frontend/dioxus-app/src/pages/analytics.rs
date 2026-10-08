@@ -33,15 +33,16 @@ use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg, Spark};
 use crate::components::shell::{AiPanel, Sig, SigOcc, SigSpark, SignalPanel, TopBar};
-use crate::components::states::Awaiting;
+use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::analytics::{
     get_analytics_insight, get_category_momentum, get_rhythm, get_spend_history, get_spend_stats,
     AnalyticsInsightDto, MomentumDto, RhythmDto, SpendHistoryDto, SpendPointDto, SpendStatsDto,
 };
+use crate::data::budgets::{cap_error_text, cap_input_text, set_category_cap};
 use crate::data::cycle::{get_cycle, CycleDto};
 use crate::data::signals::{
-    get_movers, get_signal, get_signal_candidates, get_signals, MoversDto, SignalDetailDto,
-    SignalDto,
+    dismiss_signal, get_movers, get_signal, get_signal_candidates, get_signals, track_signal,
+    MoversDto, SignalDetailDto, SignalDto,
 };
 use crate::data::{chf, chf2};
 
@@ -55,6 +56,79 @@ fn chf0(m: Money) -> String {
 /// `Money` → presentation `f64` CHF, for the spark primitives.
 fn money_chf(m: Money) -> f64 {
     m.as_chf_f64()
+}
+
+/// A chart number in CHF (a weekday bucket) as a whole-CHF label.
+fn chf_label(v: f64) -> String {
+    let centimes = if v.is_finite() {
+        (v * 100.0).round() as i64
+    } else {
+        0
+    };
+    chf0(Money::from_centimes(centimes))
+}
+
+/// Signed percent with an explicit sign, `"+12%"` / `"−8%"` / `"0%"`.
+fn signed_pct(v: i32) -> String {
+    match v.signum() {
+        1 => format!("+{v}%"),
+        -1 => format!("−{}%", v.unsigned_abs()),
+        _ => "0%".to_string(),
+    }
+}
+
+/// Evenly spaced "nice" gridline values (steps of 1/2/2.5/5 × 10ⁿ) strictly
+/// between 0 and `max`, aiming for about `target` lines. Empty for a
+/// non-positive or non-finite `max`.
+fn nice_ticks(max: f64, target: u32) -> Vec<f64> {
+    if !max.is_finite() || max <= 0.0 || target == 0 {
+        return Vec::new();
+    }
+    let raw = max / f64::from(target);
+    let mag = 10_f64.powf(raw.log10().floor());
+    let norm = raw / mag;
+    // The nice unit nearest the raw step.
+    let unit = if norm < 1.5 {
+        1.0
+    } else if norm < 2.25 {
+        2.0
+    } else if norm < 3.5 {
+        2.5
+    } else if norm < 7.5 {
+        5.0
+    } else {
+        10.0
+    };
+    let step = unit * mag;
+    (1..=target * 3)
+        .map(|i| f64::from(i) * step)
+        .take_while(|v| *v < max)
+        .collect()
+}
+
+/// A CHF gridline label: `"500"`, `"2k"`, `"2.5k"`.
+fn chf_tick_label(v: f64) -> String {
+    if v >= 1000.0 {
+        let k = v / 1000.0;
+        if (k - k.round()).abs() < 1e-9 {
+            format!("{}k", k.round() as i64)
+        } else {
+            format!("{k:.1}k")
+        }
+    } else {
+        format!("{}", v.round() as i64)
+    }
+}
+
+/// The analytics insight's `signal_id` for a category name. Must equal
+/// `phosk_insights::analytics::slugify`, which mints that id (a test pins it).
+fn category_slug(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
 }
 
 // ── DTO → F2 `Sig` mapper (faithful to dashboard.rs `sig_of_detail`) ──────────
@@ -145,23 +219,18 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
         v: f64,
         lab: String,
     }
-    let lines: Vec<GLine> = if is_rate {
-        [0.1, 0.2, 0.3]
-            .iter()
-            .map(|&v| GLine {
-                v,
-                lab: format!("{}%", (v * 100.0).round() as i64),
-            })
-            .collect()
-    } else {
-        [2000.0, 4000.0]
-            .iter()
-            .map(|&v: &f64| GLine {
-                v,
-                lab: format!("{}k", (v / 1000.0) as i64),
-            })
-            .collect()
-    };
+    // Scaled to the data: two or three round values below the top of the chart.
+    let lines: Vec<GLine> = nice_ticks(max_y, 3)
+        .into_iter()
+        .map(|v| GLine {
+            v,
+            lab: if is_rate {
+                format!("{}%", (v * 100.0).round() as i64)
+            } else {
+                chf_tick_label(v)
+            },
+        })
+        .collect();
 
     let line_pts: String = data
         .iter()
@@ -200,37 +269,35 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
     };
     let hud_text = format!("⌁ {hud_word} · LAST {n} CYCLES{hud_range}");
 
-    // Footer stats (em-dash defaults faithful to `num`).
+    // Footer stats (em-dash defaults faithful to `num`). The averages, peak
+    // and leanest only exist once a cycle has settled.
     let num = |m: Option<Money>| m.map_or("—".to_string(), chf0);
-    let avg_str = num(s.as_ref().map(|st| st.avg));
-    let peak_spend = num(s.as_ref().map(|st| st.peak.spend));
-    let peak_label = s
-        .as_ref()
+    let settled = s.as_ref().filter(|st| st.avg_cycles > 0);
+    // Peak and leanest only mean something across two or more settled cycles.
+    let has_range = s.as_ref().is_some_and(|st| st.avg_cycles > 1);
+    let avg_k = settled.map_or(String::new(), |st| format!("AVG · {} CYC", st.avg_cycles));
+    let avg_str = num(settled.map(|st| st.avg));
+    let peak_spend = num(settled.map(|st| st.peak.spend));
+    let peak_label = settled
         .map(|st| format!("{} {}", st.peak.m, st.peak.yr))
         .unwrap_or_default();
-    let low_spend = num(s.as_ref().map(|st| st.low.spend));
-    let low_label = s
-        .as_ref()
+    let low_spend = num(settled.map(|st| st.low.spend));
+    let low_label = settled
         .map(|st| format!("{} {}", st.low.m, st.low.yr))
         .unwrap_or_default();
-    let cur_vs_avg = s.as_ref().map(|st| st.cur_vs_avg_pct);
-    let cur_vs_prev = s.as_ref().map(|st| st.cur_vs_prev_pct);
-    let prev_m = s.as_ref().map(|st| st.prev.m.clone()).unwrap_or_default();
+    let has_settled = settled.is_some();
 
-    // Pre-computed foot-note string + tone.
-    let foot_note = cur_vs_avg.map(|va| {
-        let sign = if va > 0 { "+" } else { "−" };
-        let tail = match cur_vs_prev {
-            Some(vp) => {
-                let arrow = if vp > 0 { "↑" } else { "↓" };
-                format!(" · {arrow} {}% vs {prev_m}", vp.abs())
-            }
-            None => String::new(),
-        };
-        format!("THIS CYCLE TRACKING {sign}{}% vs 6-MO AVG{tail}", va.abs())
+    // Foot note: where this cycle is heading at its pace so far.
+    let foot_note = s.as_ref().map(|st| {
+        let pace = format!("THIS CYCLE ON PACE FOR CHF {}", chf0(st.run_rate));
+        if st.avg_cycles > 0 {
+            format!("{pace} · {} vs AVG", signed_pct(st.run_rate_vs_avg_pct))
+        } else {
+            format!("{pace} · FIRST CYCLE ON RECORD")
+        }
     });
-    let foot_tone = match cur_vs_avg {
-        Some(v) if v > 0 => "alert".to_string(),
+    let foot_tone = match s.as_ref() {
+        Some(st) if st.avg_cycles > 0 && st.run_rate_vs_avg_pct > 0 => "alert".to_string(),
         _ => "ok".to_string(),
     };
 
@@ -262,15 +329,17 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
                             i { class: "k spend" }
                             " SPEND"
                         }
-                        span {
-                            i { class: "k bud" }
-                            " BUDGET {num(Some(Money::from_centimes((budget_line * 100.0) as i64)))}"
+                        if budget_line > 0.0 {
+                            span {
+                                i { class: "k bud" }
+                                " BUDGET {num(Some(Money::from_centimes((budget_line * 100.0) as i64)))}"
+                            }
                         }
                     }
                     if is_rate {
                         span {
                             i { class: "k rate" }
-                            " SAVED / INCOME"
+                            " SAVED / BUDGET"
                         }
                     }
                     span {
@@ -478,24 +547,28 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
             }
 
             div { class: "atrend-foot",
-                span { class: "tf",
-                    i { "6-MO AVG" }
-                    " "
-                    b { "CHF {avg_str}" }
+                if has_settled {
+                    span { class: "tf",
+                        i { "{avg_k}" }
+                        " "
+                        b { "CHF {avg_str}" }
+                    }
                 }
-                span { class: "tf",
-                    i { "PEAK" }
-                    " "
-                    b { class: "warn", "CHF {peak_spend}" }
-                    " "
-                    em { "{peak_label}" }
-                }
-                span { class: "tf",
-                    i { "LEANEST" }
-                    " "
-                    b { style: "color:var(--ok)", "CHF {low_spend}" }
-                    " "
-                    em { "{low_label}" }
+                if has_range {
+                    span { class: "tf",
+                        i { "PEAK" }
+                        " "
+                        b { class: "warn", "CHF {peak_spend}" }
+                        " "
+                        em { "{peak_label}" }
+                    }
+                    span { class: "tf",
+                        i { "LEANEST" }
+                        " "
+                        b { style: "color:var(--ok)", "CHF {low_spend}" }
+                        " "
+                        em { "{low_label}" }
+                    }
                 }
                 if let Some(note) = foot_note {
                     span { class: "tf-note",
@@ -518,7 +591,9 @@ fn ItemSignalRow(
     #[props(default = false)] active: bool,
     rank: usize,
     on_select: EventHandler<String>,
-    on_track: EventHandler<String>,
+    /// Pressed on a candidate row (`TRACK ▸`); tracked rows only select.
+    #[props(default)]
+    on_track: Option<EventHandler<String>>,
 ) -> Element {
     let cand = sig.candidate;
     let up = sig.delta_pct >= 0;
@@ -562,12 +637,9 @@ fn ItemSignalRow(
     rsx! {
         button {
             class: "{cls}",
-            onclick: move |_| {
-                if cand {
-                    on_track.call(id.clone());
-                } else {
-                    on_select.call(id2.clone());
-                }
+            onclick: move |_| match on_track {
+                Some(track) if cand => track.call(id.clone()),
+                _ => on_select.call(id2.clone()),
             },
             span { class: "isig-rk", "{rk}" }
             span { class: "isig-gl", "⌁" }
@@ -651,8 +723,16 @@ fn MomentumCard(c: MomentumDto) -> Element {
     let dl_cls = format!("dl {tone}");
     let dl = if c.fixed {
         "FIXED".to_string()
+    } else if c.baseline_cycles == 0 {
+        // Nothing to compare to yet: a 0% "momentum" would be made up.
+        "NEW".to_string()
     } else {
         format!("{}{}%", if up { "↑" } else { "↓" }, c.delta_pct.abs())
+    };
+    let vs = match c.baseline_cycles {
+        0 => "no prior cycle yet".to_string(),
+        1 => "vs last cycle".to_string(),
+        n => format!("vs {n}-cyc avg"),
     };
     let series = if c.series.is_empty() {
         vec![0.0, 0.0]
@@ -675,7 +755,7 @@ fn MomentumCard(c: MomentumDto) -> Element {
             }
             div { class: "momo-f",
                 span { class: "now", "CHF {chf0(c.now)}" }
-                span { class: "vs", "vs 3-cyc avg" }
+                span { class: "vs", "{vs}" }
             }
         }
     }
@@ -686,7 +766,7 @@ fn MomentumCard(c: MomentumDto) -> Element {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[component]
-fn RhythmHeatmap(rhythm: RhythmDto) -> Element {
+fn RhythmHeatmap(rhythm: RhythmDto, cycle_label: String) -> Element {
     let wd = rhythm.weekday;
     let max = if rhythm.stats.max > 0.0 {
         rhythm.stats.max
@@ -709,9 +789,9 @@ fn RhythmHeatmap(rhythm: RhythmDto) -> Element {
         div { class: "rhythm osc-bkt coral",
             span { class: "osc-leg", "SPENDING RHYTHM" }
             div { class: "rhythm-h",
-                span { class: "hud", "∿ DISCRETIONARY SPEND · AVG BY WEEKDAY" }
+                span { class: "hud", "∿ DISCRETIONARY SPEND · BY WEEKDAY · {cycle_label}" }
                 span { class: "rhythm-meta",
-                    "{weekend_share} LANDS FRI–SUN · RENT & INSURANCE EXCLUDED"
+                    "{weekend_share} LANDS FRI–SUN · FIXED CHARGES EXCLUDED"
                 }
             }
             div { class: "rhythm-grid",
@@ -721,9 +801,10 @@ fn RhythmHeatmap(rhythm: RhythmDto) -> Element {
                         let is_peak = x.d == peak_day;
                         let col_cls = if is_peak { "rcol peak" } else { "rcol" };
                         let bar_h = (p * 100.0).max(6.0);
+                        let v_txt = chf_label(x.v);
                         rsx! {
                             div { key: "{x.d}", class: "{col_cls}",
-                                span { class: "rv", "CHF {x.v}" }
+                                span { class: "rv", "CHF {v_txt}" }
                                 div { class: "rbar-wrap",
                                     div { class: "rbar", style: "height:{bar_h}%" }
                                 }
@@ -767,6 +848,14 @@ pub fn AnalyticsPage() -> Element {
     let movers = use_resource(get_movers);
     let signals = use_resource(get_signals);
     let candidates = use_resource(get_signal_candidates);
+    // The suggested cap: `true` once the user pressed it (the confirm step),
+    // the in-flight flag, and the outcome line.
+    let mut cap_confirm = use_signal(|| false);
+    let cap_busy = use_signal(|| false);
+    let cap_error = use_signal(|| Option::<String>::None);
+    let cap_done = use_signal(|| Option::<String>::None);
+    // A failed track/dismiss from the signal inspector.
+    let signal_error = use_signal(|| Option::<String>::None);
 
     // ---- UI state (was: useTweaks + useState; tweaks tooling NOT ported, its
     // state preserved as signals with the same AN_TWEAK_DEFAULTS) ----
@@ -843,7 +932,8 @@ pub fn AnalyticsPage() -> Element {
         .as_ref()
         .and_then(|r| r.as_ref().ok())
         .cloned();
-    let movers_v: Option<MoversDto> = movers
+    // `Some(None)`: loaded, nothing tracked yet.
+    let movers_v: Option<Option<MoversDto>> = movers
         .read()
         .as_ref()
         .and_then(|r| r.as_ref().ok())
@@ -859,6 +949,17 @@ pub fn AnalyticsPage() -> Element {
         .and_then(|r| r.as_ref().ok())
         .cloned();
 
+    // read failures (an `Err` from the server fn) — shown as such, never as
+    // "awaiting backend" on what is really an empty store.
+    let failed =
+        |e: bool| e.then(|| "Could not load this section. Reload to try again.".to_string());
+    let history_err = failed(matches!(&*spend_history.read(), Some(Err(_))));
+    let momentum_err = failed(matches!(&*momentum.read(), Some(Err(_))));
+    let rhythm_err = failed(matches!(&*rhythm.read(), Some(Err(_))));
+    let signals_err = failed(matches!(&*signals.read(), Some(Err(_))));
+    let movers_err = failed(matches!(&*movers.read(), Some(Err(_))));
+    let insights_err = failed(matches!(&*insights.read(), Some(Err(_))));
+
     // loading flags
     let history_loading = spend_history.read().is_none();
     let momentum_loading = momentum.read().is_none();
@@ -869,7 +970,6 @@ pub fn AnalyticsPage() -> Element {
 
     let history_ok = history_v.is_some();
     let momentum_ok = momentum_v.is_some();
-    let rhythm_ok = rhythm_v.is_some();
     let signals_ok = signals_v.is_some();
     let movers_ok = movers_v.is_some();
     let insights_ok = insights_v.is_some();
@@ -881,11 +981,16 @@ pub fn AnalyticsPage() -> Element {
         .as_ref()
         .map(|h| h.points.clone())
         .unwrap_or_default();
+    // Only the cycles on record: months before the first spend are not cycles.
     let window_n = trend_window();
+    let recorded = stats_v
+        .as_ref()
+        .map_or(hist_points.len(), |s| s.months as usize);
     let trend_points: Vec<SpendPointDto> = {
-        let start = hist_points.len().saturating_sub(window_n);
+        let start = hist_points.len().saturating_sub(window_n.min(recorded));
         hist_points[start..].to_vec()
     };
+    let no_spend_yet = history_ok && hist_points.iter().all(|p| p.spend.centimes() == 0);
 
     // tracked signals sorted by sig_sort
     let tracked_raw: Vec<SignalDto> = signals_v.clone().unwrap_or_default();
@@ -926,9 +1031,14 @@ pub fn AnalyticsPage() -> Element {
     let sig_count = tracked_raw.len();
     let cand_count = candidates_raw.len();
 
-    let movers_data = movers_v.clone();
+    let movers_data = movers_v.clone().flatten();
     let riser = movers_data.as_ref().map(|m| m.riser.clone());
-    let faller = movers_data.as_ref().map(|m| m.faller.clone());
+    // One tracked signal is both extremes: show it once, as the riser.
+    let faller = movers_data
+        .as_ref()
+        .filter(|m| m.all.len() > 1)
+        .map(|m| m.faller.clone());
+    let nothing_tracked = matches!(movers_v, Some(None));
 
     let ins = insights_v.clone();
     let suggested_cap = ins.as_ref().map(|i| i.suggested_cap.clone());
@@ -954,34 +1064,103 @@ pub fn AnalyticsPage() -> Element {
     let months_str = stats_v
         .as_ref()
         .map_or("—".to_string(), |s| s.months.to_string());
+    let cycles_word = if stats_v.as_ref().is_some_and(|s| s.months == 1) {
+        "cycle"
+    } else {
+        "cycles"
+    };
     let sig_count_str = sig_count.to_string();
     let cats_count_str = sorted_cats.len().to_string();
+    // The momentum baseline: the cycles the cards actually average (the
+    // `momentum_baseline_cycles` setting, or fewer while history is short).
+    let baseline_n = sorted_cats
+        .iter()
+        .map(|m| m.baseline_cycles)
+        .max()
+        .unwrap_or(0);
+    let momentum_meta = match baseline_n {
+        0 => "NOW · NO PRIOR CYCLE TO COMPARE YET".to_string(),
+        1 => "NOW vs LAST CYCLE · ↑ HEATING · ↓ COOLING".to_string(),
+        n => format!("NOW vs {n}-CYCLE AVG · ↑ HEATING · ↓ COOLING"),
+    };
+    let no_category_spend = sorted_cats
+        .iter()
+        .all(|m| m.now.centimes() == 0 && m.prior_avg.centimes() == 0);
+    let rhythm_empty = rhythm_v.as_ref().is_some_and(|r| r.stats.total <= 0.0);
 
     // KPI band sub-lines + numerals
-    let cur_vs_avg = stats_v.as_ref().map(|s| s.cur_vs_avg_pct);
-    let cur_vs_avg_str = cur_vs_avg.map(|v| {
+    let run_rate_str = stats_v.as_ref().map(|s| chf0(s.run_rate));
+    let pace_vs_avg = stats_v
+        .as_ref()
+        .filter(|s| s.avg_cycles > 0)
+        .map(|s| s.run_rate_vs_avg_pct);
+    let pace_vs_avg_str = pace_vs_avg.map(|v| {
         let arrow = if v > 0 { "↑" } else { "↓" };
         format!("{arrow} {}%", v.abs())
     });
-    let cur_vs_avg_cls = match cur_vs_avg {
-        Some(v) if v > 0 => "up",
-        _ => "dn",
+    // One line: "on pace for CHF X · ↑ 12% vs avg" (or "· first cycle on record").
+    let pace_lead = run_rate_str.as_ref().map_or(String::new(), |rr| {
+        let sep = if pace_vs_avg_str.is_some() {
+            " · "
+        } else {
+            ""
+        };
+        format!("on pace for CHF {rr}{sep}")
+    });
+    let pace_delta = pace_vs_avg_str.clone().unwrap_or_default();
+    let pace_tail = match (&run_rate_str, &pace_vs_avg_str) {
+        (None, _) => String::new(),
+        (Some(_), Some(_)) => " vs avg".to_string(),
+        (Some(_), None) => " · first cycle on record".to_string(),
     };
 
-    let avg_str = stats_v.as_ref().map_or("—".to_string(), |s| chf0(s.avg));
-    let avg_budget_str = stats_v
-        .as_ref()
-        .map_or("—".to_string(), |s| chf0(s.cur.budget));
-    let avg_peak_str = stats_v
-        .as_ref()
-        .map(|s| format!(" · peak {} {}", s.peak.m, chf0(s.peak.spend)));
+    let avg_cycles = stats_v.as_ref().map_or(0, |s| s.avg_cycles);
+    let avg_lbl = if avg_cycles > 0 {
+        format!("{avg_cycles} CYC")
+    } else {
+        "SPEND".to_string()
+    };
+    let avg_str = if avg_cycles > 0 {
+        stats_v.as_ref().map_or("—".to_string(), |s| chf0(s.avg))
+    } else {
+        "—".to_string()
+    };
+    let cycle_budget = stats_v.as_ref().map_or(Money::ZERO, |s| s.cur.budget);
+    let budget_set = cycle_budget.centimes() > 0;
+    let avg_sub = match stats_v.as_ref() {
+        None => String::new(),
+        Some(_) if avg_cycles == 0 => "no settled cycle yet".to_string(),
+        Some(s) => {
+            let budget = if budget_set {
+                format!("budget CHF {} · ", chf0(cycle_budget))
+            } else {
+                String::new()
+            };
+            if s.avg_cycles > 1 {
+                format!("{budget}peak {} {}", s.peak.m, chf0(s.peak.spend))
+            } else {
+                format!("{budget}one settled cycle so far")
+            }
+        }
+    };
 
-    let rate_str = stats_v.as_ref().map_or("—".to_string(), |s| {
-        ((s.avg_rate * 100.0).round() as i64).to_string()
-    });
-    let rate_saved_str = stats_v
-        .as_ref()
-        .map(|s| format!(" · CHF {} saved over {} cyc", chf0(s.total_saved), s.months));
+    let rate_str = if budget_set && avg_cycles > 0 {
+        stats_v.as_ref().map_or("—".to_string(), |s| {
+            ((s.avg_rate * 100.0).round() as i64).to_string()
+        })
+    } else {
+        "—".to_string()
+    };
+    let rate_sub = match stats_v.as_ref() {
+        None => String::new(),
+        Some(_) if !budget_set => "set a monthly budget to track savings".to_string(),
+        Some(_) if avg_cycles == 0 => "saved vs budget · no settled cycle yet".to_string(),
+        Some(s) => format!(
+            "saved vs budget · avg {} cyc · CHF {} saved",
+            s.avg_cycles,
+            chf0(s.total_saved)
+        ),
+    };
 
     let kpi_sig_str = if sig_count > 0 {
         sig_count.to_string()
@@ -993,19 +1172,103 @@ pub fn AnalyticsPage() -> Element {
     } else {
         String::new()
     };
-    let riser_lead = riser
-        .as_ref()
-        .map(|r| format!("{} ↑{}% leads", r.label, r.delta_pct));
+    let riser_lead = riser.as_ref().map_or_else(
+        || {
+            if nothing_tracked {
+                "none tracked yet".to_string()
+            } else {
+                String::new()
+            }
+        },
+        |r| format!("{} {} leads", r.label, signed_pct(r.delta_pct)),
+    );
 
-    // SuggestedCap button label
-    let cap_label = suggested_cap.as_ref().map(|cap| {
-        let tail = if cap.projected_savings.centimes() != 0 {
-            format!(" · +CHF {} SAVED", chf0(cap.projected_savings))
-        } else {
-            String::new()
-        };
-        format!("CAP {} AT CHF {}{}", cap.signal_id, chf0(cap.amount), tail)
+    // The suggested cap, resolved to a real, tunable category. Only offered
+    // when it would actually save something.
+    let cap_target: Option<(String, Money)> = suggested_cap.as_ref().and_then(|cap| {
+        let cat = momentum_v
+            .as_ref()?
+            .iter()
+            .find(|m| category_slug(&m.name) == cap.signal_id)?;
+        (!cat.fixed && cap.amount.centimes() > 0 && cap.projected_savings.centimes() > 0)
+            .then(|| (cat.name.clone(), cap.amount))
     });
+    let cap_label = suggested_cap
+        .as_ref()
+        .zip(cap_target.as_ref())
+        .map(|(cap, (name, amount))| {
+            format!(
+                "CAP {} AT CHF {} · +CHF {} SAVED",
+                name.to_uppercase(),
+                chf0(*amount),
+                chf0(cap.projected_savings)
+            )
+        });
+    let cap_confirm_txt = cap_target
+        .as_ref()
+        .map(|(name, amount)| format!("Set the {name} cap to CHF {}?", chf0(*amount)));
+    // Apply the suggestion through the same server fn as the Budgets cap edit.
+    let apply_cap = move |_| {
+        let Some((name, amount)) = cap_target.clone() else {
+            return;
+        };
+        if cap_busy() {
+            return;
+        }
+        let (mut busy, mut error, mut done) = (cap_busy, cap_error, cap_done);
+        let (mut momentum, mut insights) = (momentum, insights);
+        busy.set(true);
+        error.set(None);
+        spawn(async move {
+            match set_category_cap(name.clone(), cap_input_text(amount)).await {
+                Ok(()) => {
+                    done.set(Some(format!("{name} cap set to CHF {}", chf0(amount))));
+                    cap_confirm.set(false);
+                    momentum.restart();
+                    insights.restart();
+                }
+                Err(e) => error.set(Some(cap_error_text(&e))),
+            }
+            busy.set(false);
+        });
+    };
+
+    // Track / dismiss from the signal inspector, then refetch every list the
+    // signal appears in.
+    let refetch_signals = move || {
+        let (mut signals, mut candidates, mut movers, mut sig_detail) =
+            (signals, candidates, movers, sig_detail);
+        signals.restart();
+        candidates.restart();
+        movers.restart();
+        sig_detail.restart();
+    };
+    let on_track_signal = move |id: String| {
+        let mut signal_error = signal_error;
+        spawn(async move {
+            match track_signal(id).await {
+                Ok(()) => {
+                    signal_error.set(None);
+                    refetch_signals();
+                    sel.set(None);
+                }
+                Err(_) => signal_error.set(Some(SIGNAL_ACTION_FAILED.to_string())),
+            }
+        });
+    };
+    let on_dismiss_signal = move |id: String| {
+        let mut signal_error = signal_error;
+        spawn(async move {
+            match dismiss_signal(id).await {
+                Ok(()) => {
+                    signal_error.set(None);
+                    refetch_signals();
+                    sel.set(None);
+                }
+                Err(_) => signal_error.set(Some(SIGNAL_ACTION_FAILED.to_string())),
+            }
+        });
+    };
 
     rsx! {
         div { class: "pk", style: "height:100vh;min-height:0",
@@ -1045,7 +1308,7 @@ pub fn AnalyticsPage() -> Element {
                                     div { class: "ttl", "Analytics" }
                                     div { class: "sum",
                                         b { "{months_str}" }
-                                        " cycles on record · trending "
+                                        " {cycles_word} on record · trending "
                                         span { class: "coral", "CHF {cur_spend_str}" }
                                         " this cycle ·"
                                         b { " {sig_count_str}" }
@@ -1071,52 +1334,39 @@ pub fn AnalyticsPage() -> Element {
                                 div { class: "akpi accent",
                                     div { class: "lbl",
                                         span { "THIS CYCLE" }
-                                        span { "RUN-RATE" }
+                                        span { "SO FAR" }
                                     }
                                     div { class: "big",
                                         span { class: "cur", "CHF" }
                                         "{cur_spend_str}"
                                     }
-                                    div { class: "sub",
-                                        if let Some(d) = cur_vs_avg_str.clone() {
-                                            span { class: "{cur_vs_avg_cls}", "{d}" }
-                                            " vs 6-mo avg"
-                                        } else {
-                                            span { class: "dim", "awaiting backend" }
-                                        }
-                                    }
+                                    // One text node: the KPI sub-line lays out its
+                                    // children as separate rows.
+                                    div { class: "sub", "{pace_lead}{pace_delta}{pace_tail}" }
                                 }
                                 div { class: "akpi blue",
                                     div { class: "lbl",
-                                        span { "6-MONTH AVG" }
-                                        span { "SPEND" }
+                                        span { "AVERAGE" }
+                                        span { "{avg_lbl}" }
                                     }
                                     div { class: "big",
                                         span { class: "cur", "CHF" }
                                         "{avg_str}"
                                     }
-                                    div { class: "sub",
-                                        "budget CHF {avg_budget_str}"
-                                        if let Some(p) = avg_peak_str.clone() {
-                                            "{p}"
-                                        }
-                                    }
+                                    div { class: "sub", "{avg_sub}" }
                                 }
                                 div { class: "akpi blue bluebig",
                                     div { class: "lbl",
                                         span { "SAVINGS RATE" }
-                                        span { "CASHFLOW" }
+                                        span { "VS BUDGET" }
                                     }
                                     div { class: "big",
                                         "{rate_str}"
-                                        span { class: "cur", style: "margin-left:2px", "%" }
-                                    }
-                                    div { class: "sub",
-                                        "avg of income"
-                                        if let Some(t) = rate_saved_str.clone() {
-                                            "{t}"
+                                        if rate_str != "—" {
+                                            span { class: "cur", style: "margin-left:2px", "%" }
                                         }
                                     }
+                                    div { class: "sub", "{rate_sub}" }
                                 }
                                 div { class: "akpi",
                                     div { class: "lbl",
@@ -1126,17 +1376,19 @@ pub fn AnalyticsPage() -> Element {
                                     div { class: "big", "{kpi_sig_str}" }
                                     div { class: "sub",
                                         "{cand_prefix}"
-                                        if let Some(lead) = riser_lead.clone() {
-                                            "{lead}"
-                                        } else {
-                                            "awaiting movers"
-                                        }
+                                        "{riser_lead}"
                                     }
                                 }
                             }
 
                             // ===================== SPEND TREND HERO =====================
-                            if history_ok && !hist_points.is_empty() {
+                            if no_spend_yet {
+                                Awaiting {
+                                    label: "SPEND TREND".to_string(),
+                                    legend: "NO DATA YET".to_string(),
+                                    message: "No spending recorded yet. Add a receipt and the trend starts here, one bar per cycle.".to_string(),
+                                }
+                            } else if history_ok && !hist_points.is_empty() {
                                 SpendTrend {
                                     points: trend_points,
                                     stats: stats_v.clone(),
@@ -1146,6 +1398,7 @@ pub fn AnalyticsPage() -> Element {
                                 Awaiting {
                                     label: "SPEND TREND".to_string(),
                                     loading: history_loading,
+                                    message: history_err.clone(),
                                     tone: "blue".to_string(),
                                 }
                             }
@@ -1173,7 +1426,6 @@ pub fn AnalyticsPage() -> Element {
                                                     drawer.set(true);
                                                 }
                                             },
-                                            on_track: move |_id: String| {},
                                         }
                                     }
                                     if show_cand() {
@@ -1194,6 +1446,8 @@ pub fn AnalyticsPage() -> Element {
                                                                 drawer.set(true);
                                                             }
                                                         },
+                                                        // TRACK ▸ opens the inspector, whose
+                                                        // TRACK / DISMISS buttons decide.
                                                         on_track: move |id: String| {
                                                             sel.set(Some(id));
                                                             if !dockable {
@@ -1206,31 +1460,52 @@ pub fn AnalyticsPage() -> Element {
                                         }
                                     }
                                 }
+                            } else if signals_ok {
+                                Awaiting {
+                                    label: "ITEM-SIGNALS".to_string(),
+                                    legend: "NONE TRACKED".to_string(),
+                                    message: "No item-signals yet. As receipts come in the AI proposes items worth watching; track one and its trend shows here.".to_string(),
+                                }
                             } else {
                                 Awaiting {
                                     label: "ITEM-SIGNALS".to_string(),
                                     loading: signals_loading,
+                                    message: signals_err.clone(),
                                     tone: "blue".to_string(),
                                 }
                             }
 
                             // ===================== MOVERS + INSIGHT =====================
                             div { class: "an-movers",
-                                if movers_ok && riser.is_some() {
-                                    MoverCard { sig: riser.clone().unwrap(), riser: true }
+                                if let Some(r) = riser.clone() {
+                                    MoverCard { sig: r, riser: true }
+                                } else if movers_ok {
+                                    Awaiting {
+                                        label: "FASTEST RISER".to_string(),
+                                        legend: "NO MOVERS".to_string(),
+                                        message: "Track an item-signal to see what is climbing.".to_string(),
+                                    }
                                 } else {
                                     Awaiting {
                                         label: "FASTEST RISER".to_string(),
                                         loading: movers_loading,
+                                        message: movers_err.clone(),
                                         tone: "coral".to_string(),
                                     }
                                 }
-                                if movers_ok && faller.is_some() {
-                                    MoverCard { sig: faller.clone().unwrap(), riser: false }
+                                if let Some(f) = faller.clone() {
+                                    MoverCard { sig: f, riser: false }
+                                } else if movers_ok {
+                                    Awaiting {
+                                        label: "FASTEST FALLER".to_string(),
+                                        legend: "NO MOVERS".to_string(),
+                                        message: "With two or more signals tracked, the one cooling fastest shows here.".to_string(),
+                                    }
                                 } else {
                                     Awaiting {
                                         label: "FASTEST FALLER".to_string(),
                                         loading: movers_loading,
+                                        message: movers_err.clone(),
                                         tone: "blue".to_string(),
                                     }
                                 }
@@ -1242,18 +1517,54 @@ pub fn AnalyticsPage() -> Element {
                                     if insights_ok && ins.as_ref().is_some_and(|i| !i.text.is_empty()) {
                                         div { class: "q", "{ins.as_ref().unwrap().text}" }
                                         if let Some(label) = cap_label.clone() {
-                                            div { style: "margin-top:10px",
-                                                button {
-                                                    class: "gbtn p",
-                                                    onclick: move |_| {},
-                                                    "{label}"
+                                            div { class: "an-cap",
+                                                if cap_confirm() {
+                                                    span { class: "an-cap-q", "{cap_confirm_txt.clone().unwrap_or_default()}" }
+                                                    div { class: "an-cap-acts",
+                                                        button {
+                                                            class: "gbtn p",
+                                                            r#type: "button",
+                                                            disabled: cap_busy(),
+                                                            onclick: apply_cap,
+                                                            "CONFIRM"
+                                                        }
+                                                        button {
+                                                            class: "gbtn",
+                                                            r#type: "button",
+                                                            disabled: cap_busy(),
+                                                            onclick: move |_| cap_confirm.set(false),
+                                                            "CANCEL"
+                                                        }
+                                                    }
+                                                } else {
+                                                    button {
+                                                        class: "gbtn p",
+                                                        r#type: "button",
+                                                        onclick: move |_| {
+                                                            let mut done = cap_done;
+                                                            let mut error = cap_error;
+                                                            done.set(None);
+                                                            error.set(None);
+                                                            cap_confirm.set(true);
+                                                        },
+                                                        "{label}"
+                                                    }
+                                                }
+                                                InlineStatus {
+                                                    pending: cap_busy(),
+                                                    error: cap_error(),
+                                                    pending_label: "Saving cap…".to_string(),
                                                 }
                                             }
+                                        }
+                                        if let Some(done) = cap_done() {
+                                            span { class: "an-cap-done", role: "status", "✓ {done}" }
                                         }
                                     } else {
                                         Awaiting {
                                             label: "GEMMA4 READ".to_string(),
                                             loading: insights_loading,
+                                            message: insights_err.clone(),
                                             tone: "blue".to_string(),
                                         }
                                     }
@@ -1266,9 +1577,15 @@ pub fn AnalyticsPage() -> Element {
                                     span { class: "lbl", "▦ CATEGORY MOMENTUM" }
                                     span { class: "ct", "{cats_count_str}" }
                                     span { class: "rule" }
-                                    span { class: "meta", "NOW vs 3-CYCLE AVG · ↑ HEATING · ↓ COOLING" }
+                                    span { class: "meta", "{momentum_meta}" }
                                 }
-                                if momentum_ok && !sorted_cats.is_empty() {
+                                if momentum_ok && (sorted_cats.is_empty() || no_category_spend) {
+                                    Awaiting {
+                                        label: "CATEGORY MOMENTUM".to_string(),
+                                        legend: "NO DATA YET".to_string(),
+                                        message: "No category spending yet. Each category gets a card once it has a receipt.".to_string(),
+                                    }
+                                } else if momentum_ok {
                                     div { class: "momo-grid",
                                         for cm in sorted_cats.iter() {
                                             MomentumCard { key: "{cm.name}", c: cm.clone() }
@@ -1278,6 +1595,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "CATEGORY MOMENTUM".to_string(),
                                         loading: momentum_loading,
+                                        message: momentum_err.clone(),
                                         tone: "blue".to_string(),
                                     }
                                 }
@@ -1290,12 +1608,19 @@ pub fn AnalyticsPage() -> Element {
                                     span { class: "rule" }
                                     span { class: "meta", "WHEN IN THE WEEK IT GOES" }
                                 }
-                                if rhythm_ok && rhythm_v.as_ref().is_some_and(|r| !r.weekday.is_empty()) {
-                                    RhythmHeatmap { rhythm: rhythm_v.clone().unwrap() }
+                                if rhythm_empty {
+                                    Awaiting {
+                                        label: "SPENDING RHYTHM".to_string(),
+                                        legend: "NO DATA YET".to_string(),
+                                        message: "No discretionary spending this cycle yet.".to_string(),
+                                    }
+                                } else if let Some(r) = rhythm_v.clone().filter(|r| !r.weekday.is_empty()) {
+                                    RhythmHeatmap { rhythm: r, cycle_label: cycle_label.clone() }
                                 } else {
                                     Awaiting {
                                         label: "SPENDING RHYTHM".to_string(),
                                         loading: rhythm_loading,
+                                        message: rhythm_err.clone(),
                                         tone: "coral".to_string(),
                                     }
                                 }
@@ -1310,7 +1635,10 @@ pub fn AnalyticsPage() -> Element {
                         sig: sig_obj.clone(),
                         cycle_label: cycle_label.clone(),
                         on_close: move |()| sel.set(None),
+                        on_track: on_track_signal,
+                        on_dismiss: on_dismiss_signal,
                     }
+                    InlineStatus { error: signal_error() }
                 }
             }
 
@@ -1323,13 +1651,26 @@ pub fn AnalyticsPage() -> Element {
                             variant: "drawer".to_string(),
                             cycle_label: cycle_label.clone(),
                             on_close: move |()| drawer.set(false),
+                            on_track: move |id: String| {
+                                drawer.set(false);
+                                on_track_signal(id);
+                            },
+                            on_dismiss: move |id: String| {
+                                drawer.set(false);
+                                on_dismiss_signal(id);
+                            },
                         }
+                        InlineStatus { error: signal_error() }
                     }
                 }
             }
         }
     }
 }
+
+/// Shown for any failed signal track/dismiss press: a fixed, generic line, never
+/// the server's message (it can carry a data path or driver text).
+const SIGNAL_ACTION_FAILED: &str = "could not update this signal, try again";
 
 /// Thin analytics wrapper around the shared [`AiPanel`] (left assistant).
 ///
@@ -1349,6 +1690,75 @@ fn AiPanelAnalytics(
             collapsed,
             on_toggle: move |()| on_toggle.call(()),
             on_track: move |id: String| on_track.call(id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{category_slug, chf_label, chf_tick_label, nice_ticks, signed_pct};
+
+    #[test]
+    fn gridlines_scale_to_the_data() {
+        // The demo's ~CHF 4.5k cycles keep round thousands.
+        assert_eq!(nice_ticks(4_536.0, 3), vec![2_000.0, 4_000.0]);
+        // A first month of CHF 300 gets CHF 100 steps, not lines off the chart.
+        assert_eq!(nice_ticks(324.0, 3), vec![100.0, 200.0, 300.0]);
+        // Savings-rate mode works in 0–1 ratios.
+        let rate = nice_ticks(0.375, 3);
+        assert_eq!(rate.len(), 3);
+        assert!((rate[0] - 0.1).abs() < 1e-9 && (rate[2] - 0.3).abs() < 1e-9);
+        // Nothing to scale against: no lines.
+        assert!(nice_ticks(0.0, 3).is_empty());
+        assert!(nice_ticks(f64::NAN, 3).is_empty());
+        for max in [1.0, 7.3, 99.0, 1_234.5, 87_654.0] {
+            let ticks = nice_ticks(max, 3);
+            assert!(!ticks.is_empty() && ticks.len() <= 9, "{max}: {ticks:?}");
+            assert!(
+                ticks.iter().all(|t| *t > 0.0 && *t < max),
+                "{max}: {ticks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tick_labels_read_like_the_design() {
+        assert_eq!(chf_tick_label(2_000.0), "2k");
+        assert_eq!(chf_tick_label(2_500.0), "2.5k");
+        assert_eq!(chf_tick_label(250.0), "250");
+    }
+
+    #[test]
+    fn signed_percentages_never_read_minus_zero() {
+        assert_eq!(signed_pct(12), "+12%");
+        assert_eq!(signed_pct(-8), "−8%");
+        assert_eq!(signed_pct(0), "0%");
+    }
+
+    #[test]
+    fn weekday_amounts_are_whole_chf() {
+        assert_eq!(chf_label(123.456_000_1), chf_label(123.46));
+        assert!(!chf_label(123.456_000_1).contains("000"));
+        assert_eq!(chf_label(f64::NAN), chf_label(0.0));
+    }
+
+    /// The page maps the insight's `signal_id` back to its category with its
+    /// own slug fn; it must agree with the one that minted the id.
+    #[cfg(feature = "server-deps")]
+    #[test]
+    fn the_category_slug_matches_the_insight_ids() {
+        for name in [
+            "Groceries",
+            "Coffee & snacks",
+            "Dining & cafés",
+            "Health insurance",
+            "  Other  ",
+        ] {
+            assert_eq!(
+                category_slug(name),
+                phosk_insights::analytics::slugify(name),
+                "{name:?}"
+            );
         }
     }
 }
