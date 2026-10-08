@@ -218,6 +218,10 @@ impl SurrealDb {
         if me.store.count(Bucket::BudgetConfig).await? == 0 {
             seed::load_starter(&me.store).await?;
         }
+        // Stores created before the starter chat existed get one now.
+        if me.store.count(Bucket::Chat).await? == 0 {
+            seed::load_chat(&me.store).await?;
+        }
         Ok(me)
     }
 

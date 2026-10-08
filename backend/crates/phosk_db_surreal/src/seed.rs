@@ -217,13 +217,19 @@ pub(crate) async fn load_starter(store: &Store) -> Result<(), PhoskError> {
     for p in preferences() {
         store.put(Bucket::Preference, &p.key.clone(), &p).await?;
     }
-    // One empty chat session for the assistant panel to write to.
+    load_chat(store).await
+}
+
+/// One empty chat session for the assistant panel to write to.
+///
+/// # Errors
+/// [`PhoskError`] if the write fails.
+pub(crate) async fn load_chat(store: &Store) -> Result<(), PhoskError> {
     let chat = Chat {
         id: ChatId::new(),
         started: chrono::Local::now().date_naive(),
     };
-    store.put(Bucket::Chat, &chat.id.to_string(), &chat).await?;
-    Ok(())
+    store.put(Bucket::Chat, &chat.id.to_string(), &chat).await
 }
 
 // ── Dashboard builders (mirror phosk_db_memory::lib) ───────────────────────────
