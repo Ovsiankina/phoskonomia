@@ -45,7 +45,7 @@ use dioxus::prelude::*;
 use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg};
-use crate::components::shell::{AiPanel, TopBar};
+use crate::components::shell::{AiPanel, NumText, TopBar};
 use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::budgets::{
     cap_error_text, cap_input_text, get_allocation, get_budget_totals, get_categories,
@@ -1237,15 +1237,12 @@ fn AllocationBar(
     };
     let foot_alloc = allocated.map_or(DASH.to_string(), |m| format!("CHF {}", chf(m, 0)));
     let foot_env_count = segments.iter().filter(|s| s.cap.centimes() > 0).count();
-    let advice_model = advice.as_ref().map_or("GEMMA4".to_string(), |a| {
-        if a.model.is_empty() {
-            "GEMMA4".to_string()
-        } else {
-            a.model.clone()
-        }
-    });
+    // The advice is computed from the caps (its `source` says so); never a
+    // model badge it did not earn.
+    let advice_source = advice
+        .as_ref()
+        .map_or_else(String::new, |a| a.source.clone());
     let advice_text = advice.as_ref().map(|a| a.text.clone()).unwrap_or_default();
-    let advice_line = format!("{advice_model} · {advice_text}");
     let has_advice = advice.as_ref().is_some_and(|a| !a.text.is_empty());
 
     rsx! {
@@ -1303,7 +1300,8 @@ fn AllocationBar(
                 if has_advice {
                     span { class: "alloc-ai",
                         Dot { tone: "blue".to_string(), size: 6 }
-                        " {advice_line}"
+                        " {advice_source} · "
+                        NumText { text: advice_text.clone() }
                     }
                 }
             }

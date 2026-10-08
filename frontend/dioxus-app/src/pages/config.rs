@@ -861,7 +861,7 @@ pub fn ConfigPage() -> Element {
                                     sub: "App-wide defaults applied on every surface. Inspector placement sets where signal & detail docks open across Subscriptions, Debts and Analytics at once.".to_string(),
                                     CfgRow {
                                         label: "Assistant panel open by default".to_string(),
-                                        hint: "The local GEMMA4 dock on the left edge of every surface".to_string(),
+                                        hint: "The local assistant dock on the left edge of every surface".to_string(),
                                         CfgSwitch {
                                             value: ai_open,
                                             on_change: move |v: bool| set.call(vec![("aiOpen", CfgVal::Bool(v))]),

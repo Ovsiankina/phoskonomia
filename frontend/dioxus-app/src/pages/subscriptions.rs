@@ -40,9 +40,8 @@ use dioxus::prelude::*;
 use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg, Spark};
-use crate::components::shell::{AiPanel, ChatMsg, FeedItem, TopBar};
+use crate::components::shell::{AiPanel, TopBar};
 use crate::components::states::Awaiting;
-use crate::data::ai::get_ai_panel;
 use crate::data::subscriptions::{
     confirm_recurring_candidate, dismiss_recurring_candidate, get_billing_sweep, get_subscription,
     get_subscription_stats, list_recurring_candidates, list_subscriptions, BillingSweepDto,
@@ -1686,7 +1685,7 @@ pub fn SubscriptionsPage() -> Element {
     let kpi_mo_sub = stats_v.as_ref().map_or(DASH.to_string(), |s| {
         let mut t = format!("{} active", s.count);
         if s.auto_count > 0 {
-            t.push_str(&format!(" · {} auto-detected by GEMMA4", s.auto_count));
+            t.push_str(&format!(" · {} auto-detected", s.auto_count));
         }
         t
     });
@@ -1713,7 +1712,7 @@ pub fn SubscriptionsPage() -> Element {
         || "Awaiting backend".to_string(),
         |s| {
             if s.flagged.note.is_empty() {
-                "Flagged by GEMMA4 for review".to_string()
+                "Flagged for review".to_string()
             } else {
                 s.flagged.note.clone()
             }
@@ -2021,69 +2020,13 @@ pub fn SubscriptionsPage() -> Element {
 
 /// Thin subscriptions wrapper around the shared `AiPanel` (left assistant) — same
 /// pattern the dashboard uses to carry `collapsed`/`on_toggle` cleanly past the
-/// page-state closure. Owns its own `use_resource` over the seeded `get_ai_panel`
-/// `#[server]` fn (React's `/ai/feed` + `/ai/chat` + `/ai/status`) and maps the
-/// payload onto the panel's `feed`/`msgs` and `online`/`model`/`engine`/`location`
-/// props, so the assistant renders a populated live feed, chat transcript and
-/// online pulse — faithful to the React page (vs the empty awaiting states).
+/// page-state closure. The panel loads its own feed, model status and chat.
 #[component]
 fn AiPanelSubs(collapsed: bool, on_toggle: EventHandler<()>) -> Element {
-    let ai = use_resource(get_ai_panel);
-    let ai_v = ai.read().as_ref().and_then(|r| r.as_ref().ok()).cloned();
-
-    // Map the serde DTOs onto the panel's component props (empty until green —
-    // the panel's own awaiting bodies cover that tri-state).
-    let feed: Vec<FeedItem> = ai_v
-        .as_ref()
-        .map(|p| {
-            p.feed
-                .iter()
-                .map(|f| FeedItem {
-                    id: f.id.clone(),
-                    kind: f.kind.clone(),
-                    text: f.text.clone(),
-                    conf: f.conf,
-                    state: f.state.clone(),
-                    time: f.time.clone(),
-                    actions: f.actions.clone(),
-                    cand: f.cand,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let msgs: Vec<ChatMsg> = ai_v
-        .as_ref()
-        .map(|p| {
-            p.msgs
-                .iter()
-                .map(|m| ChatMsg {
-                    who: m.who.clone(),
-                    text: m.text.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let online = ai_v.as_ref().is_some_and(|p| p.status.online);
-    let model = ai_v
-        .as_ref()
-        .map_or_else(|| "GEMMA4".to_string(), |p| p.status.model.clone());
-    let engine = ai_v
-        .as_ref()
-        .map_or_else(|| "OLLAMA".to_string(), |p| p.status.engine.clone());
-    let location = ai_v
-        .as_ref()
-        .map_or_else(|| "LOCAL".to_string(), |p| p.status.location.clone());
-
     rsx! {
         AiPanel {
             collapsed,
             on_toggle: move |()| on_toggle.call(()),
-            feed,
-            msgs,
-            online,
-            model,
-            engine,
-            location,
         }
     }
 }

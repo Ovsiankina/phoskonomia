@@ -428,11 +428,8 @@ pub fn DebtsPage() -> Element {
         .as_ref()
         .map_or(DASH.to_string(), |s| chf(s.total_monthly, 0));
     let kpi_monthly_sub = match &stats_v {
-        Some(s) => format!(
-            "{} payments · {} auto-detected by GEMMA4",
-            s.count, s.auto_count
-        ),
-        None => format!("{DASH} payments · {DASH} auto-detected by GEMMA4"),
+        Some(s) => format!("{} payments · {} auto-detected", s.count, s.auto_count),
+        None => format!("{DASH} payments · {DASH} auto-detected"),
     };
     let kpi_interest = stats_v
         .as_ref()
