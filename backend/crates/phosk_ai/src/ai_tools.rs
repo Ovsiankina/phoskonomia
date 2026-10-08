@@ -329,8 +329,11 @@ pub const SUGGEST_PROMPT: &str = "Using only the data above, propose one concret
 /// How many earlier chat messages the model sees with each new turn.
 const CHAT_HISTORY_TURNS: usize = 8;
 
-/// How many of the latest transactions the chat snapshot lists.
+/// How many of the latest receipts the chat snapshot lists.
 const CHAT_RECENT_TX: usize = 15;
+
+/// How many items per receipt the chat snapshot lists.
+const CHAT_ITEMS_PER_RECEIPT: usize = 20;
 
 /// A plain-text, read-only snapshot of the user's money for the chat model:
 /// the calendar month containing `as_of` (budget, savings target, spend per
@@ -386,12 +389,34 @@ pub async fn chat_context(
         let _ = writeln!(out, "- {name}: {cat_spent} ({cap})");
     }
 
-    let _ = writeln!(out, "Latest transactions (newest first):");
-    if txs.is_empty() {
+    // Latest receipts with their items: each line carries its own category,
+    // which is what the per-category totals above are built from.
+    let mut recent = db.receipts_between(window_start, as_of).await?;
+    recent.sort_by_key(|r| std::cmp::Reverse(r.date));
+    recent.truncate(CHAT_RECENT_TX);
+    let ids: Vec<_> = recent.iter().map(|r| r.id).collect();
+    let lines = db.line_items_for(&ids).await?;
+
+    let _ = writeln!(
+        out,
+        "Latest receipts (newest first; items list their own category):"
+    );
+    if recent.is_empty() && txs.is_empty() {
         let _ = writeln!(out, "- none recorded yet");
     }
-    for t in txs.iter().take(CHAT_RECENT_TX) {
-        let _ = writeln!(out, "- {} {} [{}] {}", t.date, t.shop, t.category, t.amount);
+    for r in &recent {
+        let _ = writeln!(
+            out,
+            "- {} {} total {} [{}]",
+            r.date, r.shop, r.amount, r.category
+        );
+        for l in lines
+            .iter()
+            .filter(|l| l.receipt_id == r.id)
+            .take(CHAT_ITEMS_PER_RECEIPT)
+        {
+            let _ = writeln!(out, "    · {} ({}) {}", l.name, l.category, l.line_total);
+        }
     }
     Ok(out)
 }

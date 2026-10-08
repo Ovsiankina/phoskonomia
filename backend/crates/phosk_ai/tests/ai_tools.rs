@@ -389,7 +389,9 @@ async fn chat_context_is_built_from_the_users_data() {
     let db = db();
     let ctx = chat_context(&db, as_of()).await.expect("context");
     assert!(ctx.contains("Spent this month"), "{ctx}");
-    assert!(ctx.contains("Latest transactions"), "{ctx}");
+    assert!(ctx.contains("Latest receipts"), "{ctx}");
+    // Items are listed with their own category, so the model sees the split.
+    assert!(ctx.contains("    · "), "{ctx}");
     // The seeded June cycle has grocery spend; it must reach the model.
     assert!(ctx.contains("Migros"), "{ctx}");
 }
