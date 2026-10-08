@@ -30,9 +30,12 @@ pub struct CategoryDto {
     /// Projected end-of-cycle spend.
     #[serde(with = "phosk_model::money_centimes")]
     pub proj: Money,
-    /// `budget − spent` (negative if over).
+    /// `budget − spent` (negative if over); zero for an uncapped envelope.
     #[serde(with = "phosk_model::money_centimes")]
     pub remaining: Money,
+    /// `false` when the category has no cap at all: `budget` is then zero but
+    /// means "unlimited", never "over".
+    pub capped: bool,
     /// Integer percent of cap used (0–999).
     pub used_pct: i32,
     /// `true` for a fixed/standing charge (untunable).
@@ -41,8 +44,11 @@ pub struct CategoryDto {
     pub items: u32,
     /// Sparkline points (unitless daily spend).
     pub spark: Vec<f64>,
-    /// Per-cycle history bars (CHF as raw chart numbers — presentation series).
+    /// Per-cycle history bars (CHF as raw chart numbers — presentation series),
+    /// settled cycles oldest → newest.
     pub hist: Vec<f64>,
+    /// The month label of each `hist` bar (`"MAY"`).
+    pub hist_labels: Vec<String>,
     /// Due label for a fixed charge (empty otherwise).
     pub next: String,
     /// One-line AI guidance for this channel.
@@ -53,9 +59,12 @@ pub struct CategoryDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetTotalsDto {
-    /// Monthly budget ceiling.
+    /// Monthly budget ceiling (zero = not set yet).
     #[serde(with = "phosk_model::money_centimes")]
     pub budget: Money,
+    /// The cycle's savings target (zero = no target).
+    #[serde(with = "phosk_model::money_centimes")]
+    pub savings_target: Money,
     /// Sum of all caps.
     #[serde(with = "phosk_model::money_centimes")]
     pub allocated: Money,
@@ -180,6 +189,7 @@ pub async fn get_budget_totals() -> Result<BudgetTotalsDto, ServerFnError> {
             .map_err(crate::data::server_err)?;
         Ok(BudgetTotalsDto {
             budget: t.budget,
+            savings_target: t.savings_target,
             allocated: t.allocated,
             spent: t.spent,
             projected: t.projected,
@@ -297,11 +307,13 @@ fn map_category(c: phosk_planning::budgets::CategoryDto) -> CategoryDto {
         spent: c.spent,
         proj: c.proj,
         remaining: c.remaining,
+        capped: c.capped,
         used_pct: c.used_pct,
         fixed: c.fixed,
         items: c.items,
         spark: c.spark,
         hist: c.hist,
+        hist_labels: c.hist_labels,
         next: c.next,
         note: c.note,
     }
@@ -679,3 +691,215 @@ mod set_category_cap_tests {
 }
 
 // ── end of inline cap edit block ─────────────────────────────────────────────
+
+// ════════════════════════════════════════════════════════════════════════════
+// Global budget edit (write path)
+//
+// `set_budget_figure` persists the monthly budget or the savings target from
+// CHF text the user typed, through `phosk_planning::budget_config` (which
+// appends a `UserModified` history entry). Same shape as the cap edit above:
+// the server parses and validates, the page shows the message it gets back.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Which global budget figure an edit sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BudgetFigure {
+    /// The cycle's overall spend ceiling (must be above zero).
+    MonthlyBudget,
+    /// The cycle's savings target (zero = no target).
+    SavingsTarget,
+}
+
+/// Persist the monthly budget or the savings target from user-typed CHF text.
+///
+/// REAL: `set_budget_figure_with` validates the amount, then composes
+/// `phosk_planning::budget_config::set_monthly_budget` / `set_savings_target`.
+#[server]
+pub async fn set_budget_figure(figure: BudgetFigure, amount: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server-deps")]
+    {
+        let session = crate::data::build_session().await?;
+        set_budget_figure_with(session.db(), figure, &amount, crate::data::today()).await
+    }
+    #[cfg(not(feature = "server-deps"))]
+    {
+        let _ = (figure, amount);
+        Err(ServerFnError::new("server-only"))
+    }
+}
+
+/// Validate user-typed CHF text and store it as `figure`.
+///
+/// # Errors
+/// A `ServerFnError` with a page-safe message: a parser hint, one of
+/// `budget_msg`, never an adapter's own text.
+#[cfg(feature = "server-deps")]
+pub(crate) async fn set_budget_figure_with(
+    db: &dyn phosk_adapter_db::DatabaseAdapter,
+    figure: BudgetFigure,
+    amount: &str,
+    as_of: chrono::NaiveDate,
+) -> Result<(), ServerFnError> {
+    use phosk_core::error::PhoskError;
+    use phosk_planning::budget_config::{set_monthly_budget, set_savings_target};
+
+    let value = Money::parse_chf(amount).map_err(|e| match e {
+        // `parse_chf` only returns fixed hints that never echo the input.
+        PhoskError::Invalid(hint) => ServerFnError::new(hint),
+        _ => ServerFnError::new(budget_msg::SAVE_FAILED),
+    })?;
+    if value > MAX_CAP {
+        return Err(ServerFnError::new(budget_msg::TOO_LARGE));
+    }
+    let saved = match figure {
+        BudgetFigure::MonthlyBudget => {
+            if value <= Money::ZERO {
+                return Err(ServerFnError::new(budget_msg::BUDGET_NOT_POSITIVE));
+            }
+            set_monthly_budget(db, value, as_of).await
+        }
+        BudgetFigure::SavingsTarget => {
+            if value < Money::ZERO {
+                return Err(ServerFnError::new(budget_msg::TARGET_NEGATIVE));
+            }
+            set_savings_target(db, value, as_of).await
+        }
+    };
+    saved
+        .map(|_| ())
+        .map_err(|_| ServerFnError::new(budget_msg::SAVE_FAILED))
+}
+
+/// User-facing texts of the global budget edit: fixed and free of digits.
+#[cfg(feature = "server-deps")]
+mod budget_msg {
+    pub(super) const BUDGET_NOT_POSITIVE: &str = "the monthly budget must be more than zero";
+    pub(super) const TARGET_NEGATIVE: &str = "a savings target cannot be negative";
+    pub(super) const TOO_LARGE: &str = "an amount cannot exceed ten million CHF";
+    pub(super) const SAVE_FAILED: &str = "could not save, try again";
+}
+
+#[cfg(all(test, feature = "server-deps"))]
+mod set_budget_figure_tests {
+    use dioxus::prelude::ServerFnError;
+    use phosk_adapter_db::DatabaseAdapter;
+    use phosk_core::error::PhoskError;
+    use phosk_core::money::Money;
+    use phosk_db_memory::MemoryDb;
+    use phosk_model::{BudgetConfig, Source};
+
+    use super::{budget_msg, cap_error_text, set_budget_figure_with, BudgetFigure};
+
+    fn today() -> chrono::NaiveDate {
+        crate::data::today()
+    }
+
+    /// A store as a new user has it: nothing set yet.
+    fn fresh_db() -> MemoryDb {
+        MemoryDb::new(
+            Vec::new(),
+            Vec::new(),
+            BudgetConfig {
+                monthly_budget: Money::ZERO,
+                savings_target: Money::ZERO,
+            },
+        )
+    }
+
+    async fn save(db: &MemoryDb, figure: BudgetFigure, amount: &str) -> Result<(), ServerFnError> {
+        set_budget_figure_with(db, figure, amount, today()).await
+    }
+
+    async fn config(db: &MemoryDb) -> BudgetConfig {
+        db.budget_config().await.expect("config")
+    }
+
+    fn rejection(result: Result<(), ServerFnError>) -> String {
+        cap_error_text(&result.expect_err("the save should be rejected"))
+    }
+
+    #[tokio::test]
+    async fn sets_the_monthly_budget_as_exact_centimes_with_history() {
+        let db = fresh_db();
+        save(&db, BudgetFigure::MonthlyBudget, "CHF 4\u{2019}200.50")
+            .await
+            .expect("valid budget");
+        assert_eq!(config(&db).await.monthly_budget.centimes(), 420_050);
+        let changes = db.budget_changes().await.expect("history");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "monthly_budget");
+        assert_eq!(changes[0].provenance.source, Source::UserModified);
+    }
+
+    #[tokio::test]
+    async fn sets_and_clears_the_savings_target() {
+        let db = fresh_db();
+        save(&db, BudgetFigure::SavingsTarget, "900")
+            .await
+            .expect("valid target");
+        assert_eq!(config(&db).await.savings_target.centimes(), 90_000);
+        save(&db, BudgetFigure::SavingsTarget, "0")
+            .await
+            .expect("zero = no target");
+        assert_eq!(config(&db).await.savings_target, Money::ZERO);
+        assert_eq!(config(&db).await.monthly_budget, Money::ZERO, "untouched");
+    }
+
+    #[tokio::test]
+    async fn the_monthly_budget_must_be_above_zero() {
+        let db = fresh_db();
+        for amount in ["0", "-100"] {
+            assert_eq!(
+                rejection(save(&db, BudgetFigure::MonthlyBudget, amount).await),
+                budget_msg::BUDGET_NOT_POSITIVE,
+                "{amount:?}"
+            );
+        }
+        assert_eq!(config(&db).await.monthly_budget, Money::ZERO);
+    }
+
+    #[tokio::test]
+    async fn a_negative_savings_target_is_rejected() {
+        let db = fresh_db();
+        assert_eq!(
+            rejection(save(&db, BudgetFigure::SavingsTarget, "-5").await),
+            budget_msg::TARGET_NEGATIVE
+        );
+    }
+
+    #[tokio::test]
+    async fn garbage_gets_the_parser_hint_and_absurd_amounts_a_clear_line() {
+        let db = fresh_db();
+        for amount in ["", "abc", "12,50"] {
+            let shown = rejection(save(&db, BudgetFigure::MonthlyBudget, amount).await);
+            let hint = Money::parse_chf(amount).expect_err("garbage");
+            assert_eq!(PhoskError::Invalid(shown), hint, "{amount:?}");
+        }
+        assert_eq!(
+            rejection(save(&db, BudgetFigure::SavingsTarget, "10000000.01").await),
+            budget_msg::TOO_LARGE
+        );
+        assert_eq!(config(&db).await, {
+            BudgetConfig {
+                monthly_budget: Money::ZERO,
+                savings_target: Money::ZERO,
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn the_saved_budget_is_what_the_kpi_band_reads() {
+        let db = fresh_db();
+        save(&db, BudgetFigure::MonthlyBudget, "3000")
+            .await
+            .expect("valid budget");
+        save(&db, BudgetFigure::SavingsTarget, "500")
+            .await
+            .expect("valid target");
+        let t = phosk_planning::budgets::budget_totals(&db, today())
+            .await
+            .expect("totals");
+        assert_eq!(t.budget.centimes(), 300_000);
+        assert_eq!(t.savings_target.centimes(), 50_000);
+    }
+}

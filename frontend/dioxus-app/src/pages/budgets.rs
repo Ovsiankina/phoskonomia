@@ -19,6 +19,10 @@
 //! widths, bar percentages, SVG positions) is computed in presentation `f64` CHF
 //! via `Money::as_chf_f64()`, faithful to the JSX which worked in raw numbers.
 //!
+//! Global budget: the MONTHLY BUDGET card edits the monthly budget and the
+//! savings target in place (`set_budget_figure`, same flow as a cap edit).
+//! A category without a cap is "NO CAP": its spend shows, it is never over.
+//!
 //! Cap edits: clicking the cap value (on a card, a row or in the inspector) opens
 //! an inline CHF field. SAVE (or Enter) sends the raw text to the
 //! `set_category_cap` server fn, which parses and validates it; the page shows
@@ -49,8 +53,8 @@ use crate::components::shell::{AiPanel, TopBar};
 use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::budgets::{
     cap_error_text, cap_input_text, get_allocation, get_budget_totals, get_categories,
-    get_category_detail, get_category_transactions, set_category_cap, AllocationDto,
-    BudgetTotalsDto, CategoryDetailDto, CategoryDto, CategoryTxnDto,
+    get_category_detail, get_category_transactions, set_budget_figure, set_category_cap,
+    AllocationDto, BudgetFigure, BudgetTotalsDto, CategoryDetailDto, CategoryDto, CategoryTxnDto,
 };
 use crate::data::cycle::{get_cycle, CycleDto};
 use crate::data::{chf, chf2};
@@ -70,22 +74,27 @@ enum StKey {
 }
 
 /// Pure status mapper: a category's `{cap, spent, proj, fixed}` → `{key, label, tone}`.
-/// Faithful to React `budgetStatus`, but `budget` is the (possibly stepped) cap and
+/// Faithful to React `budgetStatus`, but `cap` is the (possibly stepped) cap and
 /// `proj` is passed in (the inspector overrides it with the detail-endpoint figure).
+/// `cap == None` is an uncapped envelope: "NO CAP", never over. A zero cap is a
+/// real cap, so any spend is over it.
 fn budget_status(
     spent: Money,
     proj: Money,
-    cap: Money,
+    cap: Option<Money>,
     fixed: bool,
 ) -> (StKey, String, &'static str) {
     if fixed {
         return (StKey::Fixed, "FIXED".to_string(), "blue");
     }
-    if cap.centimes() == 0 {
+    let Some(cap) = cap else {
         return (StKey::None, "NO CAP".to_string(), "blue");
-    }
-    if spent.centimes() == 0 {
+    };
+    if spent.centimes() <= 0 {
         return (StKey::Unused, "UNUSED".to_string(), "blue");
+    }
+    if cap.centimes() <= 0 {
+        return (StKey::Over, "OVER CAP".to_string(), "coral");
     }
     let p = spent.as_chf_f64() / cap.as_chf_f64();
     let pj = proj.as_chf_f64() / cap.as_chf_f64();
@@ -111,11 +120,33 @@ fn pct_cls(key: StKey) -> &'static str {
     }
 }
 
-/// The stepped cap of a category = its fetched budget + any local delta override.
-fn cap_of(c: &CategoryDto, overrides: &HashMap<String, i64>) -> Money {
-    let base = c.budget.centimes();
+/// The stepped cap of a category = its fetched cap + any local delta override;
+/// `None` for an uncapped category the stepper has not raised above zero.
+fn cap_of(c: &CategoryDto, overrides: &HashMap<String, i64>) -> Option<Money> {
     let delta = overrides.get(&c.name).copied().unwrap_or(0);
-    Money::from_centimes((base + delta).max(0))
+    if !c.capped && delta <= 0 {
+        return None;
+    }
+    let base = if c.capped { c.budget.centimes() } else { 0 };
+    Some(Money::from_centimes((base + delta).max(0)))
+}
+
+/// `spent / cap` as a 0–n ratio, `None` without a positive cap.
+fn used_ratio(spent: Money, cap: Option<Money>) -> Option<f64> {
+    cap.filter(|c| c.centimes() > 0)
+        .map(|c| spent.as_chf_f64() / c.as_chf_f64())
+}
+
+/// `"42%"` of a cap, or an em-dash without one.
+fn used_pct_txt(spent: Money, cap: Option<Money>) -> String {
+    used_ratio(spent, cap).map_or(DASH.to_string(), |p| {
+        format!("{}%", (p * 100.0).round() as i64)
+    })
+}
+
+/// The cap as display text: whole CHF, or `NO CAP`.
+fn cap_txt(cap: Option<Money>) -> String {
+    cap.map_or("NO CAP".to_string(), |c| chf(c, 0))
 }
 
 /// `Math.abs(remaining)` as `Money` (centimes).
@@ -123,14 +154,13 @@ fn abs_money(m: Money) -> Money {
     Money::from_centimes(m.centimes().abs())
 }
 
-/// The status-0 (backend-offline) hint line states.jsx renders below the message
-/// (`start it: cargo run -p phosk_api`). `errored` is the `#[server]` analog of a
-/// failed request; `None` keeps the JSX behaviour of showing it only when offline.
-const OFFLINE_HINT: &str = "start it: cargo run -p phosk_api";
+/// The message + hint for a read that failed (`errored`, the `#[server]` fn
+/// returned an error); nothing otherwise, so `Awaiting` shows its loading line.
+const OFFLINE_HINT: &str = "reload the page to try again";
 fn offline_message(errored: bool) -> (Option<String>, Option<String>) {
     if errored {
         (
-            Some("Backend offline".to_string()),
+            Some("Could not load this section".to_string()),
             Some(OFFLINE_HINT.to_string()),
         )
     } else {
@@ -201,6 +231,12 @@ pub fn BudgetsPage() -> Element {
         alloc.restart();
         sel_detail.restart();
     });
+    // The monthly budget or the savings target was saved: the KPI band and the
+    // allocation console both read it.
+    let on_figure_saved = use_callback(move |()| {
+        totals.restart();
+        alloc.restart();
+    });
     let sel_txns = use_resource(move || async move {
         match sel() {
             Some(name) => Some(get_category_transactions(name).await),
@@ -251,14 +287,8 @@ pub fn BudgetsPage() -> Element {
                 _ => 2,
             }
         };
-        let used = |c: &CategoryDto| -> f64 {
-            let cap = cap_of(c, &overrides);
-            if cap.centimes() > 0 {
-                c.spent.as_chf_f64() / cap.as_chf_f64()
-            } else {
-                0.0
-            }
-        };
+        let used =
+            |c: &CategoryDto| -> f64 { used_ratio(c.spent, cap_of(c, &overrides)).unwrap_or(0.0) };
         if sort_mode == "used" {
             arr.sort_by(|a, b| {
                 used(b)
@@ -268,8 +298,11 @@ pub fn BudgetsPage() -> Element {
         } else if sort_mode == "over" {
             arr.sort_by(|a, b| {
                 rank(a).cmp(&rank(b)).then_with(|| {
-                    let pa = a.proj.as_chf_f64() / cap_of(a, &overrides).as_chf_f64().max(1.0);
-                    let pb = b.proj.as_chf_f64() / cap_of(b, &overrides).as_chf_f64().max(1.0);
+                    let pace = |c: &CategoryDto| {
+                        let cap = cap_of(c, &overrides).map_or(0.0, |m| m.as_chf_f64());
+                        c.proj.as_chf_f64() / cap.max(1.0)
+                    };
+                    let (pa, pb) = (pace(a), pace(b));
                     pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
                 })
             });
@@ -281,15 +314,16 @@ pub fn BudgetsPage() -> Element {
     let sel_cat: Option<CategoryDto> = sel_id
         .as_ref()
         .and_then(|name| categories.iter().find(|c| &c.name == name).cloned());
-    let sel_cap = sel_cat
-        .as_ref()
-        .map_or(Money::ZERO, |c| cap_of(c, &overrides));
+    let sel_cap = sel_cat.as_ref().and_then(|c| cap_of(c, &overrides));
     let show_drawer = !dockable && drawer() && sel_cat.is_some();
     let cycle_label = c.label.clone();
 
     // ---- pre-computed compound display strings (format-segment parser is strict) ----
     const DASH: &str = "—";
     let budget = totals_dto.as_ref().map(|t| t.budget);
+    let savings_target = totals_dto.as_ref().map(|t| t.savings_target);
+    // No monthly budget yet (a new store): every "of budget" figure is moot.
+    let budget_set = budget.is_some_and(|b| b.centimes() > 0);
     let allocated = totals_dto.as_ref().map(|t| t.allocated);
     let spent = totals_dto.as_ref().map(|t| t.spent);
     let projected = totals_dto.as_ref().map(|t| t.projected);
@@ -318,6 +352,7 @@ pub fn BudgetsPage() -> Element {
     // header summary line bits
     let env_count_str = envelope_count.map_or(DASH.to_string(), |n| n.to_string());
     let budget_str = budget.map_or(DASH.to_string(), |m| chf(m, 0));
+    let capped_count = categories.iter().filter(|c| c.capped).count();
     let spent_pct_str = spent_pct.map_or(DASH.to_string(), |p| format!("{p}% spent"));
     let cats_count_str = if cats_ready {
         categories.len().to_string()
@@ -326,7 +361,6 @@ pub fn BudgetsPage() -> Element {
     };
 
     // KPI band strings
-    let kpi_budget = budget.map_or(DASH.to_string(), |m| chf(m, 0));
     let kpi_budget_sub = {
         let cyc = if c.days != 0 {
             format!("{}-day cycle · ", c.days)
@@ -335,14 +369,21 @@ pub fn BudgetsPage() -> Element {
         };
         format!("{cyc}{days_left} days left")
     };
-    let alloc_flag = if over_alloc.is_some_and(|m| m.centimes() > 0) {
+    let alloc_flag = if !budget_set {
+        ""
+    } else if over_alloc.is_some_and(|m| m.centimes() > 0) {
         "OVER"
     } else {
         "OK"
     };
     let kpi_allocated = allocated.map_or(DASH.to_string(), |m| chf(m, 0));
-    let kpi_allocated_sub = if over_alloc.is_some_and(|m| m.centimes() > 0) {
-        format!("CHF {} over budget", chf(over_alloc.unwrap(), 0))
+    let kpi_allocated_sub = if !budget_set {
+        format!("caps on {capped_count} of {} envelopes", categories.len())
+    } else if over_alloc.is_some_and(|m| m.centimes() > 0) {
+        format!(
+            "CHF {} over budget",
+            chf(over_alloc.unwrap_or(Money::ZERO), 0)
+        )
     } else if let Some(u) = unallocated {
         format!("CHF {} unallocated", chf(u, 0))
     } else {
@@ -350,15 +391,25 @@ pub fn BudgetsPage() -> Element {
     };
     let kpi_spent_pct = spent_pct.map_or(DASH.to_string(), |p| format!("{p}%"));
     let kpi_spent = spent.map_or(DASH.to_string(), |m| chf(m, 0));
-    let kpi_spent_sub = remaining.map_or(DASH.to_string(), |m| {
-        format!("CHF {} left of monthly budget", chf(m, 0))
-    });
+    let kpi_spent_sub = if budget_set {
+        remaining.map_or(DASH.to_string(), |m| {
+            if m.centimes() >= 0 {
+                format!("CHF {} left of monthly budget", chf(m, 0))
+            } else {
+                format!("CHF {} over the monthly budget", chf(abs_money(m), 0))
+            }
+        })
+    } else {
+        "no monthly budget set".to_string()
+    };
     let kpi_projected = projected.map_or(DASH.to_string(), |m| chf(m, 0));
     let kpi_projected_sub = match proj_over {
+        _ if !budget_set => "at the current pace".to_string(),
         Some(po) if po.centimes() > 0 => format!("CHF {} over at current pace", chf(po, 0)),
         Some(po) => format!("CHF {} under at current pace", chf(abs_money(po), 0)),
         None => DASH.to_string(),
     };
+    let proj_is_over = proj_is_over && budget_set;
     let kpi_proj_big_style = if proj_is_over {
         "color:var(--neon);text-shadow:var(--glow-text)"
     } else {
@@ -410,9 +461,13 @@ pub fn BudgetsPage() -> Element {
                                     div { class: "sum",
                                         b { "{env_count_str}" }
                                         " envelopes · "
-                                        b { "CHF {budget_str}" }
-                                        " monthly ·"
-                                        span { class: "coral", " {spent_pct_str}" }
+                                        if budget_set {
+                                            b { "CHF {budget_str}" }
+                                            " monthly ·"
+                                            span { class: "coral", " {spent_pct_str}" }
+                                        } else {
+                                            "no monthly budget yet"
+                                        }
                                         if !c.label.is_empty() {
                                             " · {c.label}"
                                         }
@@ -463,11 +518,30 @@ pub fn BudgetsPage() -> Element {
                                         span { "MONTHLY BUDGET" }
                                         span { "{c.label}" }
                                     }
-                                    div { class: "big",
-                                        span { class: "cur", "CHF" }
-                                        "{kpi_budget}"
+                                    if let (Some(b), Some(s)) = (budget, savings_target) {
+                                        FigureEditor {
+                                            figure: BudgetFigure::MonthlyBudget,
+                                            value: b,
+                                            big: true,
+                                            on_saved: on_figure_saved,
+                                        }
+                                        div { class: "sub", "{kpi_budget_sub}" }
+                                        div { class: "fig-row",
+                                            span { class: "fig-k", "SAVINGS TARGET" }
+                                            FigureEditor {
+                                                figure: BudgetFigure::SavingsTarget,
+                                                value: s,
+                                                big: false,
+                                                on_saved: on_figure_saved,
+                                            }
+                                        }
+                                    } else {
+                                        div { class: "big",
+                                            span { class: "cur", "CHF" }
+                                            "{DASH}"
+                                        }
+                                        div { class: "sub", "{kpi_budget_sub}" }
                                     }
-                                    div { class: "sub", "{kpi_budget_sub}" }
                                 }
                                 div { class: "bud-kpi blue",
                                     div { class: "lbl",
@@ -672,14 +746,15 @@ fn empty_cycle() -> CycleDto {
 #[component]
 fn EnvMeter(
     c: CategoryDto,
-    cap: Money,
+    cap: Option<Money>,
     #[props(default = true)] show_proj: bool,
     #[props(default = 9)] h: i32,
 ) -> Element {
     let spent = c.spent.as_chf_f64();
     let proj = c.proj.as_chf_f64();
+    let cap_cm = cap.map_or(0, Money::centimes);
     let cap_v = {
-        let v = cap.as_chf_f64();
+        let v = cap.map_or(0.0, |m| m.as_chf_f64());
         if v > 0.0 {
             v
         } else if spent > 0.0 {
@@ -708,7 +783,6 @@ fn EnvMeter(
     let cap_part = spent.min(cap_v);
     let sig_w = pc(cap_part);
     let sig_style = format!("width:{sig_w}%;background:{base_col};box-shadow:0 0 7px {base_col}");
-    let cap_cm = cap.centimes();
     let over_left = pc(cap_v);
     let over_w = pc(spent - cap_v);
     let thresh_left = pc(cap_v);
@@ -831,7 +905,7 @@ impl CapEdit {
 #[component]
 fn CapStepper(
     name: String,
-    value: Money,
+    value: Option<Money>,
     disabled: bool,
     on_step: EventHandler<i64>,
     on_saved: EventHandler<String>,
@@ -940,7 +1014,8 @@ fn CapStepper(
         };
     }
 
-    let v = chf(value, 0);
+    // An uncapped category opens an empty field: there is no cap to start from.
+    let draft = value.map(cap_input_text).unwrap_or_default();
     rsx! {
         div {
             class: "{wrap_cls}",
@@ -950,15 +1025,155 @@ fn CapStepper(
             }
             button { class: "cs", title: "Lower cap CHF 10", onclick: move |_| on_step.call(-10), "−" }
             button {
-                class: "cv cap-val",
+                class: if value.is_some() { "cv cap-val" } else { "cv cap-val unset" },
                 r#type: "button",
-                title: "Edit cap",
+                title: if value.is_some() { "Edit cap" } else { "Set a cap" },
                 // Another category's save is still landing.
                 disabled: busy,
-                onclick: move |_| edit.write().open(&name, cap_input_text(value)),
-                "CHF {v}"
+                onclick: move |_| edit.write().open(&name, draft.clone()),
+                if let Some(v) = value {
+                    "CHF {chf(v, 0)}"
+                } else {
+                    "SET CAP"
+                }
             }
             button { class: "cs", title: "Raise cap CHF 10", onclick: move |_| on_step.call(10), "+" }
+        }
+    }
+}
+
+// ── FigureEditor — the monthly budget / savings target in place ──────────────
+
+/// The [`CapEdit`] target key of a global budget figure.
+const fn figure_key(figure: BudgetFigure) -> &'static str {
+    match figure {
+        BudgetFigure::MonthlyBudget => "monthly_budget",
+        BudgetFigure::SavingsTarget => "savings_target",
+    }
+}
+
+/// Inline editor for one global budget figure, the same flow as [`CapStepper`]:
+/// the value is a button that swaps for a CHF field; SAVE or Enter sends the
+/// raw text to `set_budget_figure` (the server parses and validates it),
+/// CANCEL or Escape drops the draft, a rejection keeps the field open with the
+/// server's message, and `on_saved` fires once the figure is stored. A zero
+/// figure reads as not set yet (`SET BUDGET` / `SET TARGET`). `big` renders
+/// the KPI numeral; otherwise a compact value for a sub-line.
+#[component]
+fn FigureEditor(
+    figure: BudgetFigure,
+    value: Money,
+    big: bool,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let mut edit = use_signal(CapEdit::default);
+    let key = figure_key(figure);
+    let save = use_callback(move |()| {
+        let Some((_, amount)) = edit.write().begin_save() else {
+            return;
+        };
+        spawn(async move {
+            let result = set_budget_figure(figure, amount).await;
+            let saved = edit
+                .write()
+                .finish_save(result.map_err(|e| cap_error_text(&e)));
+            if saved.is_some() {
+                on_saved.call(());
+            }
+        });
+    });
+    let mut cancel = move || edit.write().cancel();
+
+    let (what, unset_txt) = match figure {
+        BudgetFigure::MonthlyBudget => ("monthly budget", "SET BUDGET"),
+        BudgetFigure::SavingsTarget => ("savings target", "SET TARGET"),
+    };
+    let (open, busy, draft, error) = {
+        let e = edit.read();
+        (
+            e.is_open_for(key),
+            e.saving,
+            e.draft.clone(),
+            e.error.clone(),
+        )
+    };
+
+    if open {
+        let field_label = format!("New {what}, in CHF");
+        let wrap_cls = if big { "fig-edit big" } else { "fig-edit" };
+        return rsx! {
+            div { class: "{wrap_cls}",
+                div { class: "fig-ctl",
+                    label { class: "cap-in",
+                        span { class: "cur", "CHF" }
+                        input {
+                            r#type: "text",
+                            inputmode: "decimal",
+                            autocomplete: "off",
+                            spellcheck: "false",
+                            aria_label: "{field_label}",
+                            value: "{draft}",
+                            readonly: busy,
+                            aria_busy: busy,
+                            onmounted: move |e: Event<MountedData>| async move {
+                                let _ = e.set_focus(true).await;
+                            },
+                            oninput: move |e: Event<FormData>| edit.write().set_draft(e.value()),
+                            onkeydown: move |e: Event<KeyboardData>| match e.key() {
+                                Key::Enter => {
+                                    e.prevent_default();
+                                    save.call(());
+                                }
+                                Key::Escape => {
+                                    e.prevent_default();
+                                    cancel();
+                                }
+                                _ => {}
+                            },
+                        }
+                    }
+                    button {
+                        class: "cap-act ok",
+                        r#type: "button",
+                        disabled: busy,
+                        onclick: move |_| save.call(()),
+                        "SAVE"
+                    }
+                    button {
+                        class: "cap-act",
+                        r#type: "button",
+                        disabled: busy,
+                        onclick: move |_| cancel(),
+                        "CANCEL"
+                    }
+                }
+                InlineStatus { pending: busy, error, pending_label: "Saving…".to_string() }
+            }
+        };
+    }
+
+    let set = value.centimes() > 0;
+    let draft_seed = if set {
+        cap_input_text(value)
+    } else {
+        String::new()
+    };
+    let title = format!("Edit the {what}");
+    let btn_cls = if big { "big fig-val" } else { "fig-val sm" };
+    rsx! {
+        button {
+            class: "{btn_cls}",
+            r#type: "button",
+            title: "{title}",
+            onclick: move |_| edit.write().open(key, draft_seed.clone()),
+            if !set {
+                span { class: "fig-unset", "{unset_txt}" }
+            } else if big {
+                span { class: "cur", "CHF" }
+                "{chf(value, 0)}"
+            } else {
+                "CHF {chf(value, 0)}"
+            }
         }
     }
 }
@@ -969,7 +1184,7 @@ fn CapStepper(
 #[component]
 fn EnvCard(
     c: CategoryDto,
-    cap: Money,
+    cap: Option<Money>,
     days_left: u32,
     active: bool,
     show_proj: bool,
@@ -980,13 +1195,10 @@ fn EnvCard(
     let (key, label, tone) = budget_status(c.spent, c.proj, cap, c.fixed);
     let spent = c.spent;
     let proj = c.proj;
-    let p = if cap.centimes() > 0 {
-        spent.as_chf_f64() / cap.as_chf_f64()
-    } else {
-        0.0
-    };
-    let remaining = c.remaining;
-    let rem_cm = remaining.centimes();
+    // Remaining against the (possibly stepped) cap; nothing for an uncapped one.
+    let remaining = cap.map(|m| Money::from_centimes(m.centimes() - spent.centimes()));
+    let rem_cm = remaining.map_or(0, Money::centimes);
+    let has_cap = cap.is_some_and(|m| m.centimes() > 0);
     let per_day = if rem_cm > 0 && days_left > 0 {
         Money::from_centimes(rem_cm / i64::from(days_left))
     } else {
@@ -1003,21 +1215,13 @@ fn EnvCard(
     };
     let tag_cls = if c.fixed { "env-tag fix" } else { "env-tag" };
     let tag_txt = if c.fixed { "FIXED" } else { "VARIABLE" };
-    let cap_txt = if cap.centimes() == 0 {
-        DASH.to_string()
-    } else {
-        chf(cap, 0)
-    };
-    let pct_txt = if cap.centimes() > 0 {
-        format!("{}%", (p * 100.0).round() as i64)
-    } else {
-        DASH.to_string()
-    };
+    let cap_txt = cap_txt(cap);
+    let pct_txt = used_pct_txt(spent, cap);
     let pct_amt_cls = format!("pct {}", pct_cls(key));
     let spent_txt = chf(spent, 0);
     let rem_lbl = if rem_cm >= 0 { "LEFT" } else { "OVER" };
-    let rem_txt = chf(abs_money(remaining), 0);
-    let proj_over_cap = proj.centimes() > cap.centimes();
+    let rem_txt = chf(Money::from_centimes(rem_cm.abs()), 0);
+    let proj_over_cap = cap.is_some_and(|m| proj > m);
     let proj_b_cls = if proj_over_cap { "coral" } else { "" };
     let proj_txt = chf(proj, 0);
     let per_day_txt = chf(per_day, 0);
@@ -1051,11 +1255,15 @@ fn EnvCard(
             }
             EnvMeter { c: c.clone(), cap, show_proj }
             div { class: "env-meta",
-                span {
-                    i { "{rem_lbl}" }
-                    " CHF {rem_txt}"
+                if remaining.is_some() {
+                    span {
+                        i { "{rem_lbl}" }
+                        " CHF {rem_txt}"
+                    }
+                } else if !c.fixed {
+                    span { i { "NO LIMIT" } }
                 }
-                if show_proj && !c.fixed && cap.centimes() > 0 {
+                if show_proj && !c.fixed && has_cap {
                     span {
                         i { "PROJ" }
                         " "
@@ -1095,7 +1303,7 @@ fn EnvCard(
 #[component]
 fn EnvRow(
     c: CategoryDto,
-    cap: Money,
+    cap: Option<Money>,
     active: bool,
     show_proj: bool,
     on_select: EventHandler<String>,
@@ -1104,27 +1312,14 @@ fn EnvRow(
 ) -> Element {
     let (key, label, tone) = budget_status(c.spent, c.proj, cap, c.fixed);
     let spent = c.spent;
-    let p = if cap.centimes() > 0 {
-        spent.as_chf_f64() / cap.as_chf_f64()
-    } else {
-        0.0
-    };
 
     let row_cls = if active { "envrow on" } else { "envrow" };
     let nm_cls = if c.fixed { "er-nm fix" } else { "er-nm" };
     let stat_cls = format!("er-stat {tone}");
-    let amt_cap = if cap.centimes() == 0 {
-        DASH.to_string()
-    } else {
-        chf(cap, 0)
-    };
+    let amt_cap = cap_txt(cap);
     let spent_txt = chf(spent, 0);
     let pct_cls_str = format!("er-pct {}", pct_cls(key));
-    let pct_txt = if cap.centimes() > 0 {
-        format!("{}%", (p * 100.0).round() as i64)
-    } else {
-        DASH.to_string()
-    };
+    let pct_txt = used_pct_txt(spent, cap);
     let name = c.name.clone();
     let nm = c.name.clone();
     let cap_name = c.name.clone();
@@ -1178,6 +1373,17 @@ fn AllocationBar(
             Awaiting { label: "ALLOCATION".to_string(), loading, message: msg, hint }
         };
     }
+    // Nothing capped yet (a new store): there is no mix to draw.
+    if segments.iter().all(|s| s.cap.centimes() <= 0) {
+        return rsx! {
+            Awaiting {
+                label: "ALLOCATION".to_string(),
+                legend: "NO CAPS YET".to_string(),
+                message: "No envelope has a cap yet. Press SET CAP on an envelope to give it a limit; the channel mix shows here.".to_string(),
+            }
+        };
+    }
+    let budget_set = budget_chf > 0.0;
 
     let t = totals.as_ref();
     let allocated = t.map(|t| t.allocated);
@@ -1208,6 +1414,7 @@ fn AllocationBar(
         "alloc-flag ok"
     };
     let flag_txt = match is_over {
+        _ if !budget_set => "NO MONTHLY BUDGET SET".to_string(),
         None => DASH.to_string(),
         Some(true) => format!(
             "▲ CHF {} OVER-ALLOCATED",
@@ -1281,14 +1488,18 @@ fn AllocationBar(
                         }
                     }
                 }
-                div { class: "alloc-thresh", style: "left:{budget_left}%",
-                    span { class: "alloc-thresh-lbl", "BUDGET · CHF {budget_lbl}" }
+                if budget_set {
+                    div { class: "alloc-thresh", style: "left:{budget_left}%",
+                        span { class: "alloc-thresh-lbl", "BUDGET · CHF {budget_lbl}" }
+                    }
                 }
             }
             div { class: "alloc-foot",
-                span {
-                    i { "MONTHLY BUDGET" }
-                    " CHF {foot_budget}"
+                if budget_set {
+                    span {
+                        i { "MONTHLY BUDGET" }
+                        " CHF {foot_budget}"
+                    }
                 }
                 span {
                     i { "ALLOCATED" }
@@ -1323,8 +1534,11 @@ fn AllocationBar(
 #[component]
 fn HistBars(
     hist: Vec<f64>,
+    /// One month label per bar (`hist` then the projection), e.g. `"MAY"`.
+    labels: Vec<String>,
     proj: Option<f64>,
-    cap: f64,
+    /// The cap line; `None` (no cap) draws none.
+    cap: Option<f64>,
     #[props(default = 300.0)] w: f64,
     #[props(default = 110.0)] h: f64,
 ) -> Element {
@@ -1336,12 +1550,12 @@ fn HistBars(
     if data.is_empty() {
         return rsx! {};
     }
-    let labels = [
-        "DEC", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV",
-    ];
-    let cap_v = cap.max(0.0);
+    let has_cap = cap.is_some();
+    // Without a cap no bar is "over" anything.
+    let cap_v = cap.map_or(f64::INFINITY, |c| c.max(0.0));
+    let cap_line = cap.unwrap_or(0.0).max(0.0);
     let max = {
-        let m = data.iter().copied().fold(cap_v, f64::max) * 1.12;
+        let m = data.iter().copied().fold(cap_line, f64::max) * 1.12;
         if m > 0.0 {
             m
         } else {
@@ -1353,31 +1567,33 @@ fn HistBars(
     let n = data.len() as f64;
     let bw = (w / n) * 0.56;
     let y = |v: f64| h - pad_b - (v / max) * (h - pad_t - pad_b);
-    let cap_y = y(cap_v);
+    let cap_y = y(cap_line);
     let cap_text_y = cap_y - 4.0;
     let view_box = format!("0 0 {w} {h}");
 
     rsx! {
         svg { width: "100%", height: "{h}", view_box: "{view_box}", preserve_aspect_ratio: "none", style: "display:block",
-            line {
-                x1: "0",
-                y1: "{cap_y}",
-                x2: "{w}",
-                y2: "{cap_y}",
-                stroke: "var(--neon-dim)",
-                stroke_width: "1",
-                stroke_dasharray: "4 4",
-                opacity: ".8",
-            }
-            text {
-                x: "{w}",
-                y: "{cap_text_y}",
-                text_anchor: "end",
-                fill: "var(--neon-dim)",
-                font_size: "8",
-                font_family: "var(--font-body)",
-                letter_spacing: ".1em",
-                "CAP"
+            if has_cap {
+                line {
+                    x1: "0",
+                    y1: "{cap_y}",
+                    x2: "{w}",
+                    y2: "{cap_y}",
+                    stroke: "var(--neon-dim)",
+                    stroke_width: "1",
+                    stroke_dasharray: "4 4",
+                    opacity: ".8",
+                }
+                text {
+                    x: "{w}",
+                    y: "{cap_text_y}",
+                    text_anchor: "end",
+                    fill: "var(--neon-dim)",
+                    font_size: "8",
+                    font_family: "var(--font-body)",
+                    letter_spacing: ".1em",
+                    "CAP"
+                }
             }
             for (i , v) in data.iter().enumerate() {
                 {
@@ -1398,7 +1614,7 @@ fn HistBars(
                     let rect_dash = if is_proj { "3 2" } else { "0" };
                     let rect_style = if v > cap_v { "filter:drop-shadow(0 0 4px var(--neon))" } else { "" };
                     let txt_fill = if is_proj { "var(--indigo-neon)" } else { "var(--ink-3)" };
-                    let label = labels.get(i).copied().unwrap_or("");
+                    let label = labels.get(i).cloned().unwrap_or_default();
                     let txt_y = h - 4.0;
                     rsx! {
                         g { key: "{i}",
@@ -1439,7 +1655,7 @@ fn HistBars(
 #[component]
 fn BudgetInspector(
     cat: Option<CategoryDto>,
-    cap: Money,
+    cap: Option<Money>,
     days_left: u32,
     cycle_label: String,
     detail: Option<CategoryDetailDto>,
@@ -1476,13 +1692,8 @@ fn BudgetInspector(
     let proj = detail.as_ref().map_or(cat.proj, |d| d.projected_spend);
     let hist = cat.hist.clone();
     let (key, _, tone) = budget_status(spent, proj, cap, cat.fixed);
-    let p = if cap.centimes() > 0 {
-        spent.as_chf_f64() / cap.as_chf_f64()
-    } else {
-        0.0
-    };
-    let remaining = cat.remaining;
-    let rem_cm = remaining.centimes();
+    let remaining = cap.map(|m| Money::from_centimes(m.centimes() - spent.centimes()));
+    let rem_cm = remaining.map_or(0, Money::centimes);
     let hist_avg = detail.as_ref().map(|d| d.hist_avg);
     let guidance = detail
         .as_ref()
@@ -1509,24 +1720,27 @@ fn BudgetInspector(
     } else {
         ""
     };
-    let big_txt = if cap.centimes() > 0 {
-        format!("{}%", (p * 100.0).round() as i64)
+    let big_txt = used_pct_txt(spent, cap);
+    let vs_txt = if cap.is_some() {
+        format!("of cap used · {days_left} days left")
     } else {
-        DASH.to_string()
+        format!("no cap · {days_left} days left")
     };
-    let vs_txt = format!("of cap used · {days_left} days left");
 
     // stats
-    let cap_txt = chf(cap, 0);
+    let cap_v_txt = cap.map_or("NO CAP".to_string(), |m| format!("CHF {}", chf(m, 0)));
     let spent_txt = chf(spent, 0);
+    // `rem_cm` is 0 without a cap, so an uncapped envelope reads "Remaining —".
     let rem_k = if rem_cm >= 0 { "Remaining" } else { "Over by" };
     let rem_v_style = if rem_cm < 0 {
         "color:var(--neon)"
     } else {
         "color:var(--ink)"
     };
-    let rem_v_txt = chf(abs_money(remaining), 0);
-    let proj_v_style = if proj.centimes() > cap.centimes() {
+    let rem_v_txt = remaining.map_or(DASH.to_string(), |_| {
+        format!("CHF {}", chf(Money::from_centimes(rem_cm.abs()), 0))
+    });
+    let proj_v_style = if cap.is_some_and(|m| proj > m) {
         "color:var(--neon)"
     } else {
         "color:var(--ink)"
@@ -1542,7 +1756,19 @@ fn BudgetInspector(
     // presence (`Some`), never on value, so a fixed/zero-proj channel still draws it.
     let hist_f64 = hist.clone();
     let proj_bar = Some(proj.as_chf_f64());
-    let cap_f64 = cap.as_chf_f64();
+    let cap_f64 = cap.map(|m| m.as_chf_f64());
+    // The settled months, then this cycle's month for the projection bar.
+    let hist_labels = {
+        let mut l = cat.hist_labels.clone();
+        l.push(
+            cycle_label
+                .split(' ')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        );
+        l
+    };
     let axis_cycles = format!("{hist_len} CYCLES");
     let axis_proj = format!("PROJECTED · {cycle_label}");
 
@@ -1580,7 +1806,7 @@ fn BudgetInspector(
 
             if !hist.is_empty() {
                 div { class: "sig-chart",
-                    HistBars { hist: hist_f64, proj: proj_bar, cap: cap_f64 }
+                    HistBars { hist: hist_f64, labels: hist_labels, proj: proj_bar, cap: cap_f64 }
                     div { class: "axis",
                         span { "{axis_cycles}" }
                         span { "{axis_proj}" }
@@ -1591,7 +1817,7 @@ fn BudgetInspector(
             div { class: "sig-stats",
                 div { class: "st",
                     div { class: "k", "Cap" }
-                    div { class: "v", "CHF {cap_txt}" }
+                    div { class: "v", "{cap_v_txt}" }
                 }
                 div { class: "st",
                     div { class: "k", "Spent" }
@@ -1599,7 +1825,7 @@ fn BudgetInspector(
                 }
                 div { class: "st",
                     div { class: "k", "{rem_k}" }
-                    div { class: "v", style: "{rem_v_style}", "CHF {rem_v_txt}" }
+                    div { class: "v", style: "{rem_v_style}", "{rem_v_txt}" }
                 }
                 div { class: "st",
                     div { class: "k", "Projected" }
@@ -1933,11 +2159,13 @@ mod cap_editor_ui_tests {
             spent: Money::ZERO,
             proj: Money::ZERO,
             remaining: budget,
+            capped: true,
             used_pct: 0,
             fixed: false,
             items: 0,
             spark: Vec::new(),
             hist: Vec::new(),
+            hist_labels: Vec::new(),
             next: String::new(),
             note: String::new(),
         }
@@ -1946,7 +2174,7 @@ mod cap_editor_ui_tests {
     #[component]
     fn Harness() -> Element {
         let cat = SELECTED.with(|s| s.borrow().clone());
-        let cap = cat.as_ref().map_or(Money::ZERO, |c| c.budget);
+        let cap = cat.as_ref().and_then(|c| c.capped.then_some(c.budget));
         rsx! {
             BudgetInspector {
                 cat,

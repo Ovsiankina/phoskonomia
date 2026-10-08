@@ -166,3 +166,18 @@
 .cap-act.ok { color: var(--indigo-neon); border-color: var(--indigo-neon); }
 .cap-act.ok:hover { box-shadow: var(--glow-indigo); text-shadow: var(--glow-indigo); }
 .cap-act:disabled, .cap-in input[readonly], .cap-val:disabled { cursor: progress; opacity: .5; }
+
+/* ---- global budget figures: MONTHLY BUDGET card editor (tokens only) ---- */
+.fig-val { display: block; background: none; border: 0; border-bottom: var(--bw-hair) dashed var(--hairline);
+  border-radius: var(--r-0); padding: 0; cursor: text; text-align: left; color: var(--ink);
+  transition: color .12s, border-color .12s, text-shadow .12s; }
+.fig-val.sm { display: inline-block; font-family: var(--font-display); font-size: var(--t-sm); }
+.fig-val:hover, .fig-val:focus-visible { outline: none; color: var(--indigo-neon); border-bottom-color: var(--indigo-neon); text-shadow: var(--glow-indigo); }
+.fig-unset { font-family: var(--font-body); font-size: var(--t-sm); letter-spacing: var(--tracking-tag); text-transform: uppercase; color: var(--indigo-neon); }
+.fig-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2);
+  margin-top: var(--s-2); padding-top: var(--s-2); border-top: var(--bw-hair) solid var(--hairline); }
+.fig-k { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag); text-transform: uppercase; color: var(--ink-3); }
+.fig-edit { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1); margin-top: var(--s-2); min-width: 0; }
+.fig-edit .fig-ctl { display: flex; align-items: center; gap: var(--s-1); flex-wrap: wrap; }
+.fig-edit.big .cap-in input { width: calc(var(--s-8) + var(--s-5)); font-size: var(--t-h3); }
+.cap-val.unset { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag); color: var(--indigo-neon); }
