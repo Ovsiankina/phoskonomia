@@ -82,6 +82,40 @@ mod store;
 
 use store::{Bucket, Store};
 
+/// Glyph of a [`CategoryCap`] the open-time reconcile creates — the ledger's
+/// default for a category added without one.
+const RECONCILED_GLYPH: &str = "◆";
+
+/// A slug for `name` that no record in `existing` holds yet: lowercase ASCII
+/// alphanumerics with every other run collapsed to `-`, then `-2`, `-3`, …
+/// on a clash (the same rule `phosk_ledger` uses for a new category).
+fn unique_slug(name: &str, existing: &[CategoryCap]) -> String {
+    let mut base = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            base.push(ch.to_ascii_lowercase());
+        } else if !base.ends_with('-') {
+            base.push('-');
+        }
+    }
+    let base = match base.trim_matches('-') {
+        "" => "category".to_owned(),
+        trimmed => trimmed.to_owned(),
+    };
+    let taken = |s: &str| existing.iter().any(|c| c.slug == s);
+    if !taken(&base) {
+        return base;
+    }
+    // Bounded by the number of existing records plus one, so it always ends.
+    for n in 2..=existing.len().saturating_add(2) {
+        let candidate = format!("{base}-{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    base
+}
+
 /// The embedded-SurrealDB adapter handle.
 ///
 /// Holds an owned [`Surreal<Db>`] connection to an embedded engine. Cheap to
@@ -209,7 +243,9 @@ impl SurrealDb {
     /// A **file-backed** adapter for real use: on first run (empty store) it
     /// writes only the [starter set](seed::load_starter) — categories, a zero
     /// budget and default preferences — never the demo ledger. Re-opening an
-    /// existing store writes nothing.
+    /// existing store writes no starter data; it only
+    /// reconciles the two category views (see `reconcile_categories`), which
+    /// writes nothing when they are already in step.
     ///
     /// # Errors
     /// [`PhoskError`] if the engine, migration, or starter insert fails.
@@ -222,7 +258,73 @@ impl SurrealDb {
         if me.store.count(Bucket::Chat).await? == 0 {
             seed::load_chat(&me.store).await?;
         }
+        me.reconcile_categories().await?;
         Ok(me)
+    }
+
+    /// Bring the two category views back into one list — run once per
+    /// [`SurrealDb::file_starter`] open, never on the demo store.
+    ///
+    /// Category writes keep the dashboard [`Category`] rows and the Budgets
+    /// [`CategoryCap`] records in step, but a store written before they did
+    /// can hold either view on its own. The [`CategoryCap`] records are the
+    /// truth:
+    ///
+    /// * every [`CategoryCap`] gets a [`Category`] row of its name and cap;
+    /// * a [`Category`] row no [`CategoryCap`] names is dropped — unless a
+    ///   receipt, line, subscription, signal or transaction still names it,
+    ///   in which case the missing [`CategoryCap`] is created (uncapped)
+    ///   instead, so nothing the ledger points at disappears.
+    ///
+    /// Idempotent: a store already in step is read and not written.
+    async fn reconcile_categories(&self) -> Result<(), PhoskError> {
+        let mut caps: Vec<CategoryCap> = self.store.list(Bucket::CategoryCap).await?;
+        let rows: Vec<(String, Category)> = self.store.list_keyed(Bucket::Category).await?;
+
+        for (key, row) in &rows {
+            if caps.iter().any(|c| c.name == row.name) {
+                if *key != row.name {
+                    // Rows are keyed by name; a stray key would shadow the
+                    // canonical row written below.
+                    self.store.delete(Bucket::Category, key).await?;
+                }
+                continue;
+            }
+            if self.category_is_referenced(&row.name).await? {
+                let cap = CategoryCap {
+                    id: CategoryId::new(),
+                    slug: unique_slug(&row.name, &caps),
+                    name: row.name.clone(),
+                    cap: None,
+                    fixed: false,
+                    glyph: RECONCILED_GLYPH.to_owned(),
+                    note: String::new(),
+                    provenance: Provenance {
+                        source: Source::RuleGenerated,
+                        confidence: 1.0,
+                    },
+                };
+                self.store
+                    .put(Bucket::CategoryCap, &cap.id.to_string(), &cap)
+                    .await?;
+                if *key != row.name {
+                    self.store.delete(Bucket::Category, key).await?;
+                }
+                caps.push(cap);
+            } else {
+                self.store.delete(Bucket::Category, key).await?;
+            }
+        }
+
+        for cap in &caps {
+            let in_step = rows
+                .iter()
+                .any(|(key, row)| *key == cap.name && row.name == cap.name && row.cap == cap.cap);
+            if !in_step {
+                self.put_category_row(&cap.name, cap.cap).await?;
+            }
+        }
+        Ok(())
     }
 
     /// An **in-memory** adapter holding only the real-use
