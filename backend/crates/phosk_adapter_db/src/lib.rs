@@ -40,6 +40,25 @@ use phosk_model::{
     Transaction,
 };
 
+/// The cap a merged category ends up with, given the surviving envelope's
+/// (`into`) and the absorbed one's (`from`) — the one rule every adapter's
+/// [`DatabaseAdapter::merge_categories`] applies:
+///
+/// - both capped → the **sum**: the merged envelope now carries the spend of
+///   both, and the total allocation stays what it was;
+/// - `into` unlimited → stays unlimited;
+/// - `from` unlimited, `into` capped → `into`'s cap (an unlimited source never
+///   turns a budgeted envelope unlimited behind the user's back).
+///
+/// # Errors
+/// [`PhoskError::Overflow`] if the sum leaves the `i64` centime range.
+pub fn merged_cap(into: Option<Money>, from: Option<Money>) -> Result<Option<Money>, PhoskError> {
+    match (into, from) {
+        (Some(a), Some(b)) => Ok(Some(a.checked_add(b)?)),
+        (into, _) => Ok(into),
+    }
+}
+
 /// The single fat database port (ADR-000): one async, object-safe trait covering
 /// every domain the backend persists. A technology swap is a new `impl` of this
 /// trait, never a change to feature code.
@@ -71,6 +90,17 @@ pub trait DatabaseAdapter: Send + Sync {
 
     /// Return every configured spending [`Category`] (name + optional cap), in
     /// unspecified order. A store with no categories yields an empty `Vec`.
+    ///
+    /// These rows are the lean dashboard view of the category records. The
+    /// category write paths keep them in step with the [`CategoryCap`] of the
+    /// same name: [`insert_category`](Self::insert_category) and
+    /// [`split_category`](Self::split_category) add a row,
+    /// [`set_category_cap`](Self::set_category_cap) re-caps it,
+    /// [`rename_category`](Self::rename_category) renames it,
+    /// [`merge_categories`](Self::merge_categories) and
+    /// [`delete_category`](Self::delete_category) remove the vanished one. A
+    /// row no [`CategoryCap`] shares a name with (the demo seed's uppercase
+    /// dashboard trio) is left alone.
     ///
     /// # Errors
     /// Returns a [`PhoskError`] if the underlying store fails to answer.
@@ -257,7 +287,8 @@ pub trait DatabaseAdapter: Send + Sync {
     /// [`PhoskError::NotFound`] if absent.
     async fn category_cap_by_name(&self, name: &str) -> Result<CategoryCap, PhoskError>;
 
-    /// Set (or clear, with `None`) a category's cap by name.
+    /// Set (or clear, with `None`) a category's cap by name. The
+    /// [`Category`] row of the same name, if any, takes the same cap.
     ///
     /// # Errors
     /// [`PhoskError::NotFound`] if no such category.
@@ -267,10 +298,10 @@ pub trait DatabaseAdapter: Send + Sync {
     ///
     /// [`CategoryCap`] is the **user-facing category record** (name, cap, glyph,
     /// note, provenance) — the thing the Budgets/Categories pages create and the
-    /// ledger's receipts and line items reference **by name**. (The leaner
-    /// [`Category`] returned by [`categories`](Self::categories) is the legacy
-    /// dashboard-trio read; it is a separate, uppercase name space and is not
-    /// touched by this write path.)
+    /// ledger's receipts and line items reference **by name**. The leaner
+    /// [`Category`] view returned by [`categories`](Self::categories) gets a
+    /// row of the same name and cap (replacing a stale one of that name), so
+    /// a new category is offered everywhere at once.
     ///
     /// The category `name` is its human identity (ADR-008) and must be unique:
     /// an adapter rejects a name it already holds rather than shadowing it.
@@ -290,6 +321,8 @@ pub trait DatabaseAdapter: Send + Sync {
     /// not a field edit: the adapter renames the category record **and** every
     /// row that carries the old name — `Receipt::category`, `LineItem::category`,
     /// `Subscription::category` and `Signal::parent` — so no history is orphaned.
+    /// The dashboard [`Transaction`] rows and the [`Category`] row of that name
+    /// move with it, so the dashboard and the ledger agree on the new name.
     /// The record's `id` and `slug` are stable and do **not** change (the UI and
     /// [`BudgetHistory`] key on them), and its [`Provenance`] becomes
     /// [`Source::UserModified`](phosk_model::Source::UserModified).
@@ -306,11 +339,13 @@ pub trait DatabaseAdapter: Send + Sync {
     /// Delete a category **only if nothing references it any more**.
     ///
     /// The guard is part of the contract, not the caller's courtesy: a category
-    /// still named by a [`Receipt`], a [`LineItem`], a [`Subscription`] or a
-    /// [`Signal`] cannot be deleted, so spend can never be stranded on a name
+    /// still named by a [`Receipt`], a [`LineItem`], a [`Subscription`], a
+    /// [`Signal`] or a dashboard [`Transaction`] cannot be deleted, so spend can
+    /// never be stranded on a name
     /// that no longer exists. Re-pointing a non-empty category is
     /// [`rename_category`](Self::rename_category)'s or
-    /// [`merge_categories`](Self::merge_categories)' job.
+    /// [`merge_categories`](Self::merge_categories)' job. The [`Category`]
+    /// row of the same name goes with it.
     ///
     /// # Errors
     /// - [`PhoskError::NotFound`] if no category carries that `name`.
@@ -329,10 +364,12 @@ pub trait DatabaseAdapter: Send + Sync {
     /// is gone but its history is not moved (the source record is written last,
     /// so even a store fault mid-way leaves the merge safely re-runnable).
     ///
-    /// The surviving `into` record keeps its `id`, `slug`, `cap`, `glyph` and
-    /// `note` — a merge changes what points at a category, never what the
-    /// category *is*. Adding up the two caps would be a budgeting decision, and
-    /// belongs to the user on the Budgets page.
+    /// The surviving `into` record keeps its `id`, `slug`, `glyph` and `note`;
+    /// its cap becomes [`merged_cap`] of the two — the sum when both are
+    /// capped, so the merged envelope still covers the spend both used to and
+    /// the total allocation is unchanged. The dashboard [`Transaction`] rows
+    /// are re-pointed too (they are not counted in the returned number), the
+    /// `from` [`Category`] row is removed and the `into` row takes the new cap.
     ///
     /// Re-pointed rows keep their own [`Provenance`]: as in a rename, the rows
     /// were not individually re-judged, so their OCR/AI confidence (and the
@@ -349,6 +386,7 @@ pub trait DatabaseAdapter: Send + Sync {
     /// # Errors
     /// - [`PhoskError::NotFound`] if either category does not exist.
     /// - [`PhoskError::Invalid`] if `from` and `into` are the same category.
+    /// - [`PhoskError::Overflow`] if the two caps cannot be added (before any write).
     /// - [`PhoskError`] if the store rejects a write.
     async fn merge_categories(&self, from: &str, into: &str) -> Result<u32, PhoskError>;
 
@@ -367,7 +405,8 @@ pub trait DatabaseAdapter: Send + Sync {
     /// behind. `new` arrives fully formed (validated name, derived slug,
     /// stamped [`Provenance`]); deriving it is the caller's job
     /// (`phosk_ledger::categories`), exactly as for
-    /// [`insert_category`](Self::insert_category).
+    /// [`insert_category`](Self::insert_category), and like an insert it adds
+    /// the matching [`Category`] row.
     ///
     /// A moved line is stamped
     /// [`Source::UserModified`](phosk_model::Source::UserModified): unlike a

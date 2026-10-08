@@ -33,6 +33,13 @@ use surrealdb::engine::local::Db;
 /// single process, so an in-process counter is enough.
 static NEXT_SEQ: AtomicI64 = AtomicI64::new(1);
 
+/// One record with its natural key (see [`Store::list_keyed`]).
+#[derive(Debug, Deserialize)]
+struct KeyedDoc {
+    key: String,
+    doc: String,
+}
+
 /// One row of an ordered bucket: the opaque document plus its sequence number
 /// (`0` for records written without one; real numbers start at `1`).
 #[derive(Debug, Deserialize)]
@@ -222,6 +229,35 @@ impl Store {
                 serde_json::from_str(&doc).map_err(|e| {
                     PhoskError::Invalid(format!("deserialize {}: {e}", bucket.table()))
                 })
+            })
+            .collect()
+    }
+
+    /// Fetch every record in `bucket` with the natural key it is stored under,
+    /// for the few writes that must re-put rows whose key cannot be derived
+    /// from the document (the seeded dashboard transactions). The key comes
+    /// back as the plain string [`Store::put`] was given — never a `Thing`.
+    pub(crate) async fn list_keyed<T: DeserializeOwned>(
+        &self,
+        bucket: Bucket,
+    ) -> Result<Vec<(String, T)>, PhoskError> {
+        let sql = "SELECT <string> record::id(id) AS key, doc FROM type::table($tb)";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("tb", bucket.table()))
+            .await
+            .map_err(|e| Self::map_err("list-keyed", &e))?;
+        let rows: Vec<KeyedDoc> = res
+            .take(0)
+            .map_err(|e| Self::map_err("list-keyed-take", &e))?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_str::<T>(&row.doc)
+                    .map(|value| (row.key, value))
+                    .map_err(|e| {
+                        PhoskError::Invalid(format!("deserialize {}: {e}", bucket.table()))
+                    })
             })
             .collect()
     }

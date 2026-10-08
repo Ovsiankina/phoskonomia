@@ -58,7 +58,7 @@
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
-use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_db::{DatabaseAdapter, merged_cap};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
@@ -221,11 +221,29 @@ impl SurrealDb {
         Ok(me)
     }
 
+    /// An **in-memory** adapter holding only the real-use
+    /// [starter set](seed::load_starter) — what a first run of
+    /// [`SurrealDb::file_starter`] writes, without touching disk. For tests
+    /// that exercise the real-mode flows on an empty ledger.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the engine, migration, or starter insert fails.
+    pub async fn memory_starter() -> Result<Self, PhoskError> {
+        let me = Self::memory().await?;
+        seed::load_starter(&me.store).await?;
+        Ok(me)
+    }
+
     /// Whether any stored row still names `category` — the guard behind
-    /// `delete_category` (receipts, their lines, subscriptions and signals).
+    /// `delete_category` (receipts, their lines, subscriptions, signals and
+    /// the dashboard transactions).
     async fn category_is_referenced(&self, category: &str) -> Result<bool, PhoskError> {
         let receipts: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
         if receipts.iter().any(|r| r.category == category) {
+            return Ok(true);
+        }
+        let txs: Vec<Transaction> = self.store.list(Bucket::Transaction).await?;
+        if txs.iter().any(|t| t.category == category) {
             return Ok(true);
         }
         let lines: Vec<LineItem> = self.store.list(Bucket::LineItem).await?;
@@ -238,6 +256,37 @@ impl SurrealDb {
         }
         let signals: Vec<Signal> = self.store.list(Bucket::Signal).await?;
         Ok(signals.iter().any(|s| s.parent == category))
+    }
+
+    /// Add (or replace) the dashboard [`Category`] row named `name` — the
+    /// projection an insert/split writes next to the new [`CategoryCap`].
+    /// Rows are keyed by name, as the seed and the starter set write them.
+    async fn put_category_row(&self, name: &str, cap: Option<Money>) -> Result<(), PhoskError> {
+        let row = Category {
+            name: name.to_owned(),
+            cap,
+        };
+        self.store.put(Bucket::Category, name, &row).await
+    }
+
+    /// Move the dashboard projection from the name `from` to `to`: the
+    /// [`Category`] row of that name (dropped when `to` already has one, as
+    /// in a merge) and every dashboard transaction naming it. Mirrors
+    /// `phosk_db_memory`.
+    async fn repoint_projection(&self, from: &str, to: &str) -> Result<(), PhoskError> {
+        let txs: Vec<(String, Transaction)> = self.store.list_keyed(Bucket::Transaction).await?;
+        for (key, mut t) in txs.into_iter().filter(|(_, t)| t.category == from) {
+            t.category = to.to_owned();
+            self.store.put(Bucket::Transaction, &key, &t).await?;
+        }
+        let rows: Vec<Category> = self.store.list(Bucket::Category).await?;
+        if !rows.iter().any(|c| c.name == to)
+            && let Some(mut row) = rows.into_iter().find(|c| c.name == from)
+        {
+            row.name = to.to_owned();
+            self.store.put(Bucket::Category, to, &row).await?;
+        }
+        self.store.delete(Bucket::Category, from).await
     }
 }
 
@@ -518,7 +567,12 @@ impl DatabaseAdapter for SurrealDb {
         };
         self.store
             .put(Bucket::CategoryCap, &c.id.to_string(), &c)
-            .await
+            .await?;
+        if let Some(mut row) = self.store.get::<Category>(Bucket::Category, name).await? {
+            row.cap = cap;
+            self.store.put(Bucket::Category, name, &row).await?;
+        }
+        Ok(())
     }
 
     async fn insert_category(&self, c: CategoryCap) -> Result<CategoryId, PhoskError> {
@@ -530,6 +584,7 @@ impl DatabaseAdapter for SurrealDb {
             )));
         }
         let id = c.id;
+        self.put_category_row(&c.name, c.cap).await?;
         self.store
             .put(Bucket::CategoryCap, &id.to_string(), &c)
             .await?;
@@ -585,6 +640,8 @@ impl DatabaseAdapter for SurrealDb {
                 .await?;
         }
 
+        self.repoint_projection(from, to).await?;
+
         target.name = to.to_owned();
         target.provenance = Provenance {
             source: Source::UserModified,
@@ -606,6 +663,7 @@ impl DatabaseAdapter for SurrealDb {
                 "category {name} is still referenced"
             )));
         }
+        self.store.delete(Bucket::Category, name).await?;
         self.store
             .delete(Bucket::CategoryCap, &target.id.to_string())
             .await
@@ -632,6 +690,7 @@ impl DatabaseAdapter for SurrealDb {
                 "category {from} cannot be merged into itself"
             )));
         }
+        let cap = merged_cap(target.cap, source.cap)?;
 
         let mut moved: u32 = 0;
         let receipts: Vec<Receipt> = self.store.list(Bucket::Receipt).await?;
@@ -667,6 +726,13 @@ impl DatabaseAdapter for SurrealDb {
             moved = moved.saturating_add(1);
         }
 
+        self.repoint_projection(from, into).await?;
+        if let Some(mut row) = self.store.get::<Category>(Bucket::Category, into).await? {
+            row.cap = cap;
+            self.store.put(Bucket::Category, into, &row).await?;
+        }
+
+        target.cap = cap;
         target.provenance = Provenance {
             source: Source::UserModified,
             confidence: 1.0,
@@ -723,6 +789,7 @@ impl DatabaseAdapter for SurrealDb {
                 .await?;
             moved = moved.saturating_add(1);
         }
+        self.put_category_row(&new.name, new.cap).await?;
         self.store
             .put(Bucket::CategoryCap, &new.id.to_string(), &new)
             .await?;

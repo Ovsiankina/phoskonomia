@@ -315,9 +315,11 @@ pub async fn delete_category(db: &dyn DatabaseAdapter, name: &str) -> Result<(),
 /// spend is ever stranded (see
 /// [`DatabaseAdapter::merge_categories`](phosk_adapter_db::DatabaseAdapter::merge_categories)).
 ///
-/// The target keeps its own cap: two envelopes becoming one does not mean their
-/// budgets add up, and deciding the new cap is the user's call on the Budgets
-/// page. The source's prior-cycle history rows stay with the deleted id.
+/// The caps fold ([`phosk_adapter_db::merged_cap`]): two capped envelopes
+/// become one capped at their sum, so the merged spend is not suddenly over
+/// budget and the total allocation is unchanged; an unlimited target stays
+/// unlimited. The user can re-cap it on the Budgets page. The source's
+/// prior-cycle history rows stay with the deleted id.
 ///
 /// Both names are matched case-insensitively, the way category names are
 /// unique in the first place.

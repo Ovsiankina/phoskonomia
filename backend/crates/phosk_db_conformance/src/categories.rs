@@ -9,12 +9,16 @@
 //! given name: they count references before and after, so the same assertions
 //! hold for any store that satisfies the seed contract.
 
-use phosk_adapter_db::DatabaseAdapter;
-use phosk_core::money::Money;
-use phosk_id::{CategoryId, LineItemId};
-use phosk_model::{CategoryCap, LineItem, Provenance, Source};
+use std::collections::BTreeSet;
 
-use crate::support::{Outcome, ensure, ensure_eq, ensure_invalid, ensure_not_found};
+use phosk_adapter_db::{DatabaseAdapter, merged_cap};
+use phosk_core::money::Money;
+use phosk_id::{CategoryId, LineItemId, ReceiptId};
+use phosk_model::{Category, CategoryCap, LineItem, Provenance, Receipt, Source, Transaction};
+
+use crate::support::{
+    Outcome, date, ensure, ensure_eq, ensure_invalid, ensure_not_found, line, receipt,
+};
 
 /// A synthetic, unreferenced category (not part of the seed).
 fn cap(name: &str, slug: &str) -> CategoryCap {
@@ -199,12 +203,14 @@ pub async fn delete_category_only_when_unreferenced(db: &dyn DatabaseAdapter) ->
 }
 
 /// `merge_categories` moves every reference onto the target, drops the source
-/// record, leaves the target record itself untouched apart from its
-/// provenance, and refuses an unknown or self-directed merge.
+/// record, folds the source's cap into the target's (`merged_cap`), leaves the
+/// rest of the target record untouched apart from its provenance, and refuses
+/// an unknown or self-directed merge.
 pub async fn merge_categories_folds_one_into_the_other(db: &dyn DatabaseAdapter) -> Outcome {
     let source_refs = references(db, "Coffee & snacks").await?;
     let target_refs = references(db, "Going out").await?;
     ensure(source_refs > 0, "the seed references Coffee & snacks")?;
+    let source_before = db.category_cap_by_name("Coffee & snacks").await?;
     let target_before = db.category_cap_by_name("Going out").await?;
     let caps_before = db.category_caps().await?.len();
 
@@ -237,13 +243,14 @@ pub async fn merge_categories_folds_one_into_the_other(db: &dyn DatabaseAdapter)
 
     let target_after = db.category_cap_by_name("Going out").await?;
     let want = CategoryCap {
+        cap: merged_cap(target_before.cap, source_before.cap)?,
         provenance: target_after.provenance,
         ..target_before
     };
     ensure_eq(
         &target_after,
         &want,
-        "the target keeps its id, slug, cap, glyph and note",
+        "the target keeps its id, slug, glyph and note and takes the folded cap",
     )?;
     ensure_eq(
         &target_after.provenance.source,
@@ -359,5 +366,147 @@ pub async fn split_category_carves_out_only_the_named_lines(db: &dyn DatabaseAda
         &db.receipt(picked.receipt_id).await?,
         &parent_before,
         "the receipt the line hangs off is untouched",
+    )
+}
+
+/// The dashboard [`Category`] row named `name`, if any.
+async fn row(db: &dyn DatabaseAdapter, name: &str) -> Result<Option<Category>, crate::Failure> {
+    Ok(db.categories().await?.into_iter().find(|c| c.name == name))
+}
+
+/// The names of every dashboard [`Category`] row this suite did not create.
+async fn other_rows(db: &dyn DatabaseAdapter) -> Result<BTreeSet<String>, crate::Failure> {
+    Ok(db
+        .categories()
+        .await?
+        .into_iter()
+        .map(|c| c.name)
+        .filter(|n| !n.starts_with("Conf "))
+        .collect())
+}
+
+/// Every category write keeps the dashboard [`Category`] rows in step with the
+/// records: an insert or a split adds a row with the record's cap, a cap edit
+/// re-caps it, a rename moves it, a merge leaves only the target (with the
+/// folded cap) and a delete removes it. No other row changes.
+pub async fn category_rows_follow_every_category_write(db: &dyn DatabaseAdapter) -> Outcome {
+    let seeded = other_rows(db).await?;
+
+    db.insert_category(cap("Conf A", "conf-a")).await?;
+    ensure_eq(
+        &row(db, "Conf A").await?,
+        &Some(Category {
+            name: "Conf A".to_owned(),
+            cap: Some(Money::from_centimes(12_500)),
+        }),
+        "an insert adds the row with the record's cap",
+    )?;
+
+    db.set_category_cap("Conf A", Some(Money::from_centimes(30_000)))
+        .await?;
+    ensure_eq(
+        &row(db, "Conf A").await?.and_then(|c| c.cap),
+        &Some(Money::from_centimes(30_000)),
+        "a cap edit re-caps the row",
+    )?;
+
+    db.rename_category("Conf A", "Conf B").await?;
+    ensure_eq(
+        &row(db, "Conf A").await?,
+        &None,
+        "the old name's row is gone",
+    )?;
+    ensure_eq(
+        &row(db, "Conf B").await?.and_then(|c| c.cap),
+        &Some(Money::from_centimes(30_000)),
+        "the renamed row keeps its cap",
+    )?;
+
+    db.insert_category(cap("Conf C", "conf-c")).await?;
+    db.merge_categories("Conf C", "Conf B").await?;
+    ensure_eq(
+        &row(db, "Conf C").await?,
+        &None,
+        "the merged-away row is gone",
+    )?;
+    ensure_eq(
+        &row(db, "Conf B").await?.and_then(|c| c.cap),
+        &Some(Money::from_centimes(42_500)),
+        "the target row takes the folded cap",
+    )?;
+    ensure_eq(
+        &db.category_cap_by_name("Conf B").await?.cap,
+        &Some(Money::from_centimes(42_500)),
+        "the target record takes the folded cap",
+    )?;
+
+    // A split carves a category out of lines, so it needs a line to move.
+    let rid = ReceiptId::new();
+    let picked = LineItem {
+        category: "Conf B".to_owned(),
+        ..line(rid, "Conf item", 500)
+    };
+    let r = Receipt {
+        category: "Conf B".to_owned(),
+        ..receipt(rid, "conf-rows", date(2027, 3, 3)?, 500)
+    };
+    db.insert_receipt(r, vec![picked.clone()]).await?;
+    db.split_category("Conf B", cap("Conf D", "conf-d"), &[picked.id])
+        .await?;
+    ensure_eq(
+        &row(db, "Conf D").await?.and_then(|c| c.cap),
+        &Some(Money::from_centimes(12_500)),
+        "a split adds the new category's row",
+    )?;
+
+    db.insert_category(cap("Conf E", "conf-e")).await?;
+    db.delete_category("Conf E").await?;
+    ensure_eq(&row(db, "Conf E").await?, &None, "a delete removes the row")?;
+
+    ensure_eq(
+        &other_rows(db).await?,
+        &seeded,
+        "no other category row changed",
+    )
+}
+
+/// A rename or a merge carries the dashboard transactions with it, so the
+/// dashboard and the ledger never disagree on a category's name; a category a
+/// dashboard transaction still names cannot be deleted.
+pub async fn dashboard_transactions_follow_rename_and_merge(db: &dyn DatabaseAdapter) -> Outcome {
+    let day = date(2027, 4, 4)?;
+    db.insert_category(cap("Conf Tx", "conf-tx")).await?;
+    db.insert_category(cap("Conf Sink", "conf-sink")).await?;
+    let rid = ReceiptId::new();
+    let r = Receipt {
+        category: "Conf Tx".to_owned(),
+        ..receipt(rid, "conf-tx-receipt", day, 900)
+    };
+    db.insert_receipt(r, Vec::new()).await?;
+    let names =
+        |txs: Vec<Transaction>| -> Vec<String> { txs.into_iter().map(|t| t.category).collect() };
+
+    db.rename_category("Conf Tx", "Conf Tx2").await?;
+    ensure_eq(
+        &names(db.transactions_between(day, day).await?),
+        &vec!["Conf Tx2".to_owned()],
+        "a rename re-points the projected transaction",
+    )?;
+
+    let moved = db.merge_categories("Conf Tx2", "Conf Sink").await?;
+    ensure_eq(&moved, &1, "the projection is not counted as a moved row")?;
+    ensure_eq(
+        &names(db.transactions_between(day, day).await?),
+        &vec!["Conf Sink".to_owned()],
+        "a merge re-points the projected transaction",
+    )?;
+    ensure_eq(
+        &db.receipt(rid).await?.category,
+        &"Conf Sink".to_owned(),
+        "the receipt moved too",
+    )?;
+    ensure_invalid(
+        db.delete_category("Conf Sink").await,
+        "delete a category that still carries spend",
     )
 }
