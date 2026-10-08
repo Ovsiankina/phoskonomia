@@ -38,6 +38,8 @@ tracing = { version = "0.1", features = ["release_max_level_off"] }
 # the read-model against the deterministic Swiss seed (ADR-010: a feature crate
 # may depend on a concrete adapter for its own tests, never in its public surface).
 phosk_db_memory = { path = "../phosk_db_memory" }
+# phosk_id: mint the ids of the categories/receipts a test writes into a fresh store.
+phosk_id = { path = "../phosk_id" }
 # serde_json: assert the exact serialized JSON shape / camelCase keys / CHF numbers.
 serde_json = { workspace = true }
 # tokio: test-only runtime to drive the async PORT via `#[tokio::test]`.

@@ -586,3 +586,162 @@ async fn category_dto_serializes_money_fields_as_centimes() {
     let back: CategoryDto = serde_json::from_value(v).expect("deserialize");
     assert_eq!(back, groc);
 }
+
+// ── uncapped envelopes, derived history, savings target (real-use store) ─────
+
+/// A starter-style store: no budget, no receipts, one uncapped and one capped
+/// category — what a new user has before entering anything.
+async fn starter_store() -> MemoryDb {
+    use phosk_id::CategoryId;
+    use phosk_model::{BudgetConfig, CategoryCap, Provenance};
+
+    let db = MemoryDb::new(
+        Vec::new(),
+        Vec::new(),
+        BudgetConfig {
+            monthly_budget: Money::ZERO,
+            savings_target: Money::ZERO,
+        },
+    );
+    for (slug, name, cap) in [
+        ("dining", "Dining", None),
+        ("groceries", "Groceries", Some(Money::from_centimes(50_000))),
+    ] {
+        db.insert_category(CategoryCap {
+            id: CategoryId::new(),
+            slug: slug.to_owned(),
+            name: name.to_owned(),
+            cap,
+            fixed: false,
+            glyph: String::new(),
+            note: String::new(),
+            provenance: Provenance::user_entered(),
+        })
+        .await
+        .expect("category inserted");
+    }
+    db
+}
+
+/// Record one spend of `centimes` in `category` on `date`.
+async fn spend(db: &MemoryDb, date: NaiveDate, category: &str, centimes: i64) {
+    use phosk_id::ReceiptId;
+    use phosk_model::{Provenance, Receipt};
+
+    db.insert_receipt(
+        Receipt {
+            id: ReceiptId::new(),
+            slug: format!("r-{date}-{category}-{centimes}"),
+            shop: "Shop".to_owned(),
+            date,
+            category: category.to_owned(),
+            amount: Money::from_centimes(centimes),
+            fixed: false,
+            provenance: Provenance::user_entered(),
+            source_kind: "MANUAL".to_owned(),
+            ocr_engine: String::new(),
+            ocr_regions: 0,
+        },
+        Vec::new(),
+    )
+    .await
+    .expect("receipt inserted");
+}
+
+/// No cap means no limit: spending in an uncapped category is never "over".
+#[tokio::test]
+async fn an_uncapped_envelope_with_spend_is_never_over() {
+    let db = starter_store().await;
+    spend(&db, naive(2026, 6, 3), "Dining", 4_200).await;
+
+    let cats = categories(&db, as_of()).await.expect("categories ok");
+    let dining = find(&cats, "Dining");
+    assert!(!dining.capped, "no cap set");
+    assert_eq!(dining.spent.centimes(), 4_200);
+    assert_eq!(dining.remaining, Money::ZERO, "nothing to run out of");
+    assert_eq!(dining.used_pct, 0);
+
+    let d = category_detail(&db, as_of(), "Dining")
+        .await
+        .expect("detail ok");
+    assert_eq!(
+        d.over_cap_amount,
+        Money::ZERO,
+        "an uncapped envelope is never over"
+    );
+
+    assert!(find(&cats, "Groceries").capped, "a real cap");
+}
+
+/// A zero cap is a real cap: any spend is over it.
+#[tokio::test]
+async fn a_zero_cap_is_still_a_cap() {
+    let db = starter_store().await;
+    set_cap(&db, "Dining", Some(Money::ZERO))
+        .await
+        .expect("cap set");
+    spend(&db, naive(2026, 6, 3), "Dining", 4_200).await;
+
+    let cats = categories(&db, as_of()).await.expect("categories ok");
+    let dining = find(&cats, "Dining");
+    assert!(dining.capped);
+    assert_eq!(dining.remaining.centimes(), -4_200, "over its zero cap");
+}
+
+/// Without stored history the bars come from the receipts of past months,
+/// starting at the first month with any spend, labelled by their real month.
+#[tokio::test]
+async fn history_is_derived_from_receipts_when_none_is_stored() {
+    let db = starter_store().await;
+    // Nothing before April; April and May settled, June is current.
+    spend(&db, naive(2026, 4, 10), "Groceries", 30_000).await;
+    spend(&db, naive(2026, 5, 2), "Groceries", 20_000).await;
+    spend(&db, naive(2026, 5, 20), "Groceries", 6_000).await;
+    spend(&db, naive(2026, 5, 21), "Dining", 1_500).await;
+    spend(&db, naive(2026, 6, 1), "Groceries", 9_900).await;
+
+    let cats = categories(&db, as_of()).await.expect("categories ok");
+    let groceries = find(&cats, "Groceries");
+    assert_eq!(groceries.hist, vec![300.0, 260.0], "April, May");
+    assert_eq!(groceries.hist_labels, vec!["APR", "MAY"]);
+    let dining = find(&cats, "Dining");
+    assert_eq!(dining.hist, vec![0.0, 15.0], "aligned to the same cycles");
+    assert_eq!(dining.hist_labels, vec!["APR", "MAY"]);
+
+    let d = category_detail(&db, as_of(), "Groceries")
+        .await
+        .expect("detail ok");
+    assert_eq!(d.hist_avg.centimes(), (30_000 + 26_000) / 2);
+}
+
+/// A store with no past receipts has no history bars at all (not six zeros).
+#[tokio::test]
+async fn a_new_store_has_no_history() {
+    let db = starter_store().await;
+    spend(&db, naive(2026, 6, 1), "Groceries", 9_900).await;
+    let cats = categories(&db, as_of()).await.expect("categories ok");
+    assert!(find(&cats, "Groceries").hist.is_empty());
+    assert!(find(&cats, "Groceries").hist_labels.is_empty());
+}
+
+/// The stored seed history keeps its own months (Dec 2025 → May 2026).
+#[tokio::test]
+async fn stored_history_carries_its_month_labels() {
+    let cats = categories(&seeded(), as_of()).await.expect("categories ok");
+    assert_eq!(
+        find(&cats, "Groceries").hist_labels,
+        vec!["DEC", "JAN", "FEB", "MAR", "APR", "MAY"]
+    );
+}
+
+/// The KPI band carries the savings target next to the budget.
+#[tokio::test]
+async fn budget_totals_carry_the_savings_target() {
+    let t = budget_totals(&seeded(), as_of()).await.expect("totals ok");
+    assert_eq!(t.savings_target.centimes(), 90_000);
+    let t = budget_totals(&starter_store().await, as_of())
+        .await
+        .expect("totals ok");
+    assert_eq!(t.budget, Money::ZERO, "not set yet");
+    assert_eq!(t.savings_target, Money::ZERO);
+}

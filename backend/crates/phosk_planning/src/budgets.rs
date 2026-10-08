@@ -16,17 +16,35 @@
 //! `N` = cycle length (days), `d` = day index. Per the build contract §5.2:
 //! - `spent` = Σ current-cycle receipts in this category.
 //! - `proj` (`projectedSpend`) = `S · N / d` (run-rate; checked centime math).
-//! - `remaining` = `cap − spent` (signed).
+//! - `remaining` = `cap − spent` (signed); `0` for an uncapped envelope, which
+//!   has nothing to run out of.
 //! - `usedPct` = `round(100 · spent / cap)` (0 when cap is 0/unlimited).
-//! - `overCapAmount` = `max(0, proj − cap)`.
+//! - `overCapAmount` = `max(0, proj − cap)`; `0` for an uncapped envelope.
 //! - `histAvg` = trailing-N-cycle average spend (§6 momentum helper).
 //! - Totals: `allocated` = Σ caps; `spent` = Σ all spend-to-date;
 //!   `projected` = Σ per-cat proj; `remaining` = `budget − spent`;
 //!   `overAllocated` = `max(0, allocated − budget)`;
 //!   `unallocated` = `max(0, budget − allocated)`; `envelopeCount` = count of caps.
 //! - Allocation segment: `cap` (width), `share = cap / Σcaps`, `fixed`.
+//!
+//! ## Uncapped envelopes
+//!
+//! A category whose cap is `None` has no limit: it is never "over", its
+//! `remaining` and `overCapAmount` are zero, and `capped` is `false` so a page
+//! can tell it apart from a hard zero cap (`Some(0)`), which *is* exceeded by
+//! any spend.
+//!
+//! ## Cycle history
+//!
+//! [`category_history`] is the per-cycle spend behind `hist`/`histLabels` and
+//! `histAvg`. It reads the stored budget history; a store that has none for a
+//! category (every real store: nothing writes that table yet) gets it derived
+//! from the receipts of the [`DERIVED_HISTORY_CYCLES`] calendar months before
+//! the current cycle, starting at the first month that has any receipt at
+//! all, so a new user does not see the months before they started as
+//! zero-spend cycles.
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use phosk_adapter_db::DatabaseAdapter;
@@ -50,9 +68,12 @@ pub struct CategoryDto {
     /// Projected end-of-cycle spend.
     #[serde(with = "phosk_model::money_centimes")]
     pub proj: Money,
-    /// `budget − spent` (negative if over).
+    /// `budget − spent` (negative if over); zero for an uncapped envelope.
     #[serde(with = "phosk_model::money_centimes")]
     pub remaining: Money,
+    /// `false` when the category has no cap at all: `budget` is then zero but
+    /// means "unlimited", not "a zero cap".
+    pub capped: bool,
     /// Integer percent of cap used (0–999).
     pub used_pct: i32,
     /// `true` for a fixed/standing charge (untunable).
@@ -61,8 +82,11 @@ pub struct CategoryDto {
     pub items: u32,
     /// Sparkline points (unitless daily spend).
     pub spark: Vec<f64>,
-    /// Per-cycle history bars (CHF as raw chart numbers — presentation series).
+    /// Per-cycle history bars (CHF as raw chart numbers — presentation series),
+    /// settled cycles oldest → newest, the current cycle excluded.
     pub hist: Vec<f64>,
+    /// The month label of each `hist` bar (`"MAY"`), same order and length.
+    pub hist_labels: Vec<String>,
     /// Due label for a fixed charge (empty otherwise).
     pub next: String,
     /// One-line AI guidance for this channel.
@@ -73,9 +97,12 @@ pub struct CategoryDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetTotalsDto {
-    /// Monthly budget ceiling.
+    /// Monthly budget ceiling (zero = not set yet).
     #[serde(with = "phosk_model::money_centimes")]
     pub budget: Money,
+    /// The cycle's savings target (zero = no target).
+    #[serde(with = "phosk_model::money_centimes")]
+    pub savings_target: Money,
     /// Sum of all caps.
     #[serde(with = "phosk_model::money_centimes")]
     pub allocated: Money,
@@ -180,11 +207,129 @@ pub async fn categories(
     let window = Period::Month.resolve(as_of)?;
     let caps = db.category_caps().await?;
     let receipts = receipts_to_date(db, window).await?;
+    let prior = prior_cycles(db, window).await?;
     let mut out = Vec::with_capacity(caps.len());
     for cap in &caps {
-        out.push(envelope_for(db, cap, &receipts, window).await?);
+        out.push(envelope_for(db, cap, &receipts, &prior, window).await?);
     }
     Ok(out)
+}
+
+/// One settled cycle of a category's spend history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleSpend {
+    /// First day of the cycle.
+    pub cycle_start: NaiveDate,
+    /// What the category spent in that cycle.
+    pub spent: Money,
+}
+
+/// How many settled cycles [`category_history`] derives from receipts when the
+/// store has no recorded history for a category.
+pub const DERIVED_HISTORY_CYCLES: u32 = 6;
+
+/// A category's settled cycles before the one containing `as_of`, oldest →
+/// newest (see the module docs, "Cycle history").
+///
+/// # Errors
+/// Propagates any adapter [`PhoskError`]; [`PhoskError::Overflow`] on a checked
+/// centime overflow; [`PhoskError::InvalidDate`] at the edge of the date range.
+#[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
+pub async fn category_history(
+    db: &dyn DatabaseAdapter,
+    name: &str,
+    as_of: NaiveDate,
+) -> Result<Vec<CycleSpend>, PhoskError> {
+    let window = Period::Month.resolve(as_of)?;
+    let prior = prior_cycles(db, window).await?;
+    history_for(db, name, &prior, window).await
+}
+
+/// The settled cycles a derived history covers, and their receipts.
+struct PriorCycles {
+    /// Cycle starts, oldest → newest, from the first month with any receipt.
+    starts: Vec<NaiveDate>,
+    /// Every receipt in those cycles.
+    receipts: Vec<Receipt>,
+}
+
+/// Read the receipts of the [`DERIVED_HISTORY_CYCLES`] months before `window`
+/// once, and keep the cycles from the first one that has any receipt.
+async fn prior_cycles(
+    db: &dyn DatabaseAdapter,
+    window: CycleWindow,
+) -> Result<PriorCycles, PhoskError> {
+    let mut starts = Vec::new();
+    for back in (1..=DERIVED_HISTORY_CYCLES).rev() {
+        let start = window
+            .start
+            .checked_sub_months(Months::new(back))
+            .ok_or_else(|| {
+                PhoskError::InvalidDate(format!("{back} months before {}", window.start))
+            })?;
+        starts.push(start);
+    }
+    let (Some(&first), Some(last_day)) = (starts.first(), window.start.pred_opt()) else {
+        return Ok(PriorCycles {
+            starts: Vec::new(),
+            receipts: Vec::new(),
+        });
+    };
+    let receipts = db.receipts_between(first, last_day).await?;
+    let active = starts
+        .iter()
+        .position(|s| receipts.iter().any(|r| month_start(r.date) == Some(*s)))
+        .map_or_else(Vec::new, |i| starts[i..].to_vec());
+    Ok(PriorCycles {
+        starts: active,
+        receipts,
+    })
+}
+
+/// `name`'s settled cycles before `window`: the stored history when the store
+/// has one for it, else derived from `prior`'s receipts.
+async fn history_for(
+    db: &dyn DatabaseAdapter,
+    name: &str,
+    prior: &PriorCycles,
+    window: CycleWindow,
+) -> Result<Vec<CycleSpend>, PhoskError> {
+    let mut stored: Vec<CycleSpend> = db
+        .budget_history(name)
+        .await?
+        .into_iter()
+        .filter(|h| h.cycle_start < window.start)
+        .map(|h| CycleSpend {
+            cycle_start: h.cycle_start,
+            spent: h.spent,
+        })
+        .collect();
+    if !stored.is_empty() {
+        stored.sort_by_key(|c| c.cycle_start);
+        return Ok(stored);
+    }
+    prior
+        .starts
+        .iter()
+        .map(|&start| {
+            let spent = Money::sum(
+                prior
+                    .receipts
+                    .iter()
+                    .filter(|r| r.category == name && month_start(r.date) == Some(start))
+                    .map(|r| r.amount),
+            )?;
+            Ok(CycleSpend {
+                cycle_start: start,
+                spent,
+            })
+        })
+        .collect()
+}
+
+/// First day of `d`'s calendar month (the [`Period::Month`] cycle start).
+fn month_start(d: NaiveDate) -> Option<NaiveDate> {
+    d.with_day(1)
 }
 
 /// Current-cycle receipts up to (and including) `as_of`.
@@ -200,16 +345,22 @@ async fn envelope_for(
     db: &dyn DatabaseAdapter,
     cap: &CategoryCap,
     receipts: &[Receipt],
+    prior: &PriorCycles,
     window: CycleWindow,
 ) -> Result<CategoryDto, PhoskError> {
     let in_cat: Vec<&Receipt> = receipts.iter().filter(|r| r.category == cap.name).collect();
     let spent = Money::sum(in_cat.iter().map(|r| r.amount))?;
     let cap_money = cap.cap.unwrap_or(Money::ZERO);
     let proj = project_run_rate(spent, window)?;
-    let remaining = cap_money.checked_sub(spent)?;
+    // An uncapped envelope has nothing to run out of: never negative.
+    let remaining = match cap.cap {
+        Some(c) => c.checked_sub(spent)?,
+        None => Money::ZERO,
+    };
     let used = used_pct(spent, cap_money);
-    let hist = db.budget_history(&cap.name).await?;
+    let hist = history_for(db, &cap.name, prior, window).await?;
     let hist_series: Vec<f64> = hist.iter().map(|h| h.spent.as_chf_f64()).collect();
+    let hist_labels: Vec<String> = hist.iter().map(|h| month_label(h.cycle_start)).collect();
     let spark: Vec<f64> = in_cat.iter().map(|r| r.amount.as_chf_f64()).collect();
     Ok(CategoryDto {
         name: cap.name.clone(),
@@ -217,11 +368,13 @@ async fn envelope_for(
         spent,
         proj,
         remaining,
+        capped: cap.cap.is_some(),
         used_pct: used,
         fixed: cap.fixed,
         items: u32::try_from(in_cat.len()).unwrap_or(u32::MAX),
         spark,
         hist: hist_series,
+        hist_labels,
         next: String::new(),
         note: cap.note.clone(),
     })
@@ -253,6 +406,7 @@ pub async fn budget_totals(
 
     Ok(BudgetTotalsDto {
         budget,
+        savings_target: config.savings_target,
         allocated,
         spent,
         projected,
@@ -321,10 +475,13 @@ pub async fn category_detail(
             .map(|r| r.amount),
     )?;
     let projected_spend = project_run_rate(spent, window)?;
-    let cap_money = cap.cap.unwrap_or(Money::ZERO);
-    let over_cap_amount = projected_spend.checked_sub(cap_money)?.max(Money::ZERO);
+    // Only a real cap can be overshot.
+    let over_cap_amount = match cap.cap {
+        Some(c) => projected_spend.checked_sub(c)?.max(Money::ZERO),
+        None => Money::ZERO,
+    };
 
-    let hist = db.budget_history(&cap.name).await?;
+    let hist = category_history(db, &cap.name, as_of).await?;
     let prior: Vec<Money> = hist.iter().map(|h| h.spent).collect();
     let n = momentum_baseline_cycles(db).await?;
     let hist_avg = trailing_avg(&prior, n)?;
@@ -467,11 +624,18 @@ async fn momentum_baseline_cycles(db: &dyn DatabaseAdapter) -> Result<u32, Phosk
     }
 }
 
+/// Upper-case month abbreviations, January first.
+const MONTHS: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
 /// `"DD MON"` upper-case date label, e.g. `"16 JUN"`.
 fn date_label(d: NaiveDate) -> String {
-    const MONTHS: [&str; 12] = [
-        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-    ];
+    format!("{:02} {}", d.day(), month_label(d))
+}
+
+/// `"MON"` upper-case month label of a date, e.g. `"JUN"`.
+fn month_label(d: NaiveDate) -> String {
     let idx = (d.month() as usize).saturating_sub(1).min(11);
-    format!("{:02} {}", d.day(), MONTHS[idx])
+    MONTHS[idx].to_owned()
 }
