@@ -115,13 +115,13 @@ pub struct AllocSegmentDto {
     pub fixed: bool,
 }
 
-/// The GEMMA4 allocation advice line.
+/// The allocation advice line, computed from the caps and the budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AllocAdviceDto {
-    /// Model badge.
-    pub model: String,
-    /// Advice sentence.
+    /// Who wrote `text`: `"COMPUTED"` (plain arithmetic, no model).
+    pub source: String,
+    /// Advice sentence; empty when there is nothing to say.
     pub text: String,
 }
 
@@ -131,7 +131,7 @@ pub struct AllocAdviceDto {
 pub struct AllocationDto {
     /// Ordered cap segments.
     pub segments: Vec<AllocSegmentDto>,
-    /// AI advice on the mix.
+    /// Advice on the mix (computed, see [`AllocAdviceDto`]).
     pub ai_advice: AllocAdviceDto,
 }
 
@@ -291,11 +291,10 @@ pub async fn allocation(
         .collect();
     Ok(AllocationDto {
         segments,
-        ai_advice: AllocAdviceDto {
-            model: "GEMMA4".to_owned(),
-            text: "Rent and insurance dominate the mix; the discretionary channels have room."
-                .to_owned(),
-        },
+        ai_advice: crate::advice::allocation_advice(
+            &caps,
+            db.budget_config().await?.monthly_budget,
+        )?,
     })
 }
 

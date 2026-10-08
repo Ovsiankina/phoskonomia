@@ -96,13 +96,13 @@ pub struct AllocSegmentDto {
     pub fixed: bool,
 }
 
-/// The GEMMA4 allocation advice line.
+/// The allocation advice line, computed from the caps and the budget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AllocAdviceDto {
-    /// Model badge.
-    pub model: String,
-    /// Advice sentence.
+    /// Who wrote `text`: `"COMPUTED"` (plain arithmetic, no model).
+    pub source: String,
+    /// Advice sentence; empty when there is nothing to say.
     pub text: String,
 }
 
@@ -218,7 +218,7 @@ pub async fn get_allocation() -> Result<AllocationDto, ServerFnError> {
                 })
                 .collect(),
             ai_advice: AllocAdviceDto {
-                model: a.ai_advice.model,
+                source: a.ai_advice.source,
                 text: a.ai_advice.text,
             },
         })

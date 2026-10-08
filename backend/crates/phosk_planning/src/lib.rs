@@ -43,6 +43,7 @@
 //! [`Money`]: phosk_core::money::Money
 //! [`PhoskError::Overflow`]: phosk_core::error::PhoskError::Overflow
 
+mod advice;
 pub mod alerts;
 pub mod budget_config;
 pub mod budgets;
