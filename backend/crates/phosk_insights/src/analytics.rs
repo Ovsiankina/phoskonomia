@@ -1,8 +1,8 @@
 //! Analytics read-model (feature F3).
 //!
 //! Backs the Analytics page: the multi-cycle spend-trend scope, the per-category
-//! momentum small-multiples, the weekday spending-rhythm heatmap, and the GEMMA4
-//! "read" insight + soft-cap suggestion. The DTOs mirror
+//! momentum small-multiples, the weekday spending-rhythm heatmap, and the
+//! computed "read" insight + soft-cap suggestion. The DTOs mirror
 //! `frontend/dioxus-app/src/data/analytics.rs` field-for-field (camelCase keys,
 //! money as exact i64 centimes via [`phosk_model::money_centimes`]).
 //!
@@ -159,7 +159,8 @@ pub struct RhythmDto {
     pub stats: RhythmStatsDto,
 }
 
-/// The GEMMA4-suggested soft cap (`AnalyticsInsightDto::suggested_cap`).
+/// The suggested soft cap (`AnalyticsInsightDto::suggested_cap`), computed
+/// from the top-rising category's trailing baseline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SuggestedCapDto {
@@ -173,12 +174,15 @@ pub struct SuggestedCapDto {
     pub projected_savings: Money,
 }
 
-/// `GET /analytics/insights/movers` — the GEMMA4 "read" + a cap suggestion.
+/// The `source` label of an insight computed from the data (no model involved).
+pub const COMPUTED_SOURCE: &str = "COMPUTED";
+
+/// `GET /analytics/insights/movers` — the computed "read" + a cap suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsInsightDto {
-    /// Model badge.
-    pub model: String,
+    /// Who wrote `text`: [`COMPUTED_SOURCE`] (plain arithmetic, no model).
+    pub source: String,
     /// The insight sentence.
     pub text: String,
     /// An actionable cap suggestion.
@@ -435,10 +439,14 @@ pub async fn weekday_rhythm(
     })
 }
 
-/// The GEMMA4 "read" + soft-cap suggestion (`GET /analytics/insights/movers`).
+/// The computed "read" + soft-cap suggestion (`GET /analytics/insights/movers`).
 ///
-/// Composes the narrative insight (seed/canned for now) with an actionable
-/// [`SuggestedCapDto`] over the top-rising signal.
+/// Picks the top-rising discretionary category (momentum vs its trailing-N
+/// cycle average) and suggests a soft cap at that baseline; the projected
+/// saving is this cycle's spend above the baseline. The sentence states those
+/// numbers and is labelled [`COMPUTED_SOURCE`]. With no spend at all, or no
+/// earlier cycles to compare against, it says there is no trend yet and the
+/// suggested cap is zero.
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from adapter reads.
@@ -447,43 +455,81 @@ pub async fn analytics_insight(
     db: &dyn DatabaseAdapter,
     as_of: chrono::NaiveDate,
 ) -> Result<AnalyticsInsightDto, PhoskError> {
-    // The top-rising momentum card drives the cap suggestion: cap at the trailing
-    // baseline (priorAvg) and project the over-run (now − baseline) as the saving.
+    let n = momentum_baseline_cycles(db).await?;
     let cards = category_momentum(db, as_of).await?;
-    let top = cards
-        .iter()
-        .filter(|c| !c.fixed)
-        .max_by_key(|c| c.delta_pct)
-        .or_else(|| cards.first());
-
-    let (signal_id, amount, projected_savings, name) = match top {
-        Some(c) => {
-            let cap = if c.prior_avg.centimes() > 0 {
-                c.prior_avg
-            } else {
-                c.now
-            };
-            let savings = c.now.checked_sub(cap)?.max(Money::ZERO);
-            (slugify(&c.name), cap, savings, c.name.clone())
-        }
-        None => (
-            "spend".to_owned(),
-            Money::ZERO,
-            Money::ZERO,
-            "spend".to_owned(),
-        ),
-    };
-
+    let read = movers_read(&cards, n)?;
     Ok(AnalyticsInsightDto {
-        model: "GEMMA4".to_owned(),
-        text: format!(
-            "{name} is your fastest-rising channel this cycle — a soft cap at its recent baseline would protect your savings."
-        ),
+        source: COMPUTED_SOURCE.to_owned(),
+        text: read.text,
         suggested_cap: SuggestedCapDto {
-            signal_id,
-            amount,
-            projected_savings,
+            signal_id: read.signal_id,
+            amount: read.cap,
+            projected_savings: read.savings,
         },
+    })
+}
+
+/// The pure core of [`analytics_insight`].
+struct MoversRead {
+    text: String,
+    signal_id: String,
+    cap: Money,
+    savings: Money,
+}
+
+/// Compose the movers read from the momentum `cards` (`n` = baseline cycles).
+fn movers_read(cards: &[MomentumDto], n: u32) -> Result<MoversRead, PhoskError> {
+    let none = |text: &str| MoversRead {
+        text: text.to_owned(),
+        signal_id: "spend".to_owned(),
+        cap: Money::ZERO,
+        savings: Money::ZERO,
+    };
+    let with_history: Vec<&MomentumDto> = cards
+        .iter()
+        .filter(|c| !c.fixed && c.prior_avg.centimes() > 0)
+        .collect();
+    if with_history.is_empty() {
+        let any_spend = cards.iter().any(|c| c.now.centimes() > 0);
+        return Ok(none(if any_spend {
+            "No trend yet: there are no earlier cycles to compare this one against."
+        } else {
+            "No trend yet: no spending is recorded this cycle."
+        }));
+    }
+
+    // Top riser among categories with a baseline (ties: the larger overspend).
+    let Some(top) = with_history.iter().copied().max_by(|a, b| {
+        a.delta_pct
+            .cmp(&b.delta_pct)
+            .then_with(|| a.now.cmp(&b.now))
+    }) else {
+        return Ok(none("No trend yet."));
+    };
+    let name = &top.name;
+    let cycles = if n == 1 {
+        "last cycle".to_owned()
+    } else {
+        format!("its {n}-cycle average")
+    };
+    if top.delta_pct <= 0 {
+        return Ok(MoversRead {
+            text: format!(
+                "Nothing is rising this cycle. {name} is closest to its usual spend: {} so far against {}.",
+                top.now, top.prior_avg
+            ),
+            ..none("")
+        });
+    }
+    let savings = top.now.checked_sub(top.prior_avg)?.max(Money::ZERO);
+    Ok(MoversRead {
+        text: format!(
+            "{name} is up {}% on {cycles}: {} so far against {}. A soft cap at {} would save {}.",
+            top.delta_pct, top.now, top.prior_avg, top.prior_avg, savings
+        ),
+        signal_id: slugify(name),
+        cap: top.prior_avg,
+        savings,
     })
 }
 
@@ -650,4 +696,57 @@ fn slugify(name: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_owned()
+}
+
+#[cfg(test)]
+mod movers_read_tests {
+    use super::*;
+
+    fn card(name: &str, now: i64, prior: i64, delta: i32) -> MomentumDto {
+        MomentumDto {
+            name: name.to_owned(),
+            now: Money::from_centimes(now * 100),
+            budget: Money::ZERO,
+            series: Vec::new(),
+            delta_pct: delta,
+            prior_avg: Money::from_centimes(prior * 100),
+            fixed: false,
+        }
+    }
+
+    #[test]
+    fn no_spend_means_no_trend() {
+        let r = movers_read(&[card("Food", 0, 0, 0)], 3).expect("read");
+        assert_eq!(r.text, "No trend yet: no spending is recorded this cycle.");
+        assert_eq!(r.cap, Money::ZERO);
+        assert_eq!(r.savings, Money::ZERO);
+    }
+
+    #[test]
+    fn spend_without_history_means_no_trend() {
+        let r = movers_read(&[card("Food", 50, 0, 0)], 3).expect("read");
+        assert!(r.text.contains("no earlier cycles"), "{}", r.text);
+        assert_eq!(r.savings, Money::ZERO);
+    }
+
+    #[test]
+    fn top_riser_gets_a_cap_at_its_baseline() {
+        let cards = [card("Food", 120, 100, 20), card("Coffee", 60, 40, 50)];
+        let r = movers_read(&cards, 3).expect("read");
+        assert_eq!(
+            r.text,
+            "Coffee is up 50% on its 3-cycle average: CHF 60.00 so far against CHF 40.00. A soft cap at CHF 40.00 would save CHF 20.00."
+        );
+        assert_eq!(r.signal_id, "coffee");
+        assert_eq!(r.cap, Money::from_centimes(4_000));
+        assert_eq!(r.savings, Money::from_centimes(2_000));
+    }
+
+    #[test]
+    fn nothing_rising_says_so_and_suggests_no_cap() {
+        let r = movers_read(&[card("Food", 50, 100, -50)], 1).expect("read");
+        assert!(r.text.starts_with("Nothing is rising"), "{}", r.text);
+        assert_eq!(r.cap, Money::ZERO);
+        assert_eq!(r.savings, Money::ZERO);
+    }
 }

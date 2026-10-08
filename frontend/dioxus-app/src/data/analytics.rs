@@ -1,7 +1,7 @@
 //! Analytics read-model (F3).
 //!
 //! Backs the Analytics page: the multi-cycle spend-trend scope, category
-//! momentum small-multiples, the weekday spending-rhythm heatmap and the GEMMA4
+//! momentum small-multiples, the weekday spending-rhythm heatmap and the computed
 //! "read" insight. Item-signals/movers come from [`crate::data::signals`].
 //! Mirrors React `GET /analytics/spend-history`, `/analytics/spend-history/stats`,
 //! `/analytics/category-momentum`, `/analytics/rhythm/weekday`,
@@ -152,7 +152,7 @@ pub struct RhythmDto {
     pub stats: RhythmStatsDto,
 }
 
-/// The GEMMA4-suggested soft cap (`AnalyticsInsightDto::suggested_cap`).
+/// The computed soft-cap suggestion (`AnalyticsInsightDto::suggested_cap`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SuggestedCapDto {
@@ -166,12 +166,12 @@ pub struct SuggestedCapDto {
     pub projected_savings: Money,
 }
 
-/// `GET /analytics/insights/movers` — the GEMMA4 "read" + a cap suggestion.
+/// `GET /analytics/insights/movers` — the computed "read" + a cap suggestion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsInsightDto {
-    /// Model badge.
-    pub model: String,
+    /// Who wrote `text`: `"COMPUTED"` (plain arithmetic, no model).
+    pub source: String,
     /// The insight sentence.
     pub text: String,
     /// An actionable cap suggestion.
@@ -310,7 +310,7 @@ pub async fn get_rhythm() -> Result<RhythmDto, ServerFnError> {
     }
 }
 
-/// The GEMMA4 read + cap suggestion (`GET /analytics/insights/movers`).
+/// The computed read + cap suggestion (`GET /analytics/insights/movers`).
 ///
 /// REAL: composes `phosk_insights::analytics::analytics_insight`.
 #[server]
@@ -322,7 +322,7 @@ pub async fn get_analytics_insight() -> Result<AnalyticsInsightDto, ServerFnErro
             .await
             .map_err(crate::data::server_err)?;
         Ok(AnalyticsInsightDto {
-            model: i.model,
+            source: i.source,
             text: i.text,
             suggested_cap: SuggestedCapDto {
                 signal_id: i.suggested_cap.signal_id,
