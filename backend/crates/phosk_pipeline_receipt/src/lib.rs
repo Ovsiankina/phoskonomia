@@ -819,18 +819,21 @@ fn build_suggestion(
     low_conf: usize,
     category_guessed: bool,
 ) -> AiSuggestion {
-    let mut flag = String::new();
-    if category_guessed {
-        flag.push_str(" (category guessed — check it)");
-    }
-    if low_conf > 0 {
-        flag.push_str(&format!(" ({low_conf} low-confidence line(s) to review)"));
-    }
+    let guessed = if category_guessed {
+        " (category guessed — check it)"
+    } else {
+        ""
+    };
+    let flag = if low_conf > 0 {
+        format!(" ({low_conf} low-confidence line(s) to review)")
+    } else {
+        String::new()
+    };
     AiSuggestion {
         id: SuggestionId::new(),
         kind: "receipt".to_owned(),
         text: format!(
-            "Import receipt from {} — {} item(s), CHF {:.2}{flag}",
+            "Import receipt from {} — {} item(s), CHF {:.2}{guessed}{flag}",
             receipt.shop,
             lines.len(),
             receipt.amount.as_chf_f64()
