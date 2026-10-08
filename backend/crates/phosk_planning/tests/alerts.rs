@@ -396,13 +396,103 @@ async fn act_on_a_dismissed_alert_is_invalid() {
 }
 
 /// Dismiss every persisted alert through the action the list itself offers,
-/// so the list falls back to rule-generated alerts.
+/// so the list falls back to rule-generated alerts, and book a CHF 400 dinner
+/// on 17 June so a rule fires: Going out (CHF 64.50 + 400 against its 400 cap)
+/// is over budget. Without it the seeded June has nothing to flag: every
+/// variable channel is under 80 %, and rent / health insurance are fixed
+/// charges paid exactly at their caps, which are never "at risk".
 async fn dismiss_every_persisted_alert(db: &MemoryDb) {
     for a in db.alerts().await.expect("persisted alerts") {
         act_on_alert(db, &a.slug, "dismiss", today())
             .await
             .unwrap_or_else(|e| panic!("dismiss {} should succeed, got {e:?}", a.slug));
     }
+    db.insert_receipt(
+        receipt("Going out", naive(2026, 6, 17), 40_000, false),
+        Vec::new(),
+    )
+    .await
+    .expect("dinner booked");
+}
+
+/// A total-only receipt fixture (no lines).
+fn receipt(category: &str, date: NaiveDate, centimes: i64, fixed: bool) -> phosk_model::Receipt {
+    let id = phosk_id::ReceiptId::new();
+    phosk_model::Receipt {
+        id,
+        slug: format!("test-{id}"),
+        shop: "Shop".to_owned(),
+        date,
+        category: category.to_owned(),
+        amount: Money::from_centimes(centimes),
+        fixed,
+        provenance: Provenance::user_entered(),
+        source_kind: "MANUAL".to_owned(),
+        ocr_engine: String::new(),
+        ocr_regions: 0,
+    }
+}
+
+/// Fixed charges paid in full on day 1 (seeded rent and health insurance,
+/// exactly at their caps) raise no "run-rate above cap" alert: a fixed
+/// charge is not run-rated, and paying it in full is not a risk.
+#[tokio::test]
+async fn fixed_charges_paid_at_cap_raise_no_generated_alert() {
+    let db = seeded();
+    for a in db.alerts().await.expect("persisted alerts") {
+        act_on_alert(&db, &a.slug, "dismiss", today())
+            .await
+            .expect("dismiss");
+    }
+    let list = alerts(&db, today()).await.expect("alerts ok");
+    assert!(
+        list.iter()
+            .all(|a| a.id != "gen-risk-Rent" && a.id != "gen-risk-Health insurance"),
+        "{list:?}"
+    );
+    // A fixed charge above its cap is still over budget.
+    db.insert_receipt(receipt("Rent", naive(2026, 6, 2), 5_000, true), Vec::new())
+        .await
+        .expect("extra rent");
+    let list = alerts(&db, today()).await.expect("alerts ok");
+    assert!(list.iter().any(|a| a.id == "gen-over-Rent"), "{list:?}");
+}
+
+/// Alerts count spend at item level: a grocery receipt whose CHF 700 line is
+/// booked under Shopping pushes Shopping (CHF 129.90 seeded, 500 cap) over its
+/// cap, and leaves Groceries alone.
+#[tokio::test]
+async fn alerts_count_line_categories_not_the_receipt_category() {
+    let db = seeded();
+    for a in db.alerts().await.expect("persisted alerts") {
+        act_on_alert(&db, &a.slug, "dismiss", today())
+            .await
+            .expect("dismiss");
+    }
+    let r = receipt("Groceries", naive(2026, 6, 17), 70_500, false);
+    let line = |name: &str, category: &str, centimes: i64| phosk_model::LineItem {
+        id: phosk_id::LineItemId::new(),
+        receipt_id: r.id,
+        name: name.to_owned(),
+        qty: 1.0,
+        unit_price: Money::from_centimes(centimes),
+        line_total: Money::from_centimes(centimes),
+        category: category.to_owned(),
+        signal_id: None,
+        provenance: Provenance::user_entered(),
+    };
+    let lines = vec![
+        line("Espresso machine", "Shopping", 70_000),
+        line("Milk", "Groceries", 500),
+    ];
+    db.insert_receipt(r, lines).await.expect("receipt booked");
+    let list = alerts(&db, today()).await.expect("alerts ok");
+    let ids: Vec<&str> = list.iter().map(|a| a.id.as_str()).collect();
+    assert!(ids.contains(&"gen-over-Shopping"), "{ids:?}");
+    assert!(
+        !ids.iter().any(|id| id.ends_with("-Groceries")),
+        "Groceries only gained CHF 5: {ids:?}"
+    );
 }
 
 /// Every non-navigate button the list offers — persisted or rule-generated —

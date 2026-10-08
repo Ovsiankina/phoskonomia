@@ -13,7 +13,13 @@
 //!
 //! Generated from the cap/spend data at `as_of`:
 //! - `over_budget`: category `spent > cap` ⇒ tone `"alert"`.
-//! - `at_risk`: `usedPct > 80` OR `proj > cap` ⇒ tone `"warn"`.
+//! - `at_risk`: `usedPct > 80` OR `proj > cap` ⇒ tone `"warn"`. Never for a
+//!   fixed channel: rent paid in full on day 1 is 100 % "used" by design, and
+//!   a fixed charge is not run-rated (`proj` = fixed spend as is + variable
+//!   spend `· N / d`, [`CycleWindow::project_spend`]).
+//!
+//! `spent` is item-level: a receipt's lines count under their own category, a
+//! total-only receipt under its own (`phosk_adapter_db::spend`).
 //! - `savings`: savings on track vs target ⇒ tone `"info"`.
 //! - `recurring_missing`: an expected charge not seen this cycle.
 //!
@@ -51,10 +57,11 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_db::spend;
 use phosk_core::cycle::{CycleWindow, Period};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
-use phosk_model::{Alert, AlertSnooze};
+use phosk_model::{Alert, AlertSnooze, CategoryCap};
 
 /// One action button on an [`AlertDto`] (`GET /alerts` element).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,20 +148,55 @@ pub async fn alerts(
         for cat in categories {
             let Some(cap) = cat.cap else { continue };
             let spent = category_spend(db, &cat.name, window).await?;
-            eval_category_rules(&mut out, &cat.name, spent, cap, window);
+            let figures = CapFigures {
+                spent,
+                projected: window.project_linear(spent)?,
+                fixed: false,
+            };
+            eval_category_rules(&mut out, &cat.name, figures, cap);
         }
     } else {
-        for cap in caps {
+        let receipts = db.receipts_between(window.start, window.as_of).await?;
+        let parts = spend::receipt_parts(db, &receipts).await?;
+        for cap in &caps {
             let Some(cap_money) = cap.cap else { continue };
-            let spent = category_spend_receipts(db, &cap.name, window).await?;
-            eval_category_rules(&mut out, &cap.name, spent, cap_money, window);
+            let figures = cap_figures(&parts, cap, &caps, window)?;
+            eval_category_rules(&mut out, &cap.name, figures, cap_money);
         }
     }
     Ok(out)
 }
 
+/// One capped channel's spend-to-date and its end-of-cycle projection.
+#[derive(Debug, Clone, Copy)]
+struct CapFigures {
+    /// Spend to date, item-level.
+    spent: Money,
+    /// Projected end-of-cycle spend (fixed shares as they are).
+    projected: Money,
+    /// `true` for a fixed channel (never "at risk", see the module docs).
+    fixed: bool,
+}
+
+/// The [`CapFigures`] of `cap` from the cycle's spend shares.
+fn cap_figures(
+    parts: &[spend::CategoryPart<'_>],
+    cap: &CategoryCap,
+    caps: &[CategoryCap],
+    window: CycleWindow,
+) -> Result<CapFigures, PhoskError> {
+    let in_cat = parts.iter().filter(|p| p.category == cap.name);
+    let (fixed, variable) = spend::fixed_and_variable(in_cat, caps)?;
+    Ok(CapFigures {
+        spent: fixed.checked_add(variable)?,
+        projected: window.project_spend(fixed, variable)?,
+        fixed: cap.fixed,
+    })
+}
+
 /// Sum of dashboard `Transaction` rows for one category in the spend-to-date
-/// window `[start, as_of]`.
+/// window `[start, as_of]`. Only for the fallback when no category caps are
+/// configured: those rows are one per receipt, so this is not item-level.
 async fn category_spend(
     db: &dyn DatabaseAdapter,
     name: &str,
@@ -168,20 +210,6 @@ async fn category_spend(
     )
 }
 
-/// Sum of `Receipt` rows for one category in the spend-to-date window.
-async fn category_spend_receipts(
-    db: &dyn DatabaseAdapter,
-    name: &str,
-    window: CycleWindow,
-) -> Result<Money, PhoskError> {
-    let receipts = db.receipts_between(window.start, window.as_of).await?;
-    Money::sum(
-        receipts
-            .into_iter()
-            .filter(|r| r.category == name)
-            .map(|r| r.amount),
-    )
-}
 
 /// Act on a dashboard alert (`POST /alerts/{id}/{dismiss|snooze|apply}`).
 ///
@@ -322,8 +350,10 @@ async fn target_level(
         return Ok(0);
     };
     let window = Period::Month.resolve(as_of)?;
-    let spent = category_spend_receipts(db, &cap.name, window).await?;
-    Ok(rule_level(spent, cap_money, window))
+    let receipts = db.receipts_between(window.start, window.as_of).await?;
+    let parts = spend::receipt_parts(db, &receipts).await?;
+    let figures = cap_figures(&parts, cap, &caps, window)?;
+    Ok(rule_level(figures, cap_money))
 }
 
 /// Raise the cap of the alert's targeted envelope by 10% (the RAISE CAP action).
@@ -357,20 +387,15 @@ async fn raise_targeted_cap(
 // ── rules-engine helper ─────────────────────────────────────────────────────────
 
 /// Evaluate the alert rules for one category's cycle figures, pushing any
-/// triggered [`AlertDto`]. `spent`/`cap` are exact [`Money`]; `proj` and
-/// `usedPct` are derived here from the run-rate formula (`proj = spent·N/d`).
+/// triggered [`AlertDto`]. `figures`/`cap` are exact [`Money`]; `usedPct` is
+/// derived here.
 ///
 /// - `over_budget`: `spent > cap` ⇒ tone `"alert"` (coral).
-/// - `at_risk`: `usedPct > 80` OR `proj > cap` (and not already over) ⇒ tone `"warn"`.
-fn eval_category_rules(
-    out: &mut Vec<AlertDto>,
-    name: &str,
-    spent: Money,
-    cap: Money,
-    window: CycleWindow,
-) {
+/// - `at_risk`: `usedPct > 80` OR `proj > cap` (and not already over, and not
+///   a fixed channel) ⇒ tone `"warn"`.
+fn eval_category_rules(out: &mut Vec<AlertDto>, name: &str, figures: CapFigures, cap: Money) {
     let tag = name.to_uppercase();
-    let level = rule_level(spent, cap, window);
+    let level = rule_level(figures, cap);
 
     if level == LEVEL_OVER_BUDGET {
         out.push(AlertDto {
@@ -409,34 +434,24 @@ const LEVEL_AT_RISK: u8 = 1;
 const LEVEL_OVER_BUDGET: u8 = 2;
 
 /// Which category rule fires for these figures: [`LEVEL_OVER_BUDGET`] when
-/// `spent > cap`, else [`LEVEL_AT_RISK`] when `usedPct > 80` or `proj > cap`,
-/// else `0`. An unlimited / zero cap fires nothing (and never divides by zero).
-fn rule_level(spent: Money, cap: Money, window: CycleWindow) -> u8 {
+/// `spent > cap`, else [`LEVEL_AT_RISK`] when `usedPct > 80` or `proj > cap`
+/// on a channel that is not fixed, else `0`. An unlimited / zero cap fires
+/// nothing (and never divides by zero).
+fn rule_level(figures: CapFigures, cap: Money) -> u8 {
     let cap_c = cap.centimes();
     if cap_c <= 0 {
         return 0;
     }
-    let spent_c = spent.centimes();
+    let spent_c = figures.spent.centimes();
     if spent_c > cap_c {
         LEVEL_OVER_BUDGET
-    } else if used_pct(spent_c, cap_c) > 80 || project_centimes(spent_c, window) > cap_c {
+    } else if !figures.fixed
+        && (used_pct(spent_c, cap_c) > 80 || figures.projected.centimes() > cap_c)
+    {
         LEVEL_AT_RISK
     } else {
         0
     }
-}
-
-/// `spent · N / d` run-rate in centimes; returns `spent` when day index is `0`.
-fn project_centimes(spent_c: i64, window: CycleWindow) -> i64 {
-    let day_index = i64::from(window.day_index());
-    if day_index == 0 {
-        return spent_c;
-    }
-    let len_days = i64::from(window.len_days());
-    // An overflowing projection is unambiguously "over cap".
-    spent_c
-        .checked_mul(len_days)
-        .map_or(i64::MAX, |scaled| scaled / day_index)
 }
 
 /// `round(100 · spent / cap)` integer percent; `0` when `cap <= 0`.
