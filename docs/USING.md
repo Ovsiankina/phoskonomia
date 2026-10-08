@@ -71,8 +71,8 @@ in-memory store). Nothing you enter in the demo is kept.
    future, at most a year old); otherwise today's date.
 2. The model can only pick from your categories. If it answers with a name
    that is not one of yours anyway, the receipt gets the category most of its
-   lines carry (else `Other`), and a line whose category had to be guessed is
-   flagged *LOW CONF · REVIEW*.
+   lines carry (else `Other`) and is flagged *LOW CONF* next to its category;
+   a line whose category had to be guessed is flagged *LOW CONF · REVIEW*.
 3. **APPROVE** (on /receipt or **/approvals**) books it. Then it shows in
    Transactions with its lines, counts against its envelope on Budgets, and in
    the dashboard totals.

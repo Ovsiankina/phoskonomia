@@ -389,10 +389,13 @@ fn ProposalRow(
 }
 
 /// Shop, date, total, then one line per proposed item with the amount it
-/// books (`line_total`), flagged when that is not `qty × unit`.
+/// books (`line_total`), flagged when that is not `qty × unit`. A receipt
+/// below the review threshold (an illegible slip, or a category intake had
+/// to guess) is flagged next to its category.
 #[component]
 pub(crate) fn ReceiptHead(receipt: ProposedReceiptDto) -> Element {
     let total = chf2(receipt.total);
+    let receipt_conf = format!("{:.0}", receipt.confidence * 100.0);
     rsx! {
         div { class: "cand-id", style: "cursor:default",
             span { class: "cand-nm", "{receipt.shop}" }
@@ -400,6 +403,12 @@ pub(crate) fn ReceiptHead(receipt: ProposedReceiptDto) -> Element {
                 b { "{receipt.date}" }
                 " · {receipt.category} · CHF "
                 b { "{total}" }
+            }
+            if receipt.low_confidence {
+                span { class: "cand-conf low",
+                    "LOW CONF · CHECK SHOP, DATE AND CATEGORY "
+                    b { "{receipt_conf}%" }
+                }
             }
             for (i, l) in receipt.lines.into_iter().enumerate() {
                 {

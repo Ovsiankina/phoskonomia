@@ -53,6 +53,11 @@ pub struct ProposedReceiptDto {
     pub date: String,
     /// Receipt category (clipped).
     pub category: String,
+    /// Receipt-level confidence in `0.0..=1.0` (not money): the slip's OCR
+    /// legibility, capped when intake had to guess the category.
+    pub confidence: f64,
+    /// Below the shared `0.7` review threshold (`Provenance::is_low_confidence`).
+    pub low_confidence: bool,
     /// Receipt total.
     #[serde(with = "phosk_model::money_centimes")]
     pub total: Money,
@@ -357,6 +362,8 @@ fn map_proposal(s: phosk_ai::PendingSuggestion, slug: &str, known: &[String]) ->
         shop: clip(&p.receipt.shop),
         date: p.receipt.date.format("%Y-%m-%d").to_string(),
         category: clip(&p.receipt.category),
+        confidence: p.receipt.provenance.confidence,
+        low_confidence: p.receipt.provenance.is_low_confidence(),
         total: p.receipt.amount,
         lines: p
             .line_items

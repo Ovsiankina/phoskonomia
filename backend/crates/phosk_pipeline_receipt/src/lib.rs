@@ -184,7 +184,12 @@ pub async fn intake_receipt(
     // only `phosk_ai::approve_*` ever applies it to the ledger. ──
     // Schema-validated BEFORE anything is persisted (§1.5), with the approval
     // service's own rules: what cannot be approved is never staged.
-    let suggestion = build_suggestion(&receipt, &line_items, low_confidence_lines);
+    let suggestion = build_suggestion(
+        &receipt,
+        &line_items,
+        low_confidence_lines,
+        extracted.category_guessed,
+    );
     let proposal = ReceiptProposal {
         suggestion_id: suggestion.id,
         receipt: receipt.clone(),
@@ -376,6 +381,9 @@ struct Extracted {
     date: Option<chrono::NaiveDate>,
     shop: String,
     category: String,
+    /// The receipt category was not one the model chose: it named none of
+    /// the user's categories, so [`fit_categories`] picked one for it.
+    category_guessed: bool,
     lines: Vec<ParsedLine>,
 }
 
@@ -545,6 +553,7 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
         date,
         shop,
         category,
+        category_guessed: false,
         lines,
     })
 }
@@ -552,8 +561,9 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
 /// Placeholder name of a line the model could not read.
 const ILLEGIBLE: &str = "?";
 
-/// Confidence a line is capped at when its category had to be guessed —
-/// below [`phosk_ai::CONFIDENCE_THRESHOLD`], so the review flags it.
+/// Confidence a line — or the receipt — is capped at when its category had
+/// to be guessed: below [`phosk_ai::CONFIDENCE_THRESHOLD`], so the review
+/// flags it.
 const GUESSED_CATEGORY_CONFIDENCE: f64 = 0.5;
 
 /// Map every category in the model's answer onto one of the user's `known`
@@ -563,7 +573,8 @@ const GUESSED_CATEGORY_CONFIDENCE: f64 = 0.5;
 ///   `"Groceries"`).
 /// - An unknown receipt category becomes the category most of its resolved
 ///   lines carry, else `"Other"` (when the user has it), else their first
-///   category.
+///   category, and is marked [`Extracted::category_guessed`] — [`assemble`]
+///   caps the receipt's confidence at [`GUESSED_CATEGORY_CONFIDENCE`] for it.
 /// - An unknown line category becomes the receipt's, and the line's
 ///   confidence drops to [`GUESSED_CATEGORY_CONFIDENCE`] — flagged for the
 ///   human, never silently booked.
@@ -586,7 +597,9 @@ fn fit_categories(mut ex: Extracted, known: &[String]) -> Extracted {
         return ex;
     };
 
-    let receipt_category = resolve(&ex.category).unwrap_or_else(|| {
+    let chosen = resolve(&ex.category);
+    ex.category_guessed = chosen.is_none();
+    let receipt_category = chosen.unwrap_or_else(|| {
         // The resolved line category with the most lines (first seen on a tie).
         let mut counts: Vec<(String, usize)> = Vec::new();
         for c in ex.lines.iter().filter_map(|l| resolve(&l.category)) {
@@ -679,8 +692,13 @@ fn assemble(
     }
 
     // The receipt total is read off the slip via OCR (Source::Ocr). Anchor its
-    // confidence to the mean OCR-region confidence (the legibility of the slip).
-    let ocr_conf = mean_region_confidence(&ex.ocr);
+    // confidence to the mean OCR-region confidence (the legibility of the slip),
+    // capped below the review threshold when the model never chose the
+    // category the receipt books into.
+    let mut ocr_conf = mean_region_confidence(&ex.ocr);
+    if ex.category_guessed {
+        ocr_conf = ocr_conf.min(GUESSED_CATEGORY_CONFIDENCE);
+    }
     let receipt = Receipt {
         id: receipt_id,
         slug: slug.to_owned(),
@@ -750,13 +768,21 @@ fn ocr_engine_label(_kind: ImageKind) -> String {
 
 /// Build the single per-receipt approval-queue [`AiSuggestion`] (`kind ==
 /// "receipt"`, `status == "open"`). Its confidence is the receipt's OCR
-/// confidence; `target` is the receipt slug so the approval UI can resolve it.
-fn build_suggestion(receipt: &Receipt, lines: &[LineItem], low_conf: usize) -> AiSuggestion {
-    let flag = if low_conf > 0 {
-        format!(" ({low_conf} low-confidence line(s) to review)")
-    } else {
-        String::new()
-    };
+/// confidence (capped when the category was guessed); `target` is the receipt
+/// slug so the approval UI can resolve it.
+fn build_suggestion(
+    receipt: &Receipt,
+    lines: &[LineItem],
+    low_conf: usize,
+    category_guessed: bool,
+) -> AiSuggestion {
+    let mut flag = String::new();
+    if category_guessed {
+        flag.push_str(" (category guessed — check it)");
+    }
+    if low_conf > 0 {
+        flag.push_str(&format!(" ({low_conf} low-confidence line(s) to review)"));
+    }
     AiSuggestion {
         id: SuggestionId::new(),
         kind: "receipt".to_owned(),
