@@ -215,3 +215,23 @@ body.hl-auto-debt [data-src="llm"] .debt:hover { box-shadow: inset 2.5px 0 0 var
 .person-foot .since { font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); }
 .person-acts { display: flex; gap: 6px; }
 .person-acts .gbtn { font-size: 8.5px; padding: 5px 9px; }
+
+/* ---- write path (T39): create/edit forms, inline payment fields, confirms ---- */
+.dx-add { margin-left: var(--s-2); }
+.dx-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(var(--s-8) * 2), 1fr)); gap: var(--s-2) var(--s-3);
+  padding: var(--s-3); margin: 0 0 var(--s-4); background: var(--bg-raise); border: var(--bw-hair) solid var(--hairline); border-radius: var(--r-1); }
+.dx-form .dx-h { grid-column: 1 / -1; font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-hud);
+  text-transform: uppercase; color: var(--indigo-2); }
+.dx-fld { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+.dx-fld.wide { grid-column: 1 / -1; }
+.dx-fld > span { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag); text-transform: uppercase; color: var(--ink-3); }
+.dx-fld input, .dx-fld select { min-width: 0; padding: var(--s-1) var(--s-2); background: var(--bg-inset); color: var(--ink);
+  border: var(--bw-hair) solid var(--hairline); border-radius: var(--r-1); font-family: var(--font-body); font-size: var(--t-sm); }
+.dx-fld input.num { font-family: var(--font-display); }
+.dx-fld input:focus, .dx-fld select:focus { outline: none; border-color: var(--indigo-neon); }
+.dx-fld input[readonly] { cursor: progress; color: var(--ink-2); }
+.dx-row { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.dx-pay { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s-2); margin-top: var(--s-2); }
+.dx-pay .dx-fld { flex: 1 1 calc(var(--s-8) + var(--s-5)); }
+.dx-note { font-family: var(--font-body); font-size: var(--t-xs); letter-spacing: var(--tracking-tag); text-transform: uppercase; color: var(--ink-3); }
+.debt-insp .gbtn:disabled, .person .gbtn:disabled, .dx-form .gbtn:disabled { cursor: progress; opacity: .5; }

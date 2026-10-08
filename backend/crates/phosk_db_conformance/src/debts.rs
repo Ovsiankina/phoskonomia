@@ -160,3 +160,42 @@ pub async fn upsert_personal_iou_inserts_then_replaces(db: &dyn DatabaseAdapter)
     let kept = before.iter().all(|i| after.contains(i));
     ensure(kept, "other IOUs untouched")
 }
+
+/// The list and the slug lookup return the same records; an unknown slug is
+/// `NotFound`.
+pub async fn personal_iou_lookup_by_slug_agrees(db: &dyn DatabaseAdapter) -> Outcome {
+    let ious = db.personal_ious().await?;
+    for i in &ious {
+        ensure_eq(&db.personal_iou_by_slug(&i.slug).await?, i, "by slug")?;
+    }
+    ensure_not_found(
+        db.personal_iou_by_slug("conf-none").await,
+        "personal_iou_by_slug(unknown)",
+    )
+}
+
+/// A deleted IOU is gone from every read path, leaves its neighbours alone, and
+/// cannot be deleted twice.
+pub async fn delete_personal_iou_removes_it(db: &dyn DatabaseAdapter) -> Outcome {
+    let before = db.personal_ious().await?;
+    let victim = first(before.clone())?;
+
+    db.delete_personal_iou(victim.id).await?;
+
+    let after = db.personal_ious().await?;
+    ensure_eq(&after.len(), &(before.len() - 1), "count after delete")?;
+    ensure(
+        after.iter().all(|i| i.id != victim.id),
+        "personal_ious() no longer lists it",
+    )?;
+    ensure_not_found(
+        db.personal_iou_by_slug(&victim.slug).await,
+        "by slug after delete",
+    )?;
+    let kept = before
+        .iter()
+        .filter(|i| i.id != victim.id)
+        .all(|i| after.contains(i));
+    ensure(kept, "other IOUs untouched")?;
+    ensure_not_found(db.delete_personal_iou(victim.id).await, "delete again")
+}

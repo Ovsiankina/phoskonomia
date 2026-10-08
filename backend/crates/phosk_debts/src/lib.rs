@@ -15,6 +15,8 @@
 //! - [`debt_plan`] — plan changes: adjust the instalment / day / term,
 //!   refinance the outstanding balance.
 //! - [`personal_ious`] — personal IOUs: list + net-position stats.
+//! - [`iou_write`] — the personal-IOU write path: create · edit · delete ·
+//!   record payment · settle.
 //!
 //! **Layering (ADR-010).** Every service fn takes `&dyn DatabaseAdapter` (the
 //! PORT) plus the read context (`as_of: NaiveDate` for label/trajectory math, or
@@ -37,6 +39,7 @@
 pub mod debt_plan;
 pub mod debt_write;
 pub mod debts;
+pub mod iou_write;
 pub mod personal_ious;
 
 pub use debt_plan::{PlanAdjust, Refinance, adjust_plan, refinance};
@@ -48,5 +51,10 @@ pub use debts::{
     TrajectoryDto,
 };
 pub use debts::{debt_detail, debt_payments, debt_stats, list_debts, trajectory};
+pub use iou_write::{NewPersonalIou, PersonalIouEdit};
+pub use iou_write::{
+    create_personal_iou, delete_personal_iou, edit_personal_iou, record_iou_payment,
+    settle_personal_iou,
+};
 pub use personal_ious::{IouStatsDto, PersonalIouDto};
 pub use personal_ious::{iou_stats, list_personal_ious};

@@ -18,10 +18,16 @@ async fn list_debts_serves_the_four_balances() {
     assert_eq!(card.balance, money(340_000));
     assert!((card.apr - 0.129).abs() < f64::EPSILON);
 
+    assert!(
+        debts.iter().all(|d| d.actions.pay),
+        "every seeded debt is owed"
+    );
+
     let backend = svc::list_debts(&fresh_db(), today())
         .await
         .expect("backend");
-    assert_maps(&debts, &backend);
+    // `actions` is wire-only: the server's verdict on what the page may offer.
+    assert_maps_except(&debts, &backend, "actions");
 }
 
 #[tokio::test]
@@ -96,10 +102,12 @@ async fn list_personal_ious_serves_both_directions() {
     assert_eq!((marco.dir.as_str(), marco.person.as_str()), ("in", "Marco"));
     assert_eq!((marco.amount, marco.of), (money(4_500), money(9_000)));
 
+    assert!(ious.iter().all(|i| i.actions.pay && i.actions.settle));
+
     let backend = personal_ious::list_personal_ious(&fresh_db())
         .await
         .expect("backend");
-    assert_maps(&ious, &backend);
+    assert_maps_except(&ious, &backend, "actions");
 }
 
 #[tokio::test]
