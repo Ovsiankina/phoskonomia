@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_db::spend;
 use phosk_core::cycle::Period;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
@@ -116,17 +117,14 @@ pub async fn export_budget_csv(
     let window = Period::Month.resolve(as_of)?;
     let receipts = db.receipts_between(window.start, window.end).await?;
     let caps = db.category_caps().await?;
+    // Item-level: a receipt's lines count under their own category.
+    let parts = spend::receipt_parts(db, &receipts).await?;
 
     let header = "category,cap,spent,remaining,fixed";
     let mut rows = Vec::with_capacity(caps.len());
     for cap in &caps {
         // Spend-to-date this cycle for the category.
-        let spent = Money::sum(
-            receipts
-                .iter()
-                .filter(|r| r.category == cap.name)
-                .map(|r| r.amount),
-        )?;
+        let spent = spend::spent_in(&parts, &cap.name)?;
         // remaining = cap − spent (signed); blank when the channel is unlimited.
         let (cap_cell, remaining_cell) = match cap.cap {
             Some(c) => (chf_plain(c), chf_plain(c.checked_sub(spent)?)),

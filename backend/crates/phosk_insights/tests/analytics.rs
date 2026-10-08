@@ -949,3 +949,127 @@ async fn category_momentum_on_a_new_store_has_no_baseline() {
 fn export_schema_version_is_one() {
     assert_eq!(EXPORT_SCHEMA_VERSION, "1");
 }
+
+// ── item-level spend + fixed charges (real-use mode) ─────────────────────────
+
+/// Add a category to a store.
+async fn add_category(db: &MemoryDb, name: &str, cap: Option<i64>, fixed: bool) {
+    db.insert_category(phosk_model::CategoryCap {
+        id: phosk_id::CategoryId::new(),
+        slug: name.to_lowercase(),
+        name: name.to_owned(),
+        cap: cap.map(cents),
+        fixed,
+        glyph: String::new(),
+        note: String::new(),
+        provenance: phosk_model::Provenance::user_entered(),
+    })
+    .await
+    .expect("category inserted");
+}
+
+/// A Migros receipt filed under Groceries: CHF 22.95 of groceries and a
+/// CHF 4.95 toothpaste line categorised Health.
+async fn migros_with_toothpaste(db: &MemoryDb, date: NaiveDate) {
+    let id = phosk_id::ReceiptId::new();
+    let line = |name: &str, category: &str, c: i64| phosk_model::LineItem {
+        id: phosk_id::LineItemId::new(),
+        receipt_id: id,
+        name: name.to_owned(),
+        qty: 1.0,
+        unit_price: cents(c),
+        line_total: cents(c),
+        category: category.to_owned(),
+        signal_id: None,
+        provenance: phosk_model::Provenance::user_entered(),
+    };
+    db.insert_receipt(
+        phosk_model::Receipt {
+            id,
+            slug: format!("migros-{date}"),
+            shop: "Migros".to_owned(),
+            date,
+            category: "Groceries".to_owned(),
+            amount: cents(2_295 + 495),
+            fixed: false,
+            provenance: phosk_model::Provenance::user_entered(),
+            source_kind: "PHOTO".to_owned(),
+            ocr_engine: String::new(),
+            ocr_regions: 0,
+        },
+        vec![
+            line("Milk", "Groceries", 795),
+            line("Toothpaste", "Health", 495),
+            line("Cheese", "Groceries", 1_500),
+        ],
+    )
+    .await
+    .expect("receipt inserted");
+}
+
+/// Momentum and the budget export count each line under its own category;
+/// a total-only entry still counts under its receipt category.
+#[tokio::test]
+async fn momentum_and_budget_export_split_a_receipt_by_line_category() {
+    let db = new_user_store().await;
+    add_category(&db, "Health", Some(5_000), false).await;
+    migros_with_toothpaste(&db, naive(2026, 6, 12)).await;
+    groceries(&db, naive(2026, 6, 14), 1_000).await;
+
+    let cards = category_momentum(&db, today()).await.expect("momentum ok");
+    let now = |name: &str| {
+        cards
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.now.centimes())
+            .unwrap_or_else(|| panic!("{name} card"))
+    };
+    assert_eq!(now("Groceries"), 2_295 + 1_000);
+    assert_eq!(now("Health"), 495);
+
+    let csv = export_budget_csv(&db, today()).await.expect("export ok").csv;
+    let row = |name: &str| {
+        csv.lines()
+            .find(|l| l.starts_with(name))
+            .unwrap_or_else(|| panic!("{name} row in {csv}"))
+            .to_owned()
+    };
+    assert!(row("Health").contains(",4.95,"), "{csv}");
+    assert!(row("Groceries").contains(",32.95,"), "{csv}");
+}
+
+/// Rent paid on day 1 is not run-rated: "on pace for" carries it once, as
+/// paid, and projects only the variable spend.
+#[tokio::test]
+async fn run_rate_carries_a_day_one_fixed_charge_as_paid() {
+    let db = new_user_store().await;
+    add_category(&db, "Rent", Some(168_000), true).await;
+    let day1 = naive(2026, 6, 1);
+    db.insert_receipt(
+        phosk_model::Receipt {
+            id: phosk_id::ReceiptId::new(),
+            slug: "rent-june".to_owned(),
+            shop: "Landlord".to_owned(),
+            date: day1,
+            category: "Rent".to_owned(),
+            amount: cents(168_000),
+            fixed: true,
+            provenance: phosk_model::Provenance::user_entered(),
+            source_kind: "MANUAL".to_owned(),
+            ocr_engine: String::new(),
+            ocr_regions: 0,
+        },
+        Vec::new(),
+    )
+    .await
+    .expect("rent booked");
+    groceries(&db, naive(2026, 6, 3), 9_000).await;
+
+    let s = spend_stats(&db, today(), 12).await.expect("stats ok");
+    // 1_680 rent as paid + 90 of groceries by day 18 of 30 → 150.
+    assert_eq!(s.run_rate.centimes(), 168_000 + 9_000 * 30 / 18);
+
+    // On day 1, rent alone: the projection is the rent, not 30× it.
+    let s = spend_stats(&db, day1, 12).await.expect("stats ok");
+    assert_eq!(s.run_rate.centimes(), 168_000);
+}
