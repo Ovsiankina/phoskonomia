@@ -8,11 +8,12 @@
 //!
 //! The React originals were wired to the dead REST layer (`api`/`useGet`): the
 //! feed, chat history and AI status loaded over HTTP and every action POSTed.
-//! Here that data arrives as **props** (the `#[server]` data layer F3 owns) and
+//! Here most data arrives as **props** (the `#[server]` data layer F3 owns) and
 //! mutations are surfaced as callbacks (`on_feed_action`, `on_track`, …) the
-//! page wires to its server fns. The one exception is the assistant **chat**:
-//! [`AiPanel`] loads the persisted transcript, sends messages and runs `/clear`
-//! itself through `crate::data::ai`, so every page gets the same live chat.
+//! page wires to its server fns. The exception is the assistant: [`AiPanel`]
+//! loads its own activity feed and model status (`get_ai_panel`) and its
+//! persisted chat (send, `/clear`) through `crate::data::ai`, so every page
+//! shows the same real model id, online state and transcript.
 //!
 //! Note: the mandatory chrome — [`TopBar`] and the page table ([`phosk_pages`])
 //! — lives in [`crate::components::comps`] (faithful to the React source, where
@@ -25,7 +26,8 @@ use phosk_core::money::Money;
 use crate::components::prims::Dot;
 use crate::components::states::Awaiting;
 use crate::data::ai::{
-    bound_chat_text, chat_error_message, get_chat_history, send_chat_message, CHAT_INPUT_MAX_CHARS,
+    bound_chat_text, chat_error_message, get_ai_panel, get_chat_history, send_chat_message,
+    CHAT_INPUT_MAX_CHARS,
 };
 use crate::data::chf2;
 
@@ -129,29 +131,6 @@ pub fn SigSpark(
 
 // ===================== LEFT — AI PANEL =====================
 
-/// One AI-feed activity item.
-///
-/// Faithful port of the `f` object the AI feed yields in `shell.jsx`.
-#[derive(Clone, PartialEq)]
-pub struct FeedItem {
-    /// Stable id (key + the target for track/dismiss).
-    pub id: String,
-    /// `categorize` | `reprocess` | `suggest` | other — picks the icon.
-    pub kind: String,
-    /// Activity text.
-    pub text: String,
-    /// Optional confidence 0..1 (shown as `CONF NN%`).
-    pub conf: Option<f64>,
-    /// Optional state (`running` shows the RUNNING… chip).
-    pub state: Option<String>,
-    /// Relative time label.
-    pub time: String,
-    /// Action button labels (first is primary; coral unless `cand`).
-    pub actions: Vec<String>,
-    /// Candidate flag — first action is the primary "track" affordance.
-    pub cand: bool,
-}
-
 /// One chat transcript line.
 ///
 /// Faithful port of the transcript entries in `shell.jsx` `AiPanel`.
@@ -165,38 +144,34 @@ pub struct ChatMsg {
 
 /// Left AI assistant panel — rail, feed, chat, input.
 ///
-/// Faithful port of `shell.jsx` `AiPanel`. `collapsed` shows the vertical rail;
-/// `feed` is the (F3-provided) activity feed; `online`/`model`/`engine`/
-/// `location` are the AI status. `on_toggle` flips the collapse,
-/// `on_feed_action` carries `(item id, action label, is_candidate_primary)` for
-/// the feed buttons, and `on_track` carries a candidate id when its primary
-/// "track" action fires.
+/// Faithful port of `shell.jsx` `AiPanel`. `collapsed` shows the vertical rail.
+/// `on_toggle` flips the collapse, `on_feed_action` carries `(item id, action
+/// label, is_candidate_primary)` for the feed buttons, and `on_track` carries a
+/// candidate id when its primary "track" action fires.
 ///
-/// The chat is live and owned here: the transcript is the persisted history
-/// ([`get_chat_history`]); Enter / → submits through [`send_chat_message`]
-/// (`/clear` wipes the history). While a message is in flight the input is
-/// read-only; on failure the error state shows and the text stays in the
-/// input. `msgs` is only a placeholder transcript shown until the persisted
-/// history has loaded; `on_send` is notified with each submitted line. Model
-/// text is rendered as plain text, bounded by [`bound_chat_text`]. The head's
-/// ⇔ toggle widens the panel, and the thread follows its newest line.
+/// The panel loads its own data, so a page only passes the wiring above:
+/// the activity feed and the model status come from [`get_ai_panel`] (the
+/// session's real model id, and `online` from a health probe), the chat
+/// transcript from [`get_chat_history`]. Enter / → submits through
+/// [`send_chat_message`] (`/clear` wipes the history); while a message is in
+/// flight the input is read-only, and on failure the error shows and the text
+/// stays in the input. Each finished send re-reads the status, so the pulse
+/// follows the model. `on_send` is notified with each submitted line. Model
+/// text is plain text, bounded by [`bound_chat_text`], its numerals set in the
+/// display face ([`NumText`]). The head's ⇔ toggle widens the panel, and the
+/// thread follows its newest line.
 #[component]
 pub fn AiPanel(
     #[props(default = false)] collapsed: bool,
-    #[props(default)] feed: Vec<FeedItem>,
-    #[props(default)] msgs: Vec<ChatMsg>,
-    #[props(default = false)] online: bool,
-    #[props(default = String::from("GEMMA4"))] model: String,
-    #[props(default = String::from("OLLAMA"))] engine: String,
-    #[props(default = String::from("LOCAL"))] location: String,
     #[props(default)] on_toggle: Option<EventHandler<()>>,
     #[props(default)] on_send: Option<EventHandler<String>>,
     #[props(default)] on_feed_action: Option<EventHandler<(String, String, bool)>>,
     #[props(default)] on_track: Option<EventHandler<String>>,
 ) -> Element {
     let mut draft = use_signal(String::new);
-    // Chat state: the persisted transcript, the in-flight flag, the last
-    // send failure, and the wide layout toggle.
+    // Feed + model status, and the chat state: the persisted transcript, the
+    // in-flight flag, the last send failure, and the wide layout toggle.
+    let mut panel = use_resource(get_ai_panel);
     let mut history = use_resource(get_chat_history);
     let mut sending = use_signal(|| false);
     let mut chat_error = use_signal(|| Option::<String>::None);
@@ -207,6 +182,43 @@ pub fn AiPanel(
         if collapsed { " collapsed" } else { "" },
         if wide() { " wide" } else { "" }
     );
+
+    // The status line, from the real adapter once loaded. Until then (or if
+    // the read fails) nothing names a model.
+    let (feed, status, feed_note) = match &*panel.read() {
+        Some(Ok(p)) => (
+            p.feed.clone(),
+            Some(p.status.clone()),
+            p.feed.is_empty().then_some("No assistant activity yet."),
+        ),
+        Some(Err(_)) => (
+            Vec::new(),
+            None,
+            Some("Assistant activity could not be loaded."),
+        ),
+        None => (Vec::new(), None, Some("Loading assistant activity…")),
+    };
+    let online = status.as_ref().is_some_and(|st| st.online);
+    let model = status
+        .as_ref()
+        .map_or_else(|| "ASSISTANT".to_string(), |st| st.model.clone());
+    let status_line = match (&*panel.read(), &status) {
+        // The pulse shows "online"; only the bad state is spelled out.
+        (_, Some(st)) => format!(
+            "{} · {} · {}{}",
+            st.engine,
+            st.model,
+            st.location,
+            if st.online { "" } else { " · OFFLINE" }
+        ),
+        (Some(Err(_)), None) => "STATUS UNAVAILABLE".to_string(),
+        _ => "CHECKING MODEL…".to_string(),
+    };
+    let rail_label = if status.is_some() {
+        format!("{model} · ASSISTANT")
+    } else {
+        "ASSISTANT".to_string()
+    };
     let pulse_style = if online {
         "width:6px;height:6px;border-radius:999px;background:var(--ok);box-shadow:0 0 8px var(--ok)"
     } else {
@@ -233,11 +245,12 @@ pub fn AiPanel(
             }
             sending.set(false);
             history.restart();
+            panel.restart();
         });
     });
 
-    // The transcript to render: the persisted history once loaded, the
-    // page-provided placeholder until then. Speakers collapse to usr/sys.
+    // The transcript to render: the persisted history once loaded. Speakers
+    // collapse to usr/sys.
     let (lines, history_err): (Vec<ChatMsg>, Option<String>) = match &*history.read() {
         Some(Ok(h)) => (
             h.iter()
@@ -252,9 +265,9 @@ pub fn AiPanel(
             Vec::new(),
             Some("The chat history could not be loaded.".to_string()),
         ),
-        None => (msgs.clone(), None),
+        None => (Vec::new(), None),
     };
-    let history_loading = history.read().is_none() && lines.is_empty();
+    let history_loading = history.read().is_none();
     // Re-keyed on every change so the end marker remounts and scrolls into view.
     let chat_end_key = format!("{}-{}-{}", lines.len(), sending(), chat_error().is_some());
 
@@ -274,7 +287,7 @@ pub fn AiPanel(
                     onclick: move |_| if let Some(h) = &on_toggle { h.call(()) },
                     "▸"
                 }
-                span { class: "vlabel", "{model} · ASSISTANT" }
+                span { class: "vlabel", "{rail_label}" }
                 span { class: "pulse", style: "{pulse_style}" }
             }
 
@@ -283,7 +296,7 @@ pub fn AiPanel(
                     Dot { tone: if online { "ok".to_string() } else { "blue".to_string() }, size: 7 }
                     div {
                         div { class: "who", "Assistant" }
-                        div { class: "mdl", "{engine} · {model} · {location}" }
+                        div { class: "mdl", "{status_line}" }
                     }
                     span {
                         class: if wide() { "wid on" } else { "wid" },
@@ -304,18 +317,18 @@ pub fn AiPanel(
                         span { class: "pulse" }
                         span { class: "lbl", "Live · auto-maintenance" }
                     }
-                    if feed.is_empty() {
+                    if let Some(note) = feed_note {
                         div {
                             class: "dim",
                             style: "font-size:11px;padding:10px 2px;letter-spacing:.04em",
-                            "No activity yet — awaiting backend (/ai/feed)."
+                            "{note}"
                         }
                     }
                     for f in feed.iter().cloned() {
                         div { key: "{f.id}", class: "fitem {f.kind}",
                             span { class: "ic", "{icon(&f.kind)}" }
                             div { class: "ftx",
-                                span { "{f.text}" }
+                                span { NumText { text: f.text.clone() } }
                                 div { class: "fmeta",
                                     if let Some(c) = f.conf {
                                         span { class: "conf", "CONF {(c * 100.0).round() as i64}%" }
@@ -374,8 +387,8 @@ pub fn AiPanel(
                         div {
                             key: "{i}",
                             class: if m.who == "usr" { "msg usr" } else { "msg sys" },
-                            span { class: "nm", if m.who == "usr" { "YOU" } else { "{model}" } }
-                            div { {bound_chat_text(&m.text)} }
+                            span { class: "nm", if m.who == "usr" { "YOU" } else { "ASSISTANT" } }
+                            div { NumText { text: bound_chat_text(&m.text) } }
                         }
                     }
                     if sending() {
@@ -420,6 +433,71 @@ pub fn AiPanel(
                         "→"
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Split `text` into runs, tagging each as numeric (`true`) or plain.
+///
+/// A numeric run starts at a digit (or at a `-`/`+`/`−` sign directly before
+/// one, when the sign does not follow a letter or digit) and continues through
+/// digits and the `.` `,` `'` separators that sit between two digits; a `%`
+/// right after the digits belongs to the run. So `CHF 1'234.50`, `-12%` and
+/// `3.6` are numerals; `qwen3.6` keeps its digits in the run too (they are
+/// numerals) while the letters stay plain.
+#[must_use]
+pub fn numeral_runs(text: &str) -> Vec<(bool, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    let mut push = |numeric: bool, c: char| match runs.last_mut() {
+        Some((n, run)) if *n == numeric => run.push(c),
+        _ => runs.push((numeric, c.to_string())),
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next_digit = chars.get(i + 1).is_some_and(char::is_ascii_digit);
+        let after_word = i > 0 && chars[i - 1].is_alphanumeric();
+        let starts_number = c.is_ascii_digit()
+            || (matches!(c, '-' | '+' | '\u{2212}') && next_digit && !after_word);
+        if !starts_number {
+            push(false, c);
+            i += 1;
+            continue;
+        }
+        push(true, c);
+        i += 1;
+        while i < chars.len() {
+            let c = chars[i];
+            let next_digit = chars.get(i + 1).is_some_and(char::is_ascii_digit);
+            if c.is_ascii_digit() || (matches!(c, '.' | ',' | '\'') && next_digit) {
+                push(true, c);
+                i += 1;
+            } else if c == '%' {
+                push(true, c);
+                i += 1;
+                break;
+            } else {
+                break;
+            }
+        }
+    }
+    runs
+}
+
+/// Plain text whose numerals render in the display face (Pilowlava) and the
+/// rest in the body face — the design rule that a number is never set in
+/// VG5000. Every run stays a text node (no markup is parsed).
+#[component]
+pub fn NumText(text: String) -> Element {
+    let runs = numeral_runs(&text);
+    rsx! {
+        for (numeric , run) in runs {
+            if numeric {
+                span { style: "font-family:var(--font-display)", "{run}" }
+            } else {
+                "{run}"
             }
         }
     }
@@ -747,5 +825,50 @@ pub fn SignalStrip(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod numeral_runs_tests {
+    use super::numeral_runs;
+
+    fn numerals(text: &str) -> Vec<String> {
+        numeral_runs(text)
+            .into_iter()
+            .filter(|(n, _)| *n)
+            .map(|(_, r)| r)
+            .collect()
+    }
+
+    #[test]
+    fn money_percent_and_signs_are_single_runs() {
+        assert_eq!(
+            numerals("CHF 1'234.50 spent, -12% vs last, up 50%."),
+            ["1'234.50", "-12%", "50%"]
+        );
+    }
+
+    #[test]
+    fn trailing_punctuation_is_not_part_of_the_number() {
+        assert_eq!(numerals("about 20. Then 3,"), ["20", "3"]);
+    }
+
+    #[test]
+    fn hyphens_inside_words_stay_text() {
+        assert_eq!(numerals("a 3-cycle average"), ["3"]);
+        assert_eq!(numerals("x-5"), ["5"]);
+    }
+
+    #[test]
+    fn runs_round_trip_the_text() {
+        let text = "Coffee is up 50% on its 3-cycle average: CHF 60.00.";
+        let joined: String = numeral_runs(text).into_iter().map(|(_, r)| r).collect();
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn text_without_numbers_is_one_plain_run() {
+        assert_eq!(numeral_runs("no digits"), [(false, "no digits".to_owned())]);
+        assert!(numeral_runs("").is_empty());
     }
 }
