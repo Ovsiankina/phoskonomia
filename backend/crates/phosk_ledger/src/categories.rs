@@ -47,12 +47,16 @@ pub struct CategorySpendDto {
     /// Total spent in this category in the window (exact centimes).
     #[serde(with = "phosk_model::money_centimes")]
     pub total: Money,
-    /// Number of receipts in this category in the window.
+    /// Number of receipts with spend in this category in the window.
     pub txns: u32,
 }
 
 /// The observed per-category spend distribution for the current cycle, ranked
 /// by total spend descending (ties broken on name ascending).
+///
+/// Item-level: a receipt's lines count under their own category, a total-only
+/// receipt under its own (`phosk_adapter_db::spend`), so one receipt can add
+/// to several categories.
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn category_spend(
     db: &dyn DatabaseAdapter,
@@ -60,11 +64,12 @@ pub async fn category_spend(
 ) -> Result<Vec<CategorySpendDto>, PhoskError> {
     let window = Period::Month.resolve(as_of)?;
     let receipts = db.receipts_between(window.start, window.end).await?;
+    let parts = phosk_adapter_db::spend::receipt_parts(db, &receipts).await?;
 
     let mut totals: HashMap<String, (Money, u32)> = HashMap::new();
-    for r in receipts {
-        let entry = totals.entry(r.category).or_insert((Money::ZERO, 0));
-        entry.0 = entry.0.checked_add(r.amount)?;
+    for p in parts {
+        let entry = totals.entry(p.category).or_insert((Money::ZERO, 0));
+        entry.0 = entry.0.checked_add(p.amount)?;
         entry.1 = entry.1.saturating_add(1);
     }
 

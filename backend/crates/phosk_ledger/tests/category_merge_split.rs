@@ -127,8 +127,9 @@ async fn merge_moves_all_spend_and_removes_the_source() {
     let source_before = spend(&db, "Coffee & snacks").await;
     let target_before = spend(&db, "Going out").await;
     assert_eq!(
-        source_before, 1_280,
-        "t5 is the lone Coffee & snacks receipt"
+        source_before,
+        1_280 + 560,
+        "t5 plus t1's flat-white line (item-level spend)"
     );
     assert_eq!(target_before, 6_450, "t2 is the lone Going out receipt");
     let caps_before = db.category_caps().await.expect("caps ok").len();
@@ -294,7 +295,7 @@ async fn merge_refuses_a_category_into_itself() {
     );
     assert_eq!(
         spend(&db, "Groceries").await,
-        13_095,
+        12_535,
         "its spend is untouched"
     );
 }
