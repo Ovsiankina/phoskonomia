@@ -3,6 +3,7 @@
 
 use dioxus::prelude::ServerFnError;
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_llm::FakeLlm;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
@@ -32,7 +33,9 @@ fn row<'a>(view: &'a SettingsDto, key: &str) -> &'a PreferenceRowDto {
 #[tokio::test]
 async fn get_lists_the_known_keys_at_the_seed() {
     let db = fresh_db();
-    let view = get_preferences_with(&db).await.expect("read");
+    let view = get_preferences_with(&db, &FakeLlm::new())
+        .await
+        .expect("read");
 
     let keys: Vec<&str> = view.rows.iter().map(|r| r.key.as_str()).collect();
     assert_eq!(keys, KEYS, "known keys, in display order");
@@ -53,7 +56,7 @@ async fn get_lists_the_known_keys_at_the_seed() {
 
     assert_eq!(view.changed_count, 2, "the two seeded overrides");
     assert_eq!(view.engine, "OLLAMA");
-    assert_eq!(view.model, "GEMMA4");
+    assert_eq!(view.model, FakeLlm::DEFAULT_MODEL, "the session model id");
 }
 
 #[tokio::test]
@@ -66,7 +69,9 @@ async fn get_falls_back_to_defaults_for_unstored_keys() {
             savings_target: Money::ZERO,
         },
     );
-    let view = get_preferences_with(&db).await.expect("read");
+    let view = get_preferences_with(&db, &FakeLlm::new())
+        .await
+        .expect("read");
 
     assert_eq!(view.rows.len(), KEYS.len(), "every known key is listed");
     for r in &view.rows {
@@ -79,7 +84,7 @@ async fn get_falls_back_to_defaults_for_unstored_keys() {
 #[tokio::test]
 async fn set_persists_a_valid_value_and_the_backend_stamps_provenance() {
     let db = fresh_db();
-    let view = set_preference_with(&db, "momentum_baseline_cycles", "6")
+    let view = set_preference_with(&db, &FakeLlm::new(), "momentum_baseline_cycles", "6")
         .await
         .expect("a valid write succeeds");
 
@@ -103,7 +108,7 @@ async fn set_persists_a_valid_value_and_the_backend_stamps_provenance() {
 #[tokio::test]
 async fn set_rejects_an_unknown_key_without_writing() {
     let db = fresh_db();
-    let err = set_preference_with(&db, "theme", "dark")
+    let err = set_preference_with(&db, &FakeLlm::new(), "theme", "dark")
         .await
         .expect_err("unknown key");
 
@@ -130,7 +135,7 @@ async fn set_rejects_disallowed_values_and_leaves_the_store_untouched() {
         ("low_confidence_threshold", "0.9"),
         ("telemetry", "on"),
     ] {
-        let err = set_preference_with(&db, key, value)
+        let err = set_preference_with(&db, &FakeLlm::new(), key, value)
             .await
             .expect_err("disallowed value");
         assert!(
@@ -146,7 +151,7 @@ async fn set_rejects_disallowed_values_and_leaves_the_store_untouched() {
 async fn rejection_text_does_not_echo_the_submitted_value() {
     let db = fresh_db();
     let marker = "zz-submitted-value-zz";
-    let err = set_preference_with(&db, "currency", marker)
+    let err = set_preference_with(&db, &FakeLlm::new(), "currency", marker)
         .await
         .expect_err("disallowed value");
     let shown = ServerFnError::new(err.to_string()).to_string();
@@ -156,10 +161,10 @@ async fn rejection_text_does_not_echo_the_submitted_value() {
 #[tokio::test]
 async fn reset_restores_the_default_and_clears_the_override() {
     let db = fresh_db();
-    set_preference_with(&db, "momentum_baseline_cycles", "6")
+    set_preference_with(&db, &FakeLlm::new(), "momentum_baseline_cycles", "6")
         .await
         .expect("valid write");
-    let view = reset_preference_with(&db, "momentum_baseline_cycles")
+    let view = reset_preference_with(&db, &FakeLlm::new(), "momentum_baseline_cycles")
         .await
         .expect("reset");
 
@@ -182,7 +187,7 @@ async fn reset_restores_the_default_and_clears_the_override() {
 #[tokio::test]
 async fn reset_rejects_an_unknown_key_without_writing() {
     let db = fresh_db();
-    let err = reset_preference_with(&db, "theme")
+    let err = reset_preference_with(&db, &FakeLlm::new(), "theme")
         .await
         .expect_err("unknown key");
 
@@ -197,10 +202,12 @@ async fn reset_rejects_an_unknown_key_without_writing() {
 #[tokio::test]
 async fn reset_all_returns_every_key_to_its_default() {
     let db = fresh_db();
-    set_preference_with(&db, "momentum_baseline_cycles", "12")
+    set_preference_with(&db, &FakeLlm::new(), "momentum_baseline_cycles", "12")
         .await
         .expect("valid write");
-    let view = reset_all_preferences_with(&db).await.expect("reset all");
+    let view = reset_all_preferences_with(&db, &FakeLlm::new())
+        .await
+        .expect("reset all");
 
     assert_eq!(view.changed_count, 0);
     for r in &view.rows {
