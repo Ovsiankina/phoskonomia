@@ -31,11 +31,12 @@ async fn get_ai_panel_serves_the_seeded_feed_chat_and_status() {
             },
         ]
     );
+    // The hermetic stack's fake model: its real id, healthy.
     assert_eq!(
         p.status,
         AiStatusDto {
             online: true,
-            model: "GEMMA4".into(),
+            model: phosk_adapter_llm::FakeLlm::DEFAULT_MODEL.into(),
             engine: "OLLAMA".into(),
             location: "LOCAL".into(),
         }
@@ -45,9 +46,10 @@ async fn get_ai_panel_serves_the_seeded_feed_chat_and_status() {
 #[tokio::test]
 async fn get_ai_panel_mirrors_the_backend_panel() {
     let wire = get_ai_panel().await.expect("panel");
-    let backend = phosk_ai::ai_spine::ai_panel(&fresh_db())
-        .await
-        .expect("backend");
+    let backend =
+        phosk_ai::ai_spine::ai_panel(&fresh_db(), &phosk_adapter_llm::FakeLlm::new(), "OLLAMA")
+            .await
+            .expect("backend");
     // Feed ids are minted per store, so two stores never share them.
     assert_maps_except(&wire, &backend, "id");
 }

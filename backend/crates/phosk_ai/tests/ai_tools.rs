@@ -23,8 +23,8 @@ use phosk_adapter_db::DatabaseAdapter;
 use phosk_adapter_llm::{FakeLlm, LlmAdapter};
 use phosk_ai::ai_spine::ai_panel;
 use phosk_ai::ai_tools::{
-    CHAT_REPLY_MAX_CHARS, CONFIDENCE_THRESHOLD, ProposedWrite, ToolEffect, auto_categorize,
-    chat_reply, narrative_insight, suggest,
+    CHAT_REPLY_MAX_CHARS, CONFIDENCE_THRESHOLD, INSIGHT_PROMPT, ProposedWrite, SUGGEST_PROMPT,
+    ToolEffect, auto_categorize, chat_context, chat_reply, narrative_insight, suggest,
 };
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
@@ -36,6 +36,12 @@ fn db() -> MemoryDb {
 
 fn as_of() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(2026, 6, 18).expect("valid demo date 2026-06-18")
+}
+
+/// The exact prompt `suggest` sends: the data snapshot, then the instruction.
+async fn suggest_prompt(db: &MemoryDb) -> String {
+    let context = chat_context(db, as_of()).await.expect("context");
+    format!("DATA\n{context}\n{SUGGEST_PROMPT}")
 }
 
 // ── chat_reply: READ tool, reply from llm.complete, persisted ────────────────
@@ -61,7 +67,11 @@ async fn chat_reply_persists_user_then_reply() {
     let db = db();
     let llm = FakeLlm::with_model("qwen3.6:35b-custom")
         .with_reply_ending("User: hi\nAssistant:", "Hello!");
-    let before = ai_panel(&db).await.expect("before").msgs.len();
+    let before = ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+        .await
+        .expect("before")
+        .msgs
+        .len();
     let reply = chat_reply(&db, &llm, "hi", as_of())
         .await
         .expect("chat_reply ok");
@@ -70,7 +80,10 @@ async fn chat_reply_persists_user_then_reply() {
         "scripted model reply is returned verbatim"
     );
 
-    let after = ai_panel(&db).await.expect("after").msgs;
+    let after = ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+        .await
+        .expect("after")
+        .msgs;
     assert_eq!(
         after.len(),
         before + 2,
@@ -86,19 +99,30 @@ async fn chat_reply_persists_user_then_reply() {
 async fn chat_reply_empty_text_is_invalid_and_persists_nothing() {
     let db = db();
     let llm = FakeLlm::new();
-    let before = ai_panel(&db).await.expect("before").msgs.len();
+    let before = ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+        .await
+        .expect("before")
+        .msgs
+        .len();
     match chat_reply(&db, &llm, "   ", as_of()).await {
         Err(PhoskError::Invalid(_)) => {}
         other => panic!("expected Invalid for blank text, got {other:?}"),
     }
-    let after = ai_panel(&db).await.expect("after").msgs.len();
+    let after = ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+        .await
+        .expect("after")
+        .msgs
+        .len();
     assert_eq!(after, before, "a rejected turn must not be persisted");
 }
 
 #[tokio::test]
 async fn chat_reply_model_failure_persists_nothing() {
     let db = db();
-    let before = ai_panel(&db).await.expect("before").msgs;
+    let before = ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+        .await
+        .expect("before")
+        .msgs;
     for llm in [
         FakeLlm::new().reachable(false),       // model down
         FakeLlm::new().fail_completions(true), // healthy, then fails to answer
@@ -110,7 +134,10 @@ async fn chat_reply_model_failure_persists_nothing() {
             "a failed completion is an error"
         );
         assert_eq!(
-            ai_panel(&db).await.expect("after").msgs,
+            ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+                .await
+                .expect("after")
+                .msgs,
             before,
             "neither the user line nor a reply is saved when the model fails"
         );
@@ -127,7 +154,10 @@ async fn chat_reply_bounds_the_saved_model_reply() {
         .expect("chat_reply ok");
     assert_eq!(reply.text.chars().count(), CHAT_REPLY_MAX_CHARS + 1);
     assert!(reply.text.ends_with('…'), "the cut is marked");
-    let saved = ai_panel(&db).await.expect("after").msgs;
+    let saved = ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+        .await
+        .expect("after")
+        .msgs;
     assert_eq!(
         saved.last().map(|m| &m.text),
         Some(&reply.text),
@@ -149,10 +179,8 @@ async fn chat_reply_bounds_the_saved_model_reply() {
 #[tokio::test]
 async fn narrative_insight_text_comes_from_the_model() {
     let db = db();
-    let llm = FakeLlm::with_model("gemma4:26b-custom").with_reply(
-        "Summarise this spending cycle in one short, plain sentence of budgeting advice.",
-        "Spend less on coffee.",
-    );
+    let llm = FakeLlm::with_model("gemma4:26b-custom")
+        .with_reply_ending(INSIGHT_PROMPT, "Spend less on coffee.");
     let ins = narrative_insight(&db, &llm, as_of())
         .await
         .expect("narrative_insight composes from the model");
@@ -161,11 +189,57 @@ async fn narrative_insight_text_comes_from_the_model() {
         "the sentence is the model completion"
     );
     assert_eq!(
-        ins.model, "gemma4:26b-custom",
-        "the badge is the live model id (provenance)"
+        ins.source, "gemma4:26b-custom",
+        "the label is the live model id (provenance)"
     );
-    // Estimated saving stays the seeded exact centimes (planning's value, not the model's).
-    assert_eq!(ins.estimated_savings, Money::from_centimes(4_200));
+    // The model estimates no money: there is no figure it did not compute.
+    assert_eq!(ins.estimated_savings, Money::ZERO);
+}
+
+#[tokio::test]
+async fn narrative_insight_prompt_carries_the_users_data() {
+    let db = db();
+    // The echo fake returns its prompt, which shows what the model was given.
+    let ins = narrative_insight(&db, &FakeLlm::new(), as_of())
+        .await
+        .expect("insight");
+    assert!(
+        ins.text.contains("Migros"),
+        "the cycle's data reaches the model"
+    );
+    assert!(ins.text.contains(INSIGHT_PROMPT));
+}
+
+#[tokio::test]
+async fn narrative_insight_blank_completion_is_an_error_not_a_stand_in() {
+    let db = db();
+    let llm = FakeLlm::new().with_reply_ending(INSIGHT_PROMPT, "   \n ");
+    match narrative_insight(&db, &llm, as_of()).await {
+        Err(PhoskError::Invalid(_)) => {}
+        other => panic!("a blank model answer must be Invalid, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn chat_reply_blank_completion_is_an_error_and_saves_nothing() {
+    let db = db();
+    let before = ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+        .await
+        .expect("before")
+        .msgs;
+    let llm = FakeLlm::new().with_reply_ending("User: hi\nAssistant:", "  ");
+    match chat_reply(&db, &llm, "hi", as_of()).await {
+        Err(PhoskError::Invalid(_)) => {}
+        other => panic!("a blank model reply must be Invalid, got {other:?}"),
+    }
+    assert_eq!(
+        ai_panel(&db, &FakeLlm::new(), "OLLAMA")
+            .await
+            .expect("after")
+            .msgs,
+        before,
+        "no stand-in reply is saved"
+    );
 }
 
 // ── auto_categorize: WRITE tool — ENQUEUE a proposal, never mutate the DB ─────
@@ -274,7 +348,7 @@ async fn suggest_enqueues_with_exact_centimes_and_no_db_write() {
     let db = db();
     let before = db.ai_suggestions().await.expect("read").len();
     let llm = FakeLlm::new().with_structured(
-        "Propose one concrete budgeting action for this cycle as structured JSON.",
+        suggest_prompt(&db).await,
         serde_json::json!({
             "text": "Cap going-out at CHF 70",
             "confidence": 0.81,
@@ -301,7 +375,7 @@ async fn suggest_enqueues_with_exact_centimes_and_no_db_write() {
 async fn suggest_missing_text_is_invalid() {
     let db = db();
     let llm = FakeLlm::new().with_structured(
-        "Propose one concrete budgeting action for this cycle as structured JSON.",
+        suggest_prompt(&db).await,
         serde_json::json!({ "confidence": 0.5 }),
     );
     match suggest(&db, &llm, as_of()).await {
@@ -313,9 +387,7 @@ async fn suggest_missing_text_is_invalid() {
 #[tokio::test]
 async fn chat_context_is_built_from_the_users_data() {
     let db = db();
-    let ctx = phosk_ai::ai_tools::chat_context(&db, as_of())
-        .await
-        .expect("context");
+    let ctx = chat_context(&db, as_of()).await.expect("context");
     assert!(ctx.contains("Spent this month"), "{ctx}");
     assert!(ctx.contains("Latest transactions"), "{ctx}");
     // The seeded June cycle has grocery spend; it must reach the model.

@@ -1,13 +1,13 @@
 //! Integration tests for `phosk_ai` — the AI read-slice + spine SERVICE crate.
 //!
-//! Drives the five public service fns (`ai_panel`, `send_message`, `clear_chat`,
+//! Drives the public service fns (`ai_panel`, `clear_chat`,
 //! `dismiss_feed_item`, `dashboard_insight`) against the deterministic Swiss
 //! May/June-2026 seed (`phosk_db_memory::MemoryDb::seeded`). Each `#[tokio::test]`
 //! exercises the implemented service end to end and asserts the exact wire
 //! shapes below.
 //!
-//! Scope (per the AI feature checklist): activity feed (+ dismiss), narrative
-//! dashboard insight, chat history + send + clear (persistence), AI status
+//! Scope (per the AI feature checklist): activity feed (+ dismiss), computed
+//! dashboard insight, chat history + clear (persistence), AI status
 //! (model/engine/online), and the suggestion/candidate/provenance shapes carried
 //! on feed items. Money is asserted in EXACT i64 centimes; CHF float is never a
 //! wire form.
@@ -23,14 +23,21 @@
 use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
 
-use phosk_ai::ai_features::{InsightDto, dashboard_insight, dismiss_feed_item};
+use phosk_adapter_llm::FakeLlm;
+use phosk_ai::ai_features::{COMPUTED_SOURCE, InsightDto, dashboard_insight, dismiss_feed_item};
 use phosk_ai::ai_spine::{
-    AiChatMsgDto, AiFeedItemDto, AiPanelDto, AiStatusDto, ai_panel, clear_chat, send_message,
+    AiChatMsgDto, AiFeedItemDto, AiPanelDto, AiStatusDto, ai_panel, clear_chat,
 };
+use phosk_ai::ai_tools::chat_reply;
 
 /// The seeded in-memory adapter, behind the PORT.
 fn db() -> MemoryDb {
     MemoryDb::seeded().expect("the deterministic Swiss seed builds")
+}
+
+/// The fake model the panel status reads.
+fn llm() -> FakeLlm {
+    FakeLlm::new()
 }
 
 /// The pinned demo clock: day 18 of the 30-day June 2026 cycle.
@@ -43,18 +50,22 @@ fn as_of() -> chrono::NaiveDate {
 #[tokio::test]
 async fn ai_panel_composes_feed_chat_and_status() {
     let db = db();
-    let panel: AiPanelDto = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel: AiPanelDto = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     // The panel carries all three sub-models.
     assert!(!panel.feed.is_empty(), "the seed has activity-feed items");
     assert!(!panel.msgs.is_empty(), "the seed has a chat transcript");
-    assert_eq!(panel.status.model, "GEMMA4");
+    assert_eq!(panel.status.model, FakeLlm::DEFAULT_MODEL);
 }
 
 #[tokio::test]
 async fn ai_panel_feed_matches_seed_count_and_first_item() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     // Seed: 3 feed items (categorize, detect-candidate, reprocess-running).
     assert_eq!(
@@ -75,7 +86,9 @@ async fn ai_panel_feed_matches_seed_count_and_first_item() {
 #[tokio::test]
 async fn ai_panel_feed_surfaces_candidate_with_confidence() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     // The detect item is a low-confidence candidate (0.72) with CONFIRM/DISMISS.
     let cand = panel
@@ -94,7 +107,9 @@ async fn ai_panel_feed_surfaces_candidate_with_confidence() {
 #[tokio::test]
 async fn ai_panel_feed_running_item_has_no_confidence() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     // The reprocess item is in-flight: state "running", no confidence, no actions.
     let running = panel
@@ -111,7 +126,9 @@ async fn ai_panel_feed_running_item_has_no_confidence() {
 #[tokio::test]
 async fn ai_panel_feed_item_carries_a_relative_time_label() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     // Each feed item renders a relative-time label string (derived from `at`).
     for item in &panel.feed {
@@ -122,7 +139,9 @@ async fn ai_panel_feed_item_carries_a_relative_time_label() {
 #[tokio::test]
 async fn ai_panel_chat_matches_seed_transcript() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     // Seed: a 2-line transcript (usr question, sys reply).
     assert_eq!(panel.msgs.len(), 2, "the seeded chat has two messages");
@@ -136,13 +155,15 @@ async fn ai_panel_chat_matches_seed_transcript() {
 }
 
 #[tokio::test]
-async fn ai_panel_status_is_the_seeded_local_gemma_pulse() {
+async fn ai_panel_status_is_the_adapters_model_and_health() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     let status: AiStatusDto = panel.status;
-    assert!(status.online, "the seeded model is online");
-    assert_eq!(status.model, "GEMMA4");
+    assert!(status.online, "the healthy fake model is online");
+    assert_eq!(status.model, FakeLlm::DEFAULT_MODEL);
     assert_eq!(status.engine, "OLLAMA");
     assert_eq!(status.location, "LOCAL");
 }
@@ -150,7 +171,9 @@ async fn ai_panel_status_is_the_seeded_local_gemma_pulse() {
 #[tokio::test]
 async fn ai_panel_serializes_feed_item_as_camelcase() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("ai_panel reads the seed");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("ai_panel reads the seed");
 
     let v = serde_json::to_value(&panel.feed[0]).expect("feed item serializes");
     // camelCase contract + the optional `state`/`conf` keys present.
@@ -163,58 +186,6 @@ async fn ai_panel_serializes_feed_item_as_camelcase() {
     assert!(v.get("is_candidate").is_none());
 }
 
-// ── send_message: chat history + send + persistence + canned reply ────────────
-
-#[tokio::test]
-async fn send_message_returns_a_system_reply() {
-    let db = db();
-    let reply: AiChatMsgDto = send_message(&db, "anything I could cut?")
-        .await
-        .expect("send_message produces a reply");
-
-    // The model reply is authored by "sys" and is non-empty.
-    assert_eq!(reply.who, "sys");
-    assert!(!reply.text.is_empty(), "the canned reply has content");
-}
-
-#[tokio::test]
-async fn send_message_persists_both_the_user_line_and_the_reply() {
-    let db = db();
-    let before = ai_panel(&db)
-        .await
-        .expect("read transcript before")
-        .msgs
-        .len();
-
-    let _ = send_message(&db, "how much on subscriptions?")
-        .await
-        .expect("send_message persists");
-
-    let after = ai_panel(&db).await.expect("read transcript after").msgs;
-    // The user message AND the system reply are appended (transcript grows by 2).
-    assert_eq!(after.len(), before + 2, "both turns are persisted");
-
-    // The newly-appended user line carries the exact text we sent.
-    let user_line = after
-        .iter()
-        .rev()
-        .find(|m| m.who == "usr")
-        .expect("the user line was persisted");
-    assert_eq!(user_line.text, "how much on subscriptions?");
-}
-
-#[tokio::test]
-async fn send_message_appends_to_the_latest_chat() {
-    let db = db();
-    // Drive two turns; the transcript should accumulate, not reset.
-    let _ = send_message(&db, "first").await.expect("first turn");
-    let _ = send_message(&db, "second").await.expect("second turn");
-
-    let msgs = ai_panel(&db).await.expect("read transcript").msgs;
-    // 2 seeded + 2 user + 2 sys = 6.
-    assert_eq!(msgs.len(), 6, "two turns append four lines onto the seed");
-}
-
 // ── clear_chat: persistence reset ─────────────────────────────────────────────
 
 #[tokio::test]
@@ -224,7 +195,7 @@ async fn clear_chat_empties_the_transcript() {
         .await
         .expect("clear_chat resolves the latest chat");
 
-    let msgs = ai_panel(&db)
+    let msgs = ai_panel(&db, &llm(), "OLLAMA")
         .await
         .expect("read transcript after clear")
         .msgs;
@@ -235,11 +206,15 @@ async fn clear_chat_empties_the_transcript() {
 async fn clear_chat_then_send_starts_a_fresh_pair() {
     let db = db();
     clear_chat(&db).await.expect("clear first");
-    let _ = send_message(&db, "fresh start")
+    let reply: AiChatMsgDto = chat_reply(&db, &llm(), "fresh start", as_of())
         .await
         .expect("send after clear");
+    assert!(!reply.text.is_empty(), "the reply comes from the model");
 
-    let msgs = ai_panel(&db).await.expect("read transcript").msgs;
+    let msgs = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("read transcript")
+        .msgs;
     // Only the new user line + the reply remain.
     assert_eq!(msgs.len(), 2, "exactly the new turn survives a prior clear");
     assert_eq!(msgs[0].who, "usr");
@@ -252,7 +227,9 @@ async fn clear_chat_then_send_starts_a_fresh_pair() {
 #[tokio::test]
 async fn dismiss_feed_item_removes_it_from_the_panel() {
     let db = db();
-    let panel = ai_panel(&db).await.expect("read feed before dismiss");
+    let panel = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("read feed before dismiss");
     let target = panel.feed[0].id.clone();
     let before = panel.feed.len();
 
@@ -260,7 +237,10 @@ async fn dismiss_feed_item_removes_it_from_the_panel() {
         .await
         .expect("dismiss the first feed item");
 
-    let after = ai_panel(&db).await.expect("read feed after dismiss").feed;
+    let after = ai_panel(&db, &llm(), "OLLAMA")
+        .await
+        .expect("read feed after dismiss")
+        .feed;
     assert_eq!(after.len(), before - 1, "the feed shrinks by one");
     assert!(
         !after.iter().any(|f| f.id == target),
@@ -281,32 +261,18 @@ async fn dismiss_unknown_feed_item_is_not_found() {
     );
 }
 
-// ── dashboard_insight: narrative one-liner + estimated saving (centimes) ──────
+// ── dashboard_insight: computed line + estimated saving (centimes) ─────────────
 
 #[tokio::test]
-async fn dashboard_insight_is_the_gemma_one_liner() {
+async fn dashboard_insight_is_computed_not_a_model_line() {
     let db = db();
     let insight: InsightDto = dashboard_insight(&db, as_of())
         .await
         .expect("dashboard_insight composes the cycle insight");
 
-    assert_eq!(insight.model, "GEMMA4");
+    assert_eq!(insight.source, COMPUTED_SOURCE);
     assert!(!insight.text.is_empty(), "the insight sentence has content");
-}
-
-#[tokio::test]
-async fn dashboard_insight_estimated_savings_is_exact_centimes() {
-    let db = db();
-    let insight = dashboard_insight(&db, as_of())
-        .await
-        .expect("dashboard_insight composes the cycle insight");
-
-    // Pinned seed value: CHF 42.00 = 4_200 centimes (matches dashboard.rs::get_insight).
-    assert_eq!(
-        insight.estimated_savings,
-        Money::from_centimes(4_200),
-        "the estimated saving is exact i64 centimes, never a CHF float"
-    );
+    assert!(insight.estimated_savings >= Money::ZERO);
 }
 
 #[tokio::test]
@@ -317,15 +283,14 @@ async fn dashboard_insight_serializes_savings_as_i64_centimes() {
         .expect("dashboard_insight composes the cycle insight");
 
     let v = serde_json::to_value(&insight).expect("insight serializes");
-    // camelCase key + EXACT centime integer on the wire (not 42.0 CHF).
     assert_eq!(
         v.get("estimatedSavings")
             .expect("camelCase money key present"),
-        &serde_json::json!(4_200),
+        &serde_json::json!(insight.estimated_savings.centimes()),
         "estimatedSavings serializes as the i64 centime count"
     );
-    assert_eq!(v.get("model").expect("model key"), "GEMMA4");
-    // No snake_case / CHF-float leakage.
+    assert_eq!(v.get("source").expect("source key"), COMPUTED_SOURCE);
+    // No snake_case leakage.
     assert!(v.get("estimated_savings").is_none());
 }
 

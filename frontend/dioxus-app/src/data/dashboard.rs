@@ -388,23 +388,25 @@ pub(crate) async fn act_on_alert_with(
         })
 }
 
-/// `GET /insights/dashboard` — the GEMMA4 one-liner + estimated saving.
+/// `GET /insights/dashboard` — the computed insight line + estimated saving.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InsightDto {
-    /// Model badge, e.g. `"GEMMA4"`.
-    pub model: String,
+    /// Who wrote `text`: `"COMPUTED"` for the deterministic insight, or the
+    /// real model id if a language model wrote it.
+    pub source: String,
     /// The insight sentence.
     pub text: String,
-    /// Estimated CHF saving the suggestion unlocks.
+    /// Estimated CHF saving the insight points at (zero = no estimate).
     #[serde(with = "phosk_model::money_centimes")]
     pub estimated_savings: Money,
 }
 
-/// The dashboard AI insight (`GET /insights/dashboard`).
+/// The dashboard insight (`GET /insights/dashboard`).
 ///
-/// REAL: composes `phosk_ai::dashboard_insight` (canned GEMMA4 one-liner for now;
-/// real local inference lands with the LLM adapter) for the seeded cycle.
+/// REAL: `phosk_ai::dashboard_insight` — computed from this cycle's receipts,
+/// the category caps and the monthly budget (no model call: the dashboard loads
+/// often and the local model takes seconds per sentence).
 #[server]
 pub async fn get_insight() -> Result<InsightDto, ServerFnError> {
     #[cfg(feature = "server-deps")]
@@ -414,7 +416,7 @@ pub async fn get_insight() -> Result<InsightDto, ServerFnError> {
             .await
             .map_err(crate::data::server_err)?;
         Ok(InsightDto {
-            model: i.model,
+            source: i.source,
             text: i.text,
             estimated_savings: i.estimated_savings,
         })
