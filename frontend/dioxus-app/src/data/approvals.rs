@@ -66,9 +66,14 @@ pub struct ProposedReceiptDto {
 pub struct ProposalDto {
     /// The suggestion id — the approve / reject target.
     pub suggestion_id: String,
-    /// Whether the staged payload passes `validate_proposal` (approve would
-    /// be refused otherwise; the user can still reject it).
+    /// Whether the staged payload passes `validate_proposal` and names only
+    /// the user's own categories (approve would be refused otherwise; the
+    /// user can still reject it).
     pub bookable: bool,
+    /// Categories the proposal names that the user does not have (clipped,
+    /// each once). Non-empty makes it unbookable until they exist.
+    #[serde(default)]
+    pub unknown_categories: Vec<String>,
     /// The staged receipt, `None` when no payload could be read.
     pub receipt: Option<ProposedReceiptDto>,
 }
@@ -209,9 +214,10 @@ const BAD_SLUG: &str = "That is not a valid receipt.";
 pub(crate) const GONE: &str =
     "This proposal is no longer pending. Refresh to see the current queue.";
 #[cfg(feature = "server-deps")]
-pub(crate) const REFUSED: &str = "This proposal can't be booked: it failed validation, was \
-                                  already rejected, conflicts with another open proposal for \
-                                  this receipt, or could not be saved. Nothing was booked.";
+pub(crate) const REFUSED: &str = "This proposal can't be booked: it failed validation, names a \
+                                  category you do not have, was already rejected, conflicts \
+                                  with another open proposal for this receipt, or could not be \
+                                  saved. Nothing was booked.";
 #[cfg(feature = "server-deps")]
 pub(crate) const BOOKED: &str = "This proposal is already booked. Correct the transaction instead.";
 #[cfg(feature = "server-deps")]
@@ -334,11 +340,19 @@ fn div_round_half_away(n: i128, d: i128) -> i128 {
 }
 
 #[cfg(feature = "server-deps")]
-fn map_proposal(s: phosk_ai::PendingSuggestion, slug: &str) -> ProposalDto {
-    let bookable = s
+fn map_proposal(s: phosk_ai::PendingSuggestion, slug: &str, known: &[String]) -> ProposalDto {
+    let unknown_categories: Vec<String> = s
         .proposal
         .as_ref()
-        .is_some_and(|p| phosk_ai::validate_proposal(p, slug).is_ok());
+        .map(|p| phosk_ai::unknown_categories(p, known))
+        .unwrap_or_default()
+        .iter()
+        .map(|c| clip(c))
+        .collect();
+    let bookable = unknown_categories.is_empty()
+        && s.proposal
+            .as_ref()
+            .is_some_and(|p| phosk_ai::validate_proposal(p, slug).is_ok());
     let receipt = s.proposal.map(|p| ProposedReceiptDto {
         shop: clip(&p.receipt.shop),
         date: p.receipt.date.format("%Y-%m-%d").to_string(),
@@ -363,6 +377,7 @@ fn map_proposal(s: phosk_ai::PendingSuggestion, slug: &str) -> ProposalDto {
     ProposalDto {
         suggestion_id: s.suggestion.id.to_string(),
         bookable,
+        unknown_categories,
         receipt,
     }
 }
@@ -375,6 +390,9 @@ pub(crate) async fn list_pending_proposals_with(
     let groups = phosk_ai::pending_suggestions(db)
         .await
         .map_err(|_| ServerFnError::new("Could not load the approval queue."))?;
+    let known = phosk_ai::known_category_names(db)
+        .await
+        .map_err(|_| ServerFnError::new(LOAD_FAILED))?;
     Ok(groups
         .into_iter()
         .filter_map(|g| {
@@ -382,7 +400,7 @@ pub(crate) async fn list_pending_proposals_with(
             let proposals = g
                 .suggestions
                 .into_iter()
-                .map(|s| map_proposal(s, &slug))
+                .map(|s| map_proposal(s, &slug, &known))
                 .collect();
             Some(ReceiptGroupDto {
                 receipt_slug: slug,
@@ -406,6 +424,9 @@ pub(crate) async fn get_proposal_with(
         .receipt_proposal(s.id)
         .await
         .map_err(|_| ServerFnError::new(LOAD_FAILED))?;
+    let known = phosk_ai::known_category_names(db)
+        .await
+        .map_err(|_| ServerFnError::new(LOAD_FAILED))?;
     let slug = s.target.clone().unwrap_or_default();
     Ok(map_proposal(
         phosk_ai::PendingSuggestion {
@@ -413,6 +434,7 @@ pub(crate) async fn get_proposal_with(
             proposal,
         },
         &slug,
+        &known,
     ))
 }
 

@@ -25,7 +25,8 @@ pub mod ai_tools;
 
 pub use ai_approval::{
     ApprovalOutcome, PendingGroup, PendingSuggestion, approve_receipt, approve_suggestion,
-    pending_suggestions, reject_suggestion, validate_proposal,
+    known_category_names, pending_suggestions, reject_suggestion, unknown_categories,
+    validate_proposal,
 };
 pub use ai_features::{InsightDto, dashboard_insight, dismiss_feed_item};
 pub use ai_spine::{

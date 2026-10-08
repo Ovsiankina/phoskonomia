@@ -86,6 +86,10 @@ pub struct MergePreviewDto {
     /// Every row that will be re-pointed (receipts, line items,
     /// subscriptions, signals) — what the merge reports back.
     pub records: u32,
+    /// The surviving category's cap after the merge (the two caps fold, see
+    /// `phosk_adapter_db::merged_cap`); `None` = unlimited.
+    #[serde(default, with = "phosk_model::opt_money_centimes")]
+    pub cap_after: Option<phosk_core::money::Money>,
 }
 
 /// Page-safe messages the data layer itself produces.
@@ -450,6 +454,9 @@ pub(crate) async fn merge_preview_with(
             .ok_or_else(|| ServerFnError::new(msg::UNKNOWN))
     };
     let (source, target) = (find(from)?, find(into)?);
+    let cap_of = |n: &str| caps.iter().find(|c| c.name == n).and_then(|c| c.cap);
+    let cap_after =
+        phosk_adapter_db::merged_cap(cap_of(&target), cap_of(&source)).map_err(store_error)?;
     if source == target {
         return Err(ServerFnError::new(format!(
             "category {from} cannot be merged into itself"
@@ -469,6 +476,7 @@ pub(crate) async fn merge_preview_with(
         into: target,
         line_items,
         records,
+        cap_after,
     })
 }
 

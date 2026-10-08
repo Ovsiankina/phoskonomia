@@ -366,3 +366,161 @@ async fn a_declared_oversize_is_refused_before_reading() {
     let err = read_capped(stream(Some(declared), jpeg(10))).await;
     assert_eq!(server_error(err, 500), TOO_LARGE);
 }
+
+// ── Real mode, end to end ────────────────────────────────────────────────────
+//
+// The same flow the owner runs on their own data: the SurrealDB starter store
+// (categories only, empty ledger), a photo in, the review, APPROVE, and then
+// every read the app shows — Transactions, the receipt's lines, Budgets and the
+// dashboard — sees the receipt.
+
+/// A day in a real cycle, far from the demo seed's June 2026.
+fn real_day(d: u32) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(2026, 10, d).expect("valid date")
+}
+
+/// What a constrained model answers for a Coop slip printed on 3 October.
+fn coop_llm() -> ScriptedLlm {
+    ScriptedLlm(json!({
+        "shop": "Coop Lausanne",
+        "date": "2026-10-03",
+        "category": "groceries",
+        "lineItems": [
+            {"name": "Milk", "qty": 2.0, "unitPriceCentimes": 165, "category": "Groceries", "confidence": 0.93},
+            {"name": "Dish soap", "qty": 1.0, "unitPriceCentimes": 395, "category": "Household", "confidence": 0.88},
+            {"name": "Apples", "qty": 1.0, "unitPriceCentimes": 420, "confidence": 0.9}
+        ]
+    }))
+}
+
+#[tokio::test]
+async fn real_mode_an_approved_photo_shows_everywhere() {
+    let db = phosk_db_surreal::SurrealDb::memory_starter()
+        .await
+        .expect("starter store");
+    let (storage, ocr) = (InMemoryStorage::new(), FakeOcr::new());
+    let today = real_day(8);
+    crate::data::budgets::set_category_cap_with(&db, "Groceries", "400")
+        .await
+        .expect("cap");
+
+    // Upload: staged, bookable, dated as printed, categories in the user's spelling.
+    let out = upload_receipt_with(&db, &storage, &ocr, &coop_llm(), &jpeg(40), today)
+        .await
+        .expect("staged");
+    let proposal = out.proposal.expect("review payload");
+    assert!(proposal.bookable, "{:?}", proposal.unknown_categories);
+    let r = proposal.receipt.expect("receipt");
+    assert_eq!(r.date, "2026-10-03", "the printed date wins");
+    assert_eq!(r.category, "Groceries");
+    assert!(
+        db.transactions_between(real_day(1), real_day(31))
+            .await
+            .expect("tx")
+            .is_empty(),
+        "nothing is booked before approval"
+    );
+
+    // Approve.
+    let booked = approve_proposal_with(&db, &out.suggestion_id)
+        .await
+        .expect("approved");
+    assert!(booked.applied);
+    let total = money(2 * 165 + 395 + 420);
+
+    // The dashboard transaction projection.
+    let txs = db
+        .transactions_between(real_day(1), real_day(31))
+        .await
+        .expect("tx");
+    assert_eq!(txs.len(), 1);
+    assert_eq!(txs[0].shop, "Coop Lausanne");
+    assert_eq!(txs[0].category, "Groceries");
+    assert_eq!(txs[0].amount, total);
+    assert_eq!(txs[0].date, real_day(3));
+
+    // Transactions page: the receipt is listed this month, with its lines.
+    let list = phosk_ledger::transactions::list_transactions(
+        &db,
+        today,
+        phosk_ledger::transactions::TxnFilter {
+            period: "month".to_owned(),
+            shop: String::new(),
+            category: String::new(),
+            sort: "date".to_owned(),
+            q: String::new(),
+        },
+    )
+    .await
+    .expect("list");
+    let row = list
+        .transactions
+        .iter()
+        .find(|t| t.id == booked.receipt_slug)
+        .expect("listed");
+    assert_eq!(row.amount, total);
+    assert_eq!(row.item_count, 3);
+    let lines = phosk_ledger::line_items::transaction_lines(&db, &booked.receipt_slug)
+        .await
+        .expect("lines");
+    let lines: Vec<(&str, &str)> = lines
+        .lines
+        .iter()
+        .map(|l| (l.name.as_str(), l.category.as_str()))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("Milk", "Groceries"),
+            ("Dish soap", "Household"),
+            ("Apples", "Groceries")
+        ]
+    );
+
+    // Budgets: the Groceries envelope counts the receipt against its cap.
+    let envelopes = phosk_planning::budgets::categories(&db, today)
+        .await
+        .expect("envelopes");
+    let groceries = envelopes
+        .iter()
+        .find(|e| e.name == "Groceries")
+        .expect("Groceries envelope");
+    assert_eq!(groceries.budget, money(40_000));
+    assert_eq!(groceries.spent, total);
+
+    // Dashboard: the month's spend and the allocation include it.
+    let totals = phosk_insights::dashboard_totals(&db, today)
+        .await
+        .expect("totals");
+    assert_eq!(totals.spent, total);
+    assert_eq!(totals.allocated, money(40_000));
+}
+
+#[tokio::test]
+async fn real_mode_a_category_the_user_lacks_cannot_be_booked() {
+    let db = phosk_db_surreal::SurrealDb::memory_starter()
+        .await
+        .expect("starter store");
+    let (storage, ocr) = (InMemoryStorage::new(), FakeOcr::new());
+    let out = upload_receipt_with(&db, &storage, &ocr, &coop_llm(), &jpeg(41), real_day(8))
+        .await
+        .expect("staged");
+    // The user deletes a category the staged proposal relies on.
+    db.delete_category("Household")
+        .await
+        .expect("unused, so deletable");
+
+    let queue = crate::data::approvals::list_pending_proposals_with(&db)
+        .await
+        .expect("queue");
+    let p = &queue[0].proposals[0];
+    assert!(!p.bookable);
+    assert_eq!(p.unknown_categories, ["Household"]);
+
+    let err = approve_proposal_with(&db, &out.suggestion_id).await;
+    assert!(server_error(err, 500).contains("can't be booked"));
+    assert!(
+        db.all_receipts().await.expect("r").is_empty(),
+        "nothing booked"
+    );
+}

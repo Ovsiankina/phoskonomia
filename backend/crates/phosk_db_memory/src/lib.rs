@@ -37,7 +37,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
-use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_db::{DatabaseAdapter, merged_cap};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_id::{
@@ -60,12 +60,16 @@ mod seed;
 /// deterministic Swiss fixture with [`MemoryDb::seeded`].
 #[derive(Debug)]
 pub struct MemoryDb {
-    transactions: Vec<Transaction>,
+    // Behind a `Mutex` so a category rename/merge can re-point the seeded
+    // rows' category names, as the SurrealDB adapter does for its table.
+    transactions: Mutex<Vec<Transaction>>,
     // The dashboard `Transaction` projection of every receipt written through
     // `insert_receipt`, keyed by the stored receipt id so a re-import replaces
     // its row. Read back alongside `transactions` by `transactions_between`.
     receipt_transactions: Mutex<Vec<(ReceiptId, Transaction)>>,
-    categories: Vec<Category>,
+    // The dashboard view of the category records, kept in step with
+    // `category_caps` by every category write path (port contract).
+    categories: Mutex<Vec<Category>>,
     budget: Mutex<BudgetConfig>,
     budget_changes: Mutex<Vec<BudgetChange>>,
     // Richer write-side entities (ADR-008 / locked decision #3). Mutable
@@ -105,9 +109,9 @@ impl MemoryDb {
         budget: BudgetConfig,
     ) -> Self {
         Self {
-            transactions,
+            transactions: Mutex::new(transactions),
             receipt_transactions: Mutex::new(Vec::new()),
-            categories,
+            categories: Mutex::new(categories),
             budget: Mutex::new(budget),
             budget_changes: Mutex::new(Vec::new()),
             receipts: Mutex::new(Vec::new()),
@@ -165,9 +169,9 @@ impl MemoryDb {
         let ai_suggestions = seed::seed_ai_suggestions()?;
 
         Ok(Self {
-            transactions,
+            transactions: Mutex::new(transactions),
             receipt_transactions: Mutex::new(Vec::new()),
-            categories,
+            categories: Mutex::new(categories),
             budget: Mutex::new(budget),
             budget_changes: Mutex::new(Vec::new()),
             receipts: Mutex::new(receipts),
@@ -206,9 +210,19 @@ impl MemoryDb {
     }
 
     /// Whether any stored row still names `category` — the guard behind
-    /// `delete_category` (receipts, their lines, subscriptions and signals).
+    /// `delete_category` (receipts, their lines, subscriptions, signals and
+    /// the dashboard transactions).
     fn category_is_referenced(&self, category: &str) -> Result<bool, PhoskError> {
         if lock(&self.receipts)?.iter().any(|r| r.category == category) {
+            return Ok(true);
+        }
+        if lock(&self.transactions)?
+            .iter()
+            .any(|t| t.category == category)
+            || lock(&self.receipt_transactions)?
+                .iter()
+                .any(|(_, t)| t.category == category)
+        {
             return Ok(true);
         }
         if lock(&self.line_items)?
@@ -224,6 +238,47 @@ impl MemoryDb {
             return Ok(true);
         }
         Ok(lock(&self.signals)?.iter().any(|s| s.parent == category))
+    }
+
+    /// Add (or replace) the dashboard [`Category`] row named `name` — the
+    /// projection an insert/split writes next to the new [`CategoryCap`].
+    fn put_category_row(&self, name: &str, cap: Option<Money>) -> Result<(), PhoskError> {
+        let mut rows = lock(&self.categories)?;
+        let row = Category {
+            name: name.to_owned(),
+            cap,
+        };
+        match rows.iter_mut().find(|c| c.name == name) {
+            Some(slot) => *slot = row,
+            None => rows.push(row),
+        }
+        Ok(())
+    }
+
+    /// Move the dashboard projection from the name `from` to `to`: the
+    /// [`Category`] row of that name (dropped when `to` already has one, as
+    /// in a merge) and every dashboard transaction naming it.
+    fn repoint_projection(&self, from: &str, to: &str) -> Result<(), PhoskError> {
+        let mut rows = lock(&self.categories)?;
+        if rows.iter().any(|c| c.name == to) {
+            rows.retain(|c| c.name != from);
+        } else if let Some(row) = rows.iter_mut().find(|c| c.name == from) {
+            row.name = to.to_owned();
+        }
+        drop(rows);
+        for t in lock(&self.transactions)?
+            .iter_mut()
+            .filter(|t| t.category == from)
+        {
+            t.category = to.to_owned();
+        }
+        for (_, t) in lock(&self.receipt_transactions)?
+            .iter_mut()
+            .filter(|(_, t)| t.category == from)
+        {
+            t.category = to.to_owned();
+        }
+        Ok(())
     }
 
     /// How many receipt proposals are staged (test inspection: the port only
@@ -256,8 +311,7 @@ impl DatabaseAdapter for MemoryDb {
                 "transactions_between: from ({from}) is after to ({to})"
             )));
         }
-        let mut matched: Vec<Transaction> = self
-            .transactions
+        let mut matched: Vec<Transaction> = lock(&self.transactions)?
             .iter()
             .filter(|tx| tx.date >= from && tx.date <= to)
             .cloned()
@@ -277,8 +331,9 @@ impl DatabaseAdapter for MemoryDb {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn categories(&self) -> Result<Vec<Category>, PhoskError> {
-        tracing::debug!(count = self.categories.len(), "returning categories");
-        Ok(self.categories.clone())
+        let categories = lock(&self.categories)?.clone();
+        tracing::debug!(count = categories.len(), "returning categories");
+        Ok(categories)
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -524,6 +579,12 @@ impl DatabaseAdapter for MemoryDb {
             source: Source::UserModified,
             confidence: 1.0,
         };
+        if let Some(row) = lock(&self.categories)?
+            .iter_mut()
+            .find(|row| row.name == name)
+        {
+            row.cap = cap;
+        }
         Ok(())
     }
 
@@ -536,6 +597,7 @@ impl DatabaseAdapter for MemoryDb {
             )));
         }
         let id = c.id;
+        self.put_category_row(&c.name, c.cap)?;
         caps.push(c);
         Ok(id)
     }
@@ -584,7 +646,7 @@ impl DatabaseAdapter for MemoryDb {
         for s in signals.iter_mut().filter(|s| s.parent == from) {
             s.parent = to.to_owned();
         }
-        Ok(())
+        self.repoint_projection(from, to)
     }
 
     async fn delete_category(&self, name: &str) -> Result<(), PhoskError> {
@@ -598,6 +660,7 @@ impl DatabaseAdapter for MemoryDb {
             )));
         }
         caps.retain(|c| c.name != name);
+        lock(&self.categories)?.retain(|c| c.name != name);
         Ok(())
     }
 
@@ -619,6 +682,8 @@ impl DatabaseAdapter for MemoryDb {
                 "category {from} cannot be merged into itself"
             )));
         }
+        let cap_of = |name: &str| caps.iter().find(|c| c.name == name).and_then(|c| c.cap);
+        let cap = merged_cap(cap_of(into), cap_of(from))?;
 
         let mut receipts = lock(&self.receipts)?;
         let mut lines = lock(&self.line_items)?;
@@ -642,7 +707,15 @@ impl DatabaseAdapter for MemoryDb {
             moved = moved.saturating_add(1);
         }
 
+        self.repoint_projection(from, into)?;
+        if let Some(row) = lock(&self.categories)?
+            .iter_mut()
+            .find(|row| row.name == into)
+        {
+            row.cap = cap;
+        }
         if let Some(target) = caps.iter_mut().find(|c| c.name == into) {
+            target.cap = cap;
             target.provenance = Provenance {
                 source: Source::UserModified,
                 confidence: 1.0,
@@ -690,6 +763,7 @@ impl DatabaseAdapter for MemoryDb {
             l.provenance = Provenance::user_modified();
             moved = moved.saturating_add(1);
         }
+        self.put_category_row(&new.name, new.cap)?;
         caps.push(new);
         Ok(moved)
     }
@@ -1211,7 +1285,7 @@ mod tests {
     #[test]
     fn seeded_builds_without_error() {
         let db = MemoryDb::seeded().expect("seed is valid");
-        assert!(!db.transactions.is_empty());
+        assert!(!db.transactions.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]

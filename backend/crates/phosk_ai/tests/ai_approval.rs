@@ -17,13 +17,18 @@ use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
 use phosk_id::{LineItemId, ReceiptId, SuggestionId};
 use phosk_model::{
-    AiSuggestion, BudgetConfig, LineItem, Provenance, Receipt, ReceiptProposal, Source,
+    AiSuggestion, BudgetConfig, Category, LineItem, Provenance, Receipt, ReceiptProposal, Source,
 };
 
+/// No receipts or suggestions, so ledger counts are absolute; one category,
+/// `Groceries`, so a proposal naming it is bookable.
 fn empty_db() -> MemoryDb {
     MemoryDb::new(
         Vec::new(),
-        Vec::new(),
+        vec![Category {
+            name: "Groceries".to_owned(),
+            cap: None,
+        }],
         BudgetConfig {
             monthly_budget: Money::from_centimes(420_000),
             savings_target: Money::from_centimes(90_000),
@@ -566,4 +571,79 @@ async fn hostile_proposals_are_rejected_before_the_ledger() {
         assert_eq!(ledger_len(&db).await, 0, "{what}: ledger untouched");
         assert_eq!(status(&db, p.suggestion_id).await, "open", "{what}");
     }
+}
+
+/// A proposal naming a category the user does not have — on the receipt or
+/// on any line — is refused, single and bulk; nothing is booked and it stays
+/// open for the human to reject (or to approve once the category exists).
+#[tokio::test]
+async fn a_proposal_into_an_unknown_category_is_refused() {
+    let db = empty_db();
+    for (what, edit) in [
+        (
+            "receipt category",
+            (|p| p.receipt.category = "Made up".to_owned()) as fn(&mut ReceiptProposal),
+        ),
+        ("line category", |p| {
+            p.line_items[1].category = "Made up".to_owned();
+        }),
+        ("case-only spelling", |p| {
+            p.receipt.category = "groceries".to_owned();
+        }),
+    ] {
+        let mut p = proposal(&format!("rcpt:cat-{}", what.len()));
+        edit(&mut p);
+        enqueue(&db, &p).await;
+        assert_eq!(
+            phosk_ai::unknown_categories(&p, &["Groceries".to_owned()]).len(),
+            1,
+            "{what}"
+        );
+        let res = approve_suggestion(&db, p.suggestion_id).await;
+        assert!(
+            matches!(res, Err(PhoskError::Invalid(_))),
+            "{what}: {res:?}"
+        );
+        let res = approve_receipt(&db, &p.receipt.slug).await;
+        assert!(
+            matches!(res, Err(PhoskError::Invalid(_))),
+            "{what}: {res:?}"
+        );
+        assert_eq!(ledger_len(&db).await, 0, "{what}");
+        assert_eq!(status(&db, p.suggestion_id).await, "open", "{what}");
+    }
+
+    // Once the category exists, the same proposal books.
+    let mut p = proposal("rcpt:cat-later");
+    p.receipt.category = "Household".to_owned();
+    enqueue(&db, &p).await;
+    assert!(approve_suggestion(&db, p.suggestion_id).await.is_err());
+    db.insert_category(phosk_model::CategoryCap {
+        id: phosk_id::CategoryId::new(),
+        slug: "household".to_owned(),
+        name: "Household".to_owned(),
+        cap: None,
+        fixed: false,
+        glyph: "◫".to_owned(),
+        note: String::new(),
+        provenance: Provenance::user_entered(),
+    })
+    .await
+    .expect("create");
+    db.insert_category(phosk_model::CategoryCap {
+        id: phosk_id::CategoryId::new(),
+        slug: "groceries".to_owned(),
+        name: "Groceries".to_owned(),
+        cap: None,
+        fixed: false,
+        glyph: "▤".to_owned(),
+        note: String::new(),
+        provenance: Provenance::user_entered(),
+    })
+    .await
+    .expect("create");
+    let out = approve_suggestion(&db, p.suggestion_id)
+        .await
+        .expect("bookable now");
+    assert!(out.applied);
 }

@@ -270,7 +270,7 @@ pub fn CategoriesPage() -> Element {
                             span { class: "gl", "⇢" }
                             span { class: "nm", "Merge" }
                         }
-                        div { class: "cfg-panel-sub", "Fold one category into another. Every entry moves; the first one is removed; the target keeps its cap." }
+                        div { class: "cfg-panel-sub", "Fold one category into another. Every entry moves; the first one is removed; the two caps add up." }
                         div { class: "cfg-row",
                             div { class: "rl", div { class: "lab", "Merge" } }
                             div { class: "rc cfg-select",
@@ -505,6 +505,7 @@ fn MergeConfirm(
         "line items"
     };
     let (from, into) = (preview.from.clone(), preview.into.clone());
+    let cap_after = preview.cap_after.map(crate::data::chf2);
     rsx! {
         div { class: "cfg-row", role: "alertdialog", "aria-label": "Confirm merge",
             div { class: "rl",
@@ -516,6 +517,16 @@ fn MergeConfirm(
                     " {noun} will be re-pointed ("
                     span { class: "num", "{records}" }
                     " entries in total). {preview.from} is removed. This cannot be undone."
+                }
+                div { class: "hint",
+                    match cap_after {
+                        Some(cap) => rsx! {
+                            "The caps add up: {preview.into} is capped at CHF "
+                            span { class: "num", "{cap}" }
+                            " afterwards."
+                        },
+                        None => rsx! { "{preview.into} stays unlimited." },
+                    }
                 }
             }
             div { class: "rc cfg-pref",

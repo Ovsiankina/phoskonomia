@@ -210,16 +210,20 @@ async fn merge_reports_the_number_of_rows_it_moved() {
     assert_eq!(moved, expected, "every reference was accounted for");
 }
 
-/// The target keeps its own id, slug and cap: a merge changes what points at
-/// it, never what it *is* (its cap is not summed with the source's — that is a
-/// budgeting decision the user makes afterwards on the Budgets page).
+/// The target keeps its own id, slug and glyph, and absorbs the source's
+/// cap: two capped envelopes become one whose cap is their sum, so the merged
+/// spend is not suddenly over budget and the total allocation is unchanged.
 #[tokio::test]
-async fn merge_leaves_the_target_record_intact() {
+async fn merge_keeps_the_target_record_and_folds_the_caps() {
     let db = seeded();
     let before = db
         .category_cap_by_name("Going out")
         .await
         .expect("target exists");
+    let source = db
+        .category_cap_by_name("Coffee & snacks")
+        .await
+        .expect("source exists");
 
     merge_categories(&db, "Coffee & snacks", "Going out")
         .await
@@ -231,7 +235,14 @@ async fn merge_leaves_the_target_record_intact() {
         .expect("still ok");
     assert_eq!(after.id, before.id, "the target's id is stable");
     assert_eq!(after.slug, before.slug, "the target's slug is stable");
-    assert_eq!(after.cap, before.cap, "the caps are not summed");
+    let (Some(a), Some(b)) = (before.cap, source.cap) else {
+        panic!("both seeded envelopes are capped");
+    };
+    assert_eq!(
+        after.cap.map(Money::centimes),
+        Some(a.centimes() + b.centimes()),
+        "the caps are summed"
+    );
     assert_eq!(after.glyph, before.glyph, "the glyph is untouched");
 }
 

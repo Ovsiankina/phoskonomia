@@ -30,7 +30,7 @@ use phosk_adapter_storage::{InMemoryStorage, PhotoStorage, StorageRef};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
-use phosk_model::{BudgetConfig, Source};
+use phosk_model::{BudgetConfig, Category, Source};
 use phosk_pipeline_receipt::{IntakePhoto, MAX_PHOTO_BYTES, intake_receipt};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -40,11 +40,20 @@ fn today() -> NaiveDate {
 }
 
 /// An empty MemoryDb (no seeded receipts/suggestions) so absolute-count asserts
-/// (e.g. "exactly one enqueued", "no ledger receipt") are deterministic.
+/// (e.g. "exactly one enqueued", "no ledger receipt") are deterministic. It
+/// knows three categories — approval only books into categories that exist.
 fn empty_db() -> MemoryDb {
+    let category = |name: &str| Category {
+        name: name.to_owned(),
+        cap: None,
+    };
     MemoryDb::new(
         Vec::new(),
-        Vec::new(),
+        vec![
+            category("Groceries"),
+            category("Household"),
+            category("Other"),
+        ],
         BudgetConfig {
             monthly_budget: Money::from_centimes(420_000),
             savings_target: Money::from_centimes(90_000),
@@ -738,4 +747,76 @@ async fn a_rejected_receipt_can_be_reingested() {
     assert!(!second.deduplicated);
     assert_ne!(second.suggestion_id, first.suggestion_id);
     assert_eq!(second.receipt.slug, first.receipt.slug);
+}
+
+/// The model's categories are fitted to the user's own list before anything
+/// is staged: a case-only difference takes the user's spelling, and a made-up
+/// line category falls back to the receipt's and is flagged for review — so
+/// the proposal always names categories that exist and stays approvable.
+#[tokio::test]
+async fn model_categories_are_fitted_to_the_users_list() {
+    let db = empty_db();
+    let out = json!({
+        "shop": "Coop",
+        "category": "groceries",
+        "lineItems": [
+            {"name": "Soap", "qty": 1.0, "unitPriceCentimes": 300, "category": "HOUSEHOLD", "confidence": 0.9},
+            {"name": "Crisps", "qty": 1.0, "unitPriceCentimes": 250, "category": "Snacks", "confidence": 0.95},
+            {"name": "Milk", "qty": 1.0, "unitPriceCentimes": 160, "confidence": 0.9}
+        ]
+    });
+    let outcome = intake_with(&db, out, b"fit").await.expect("intake ok");
+    let staged = db
+        .receipt_proposal(outcome.suggestion_id)
+        .await
+        .expect("read")
+        .expect("staged");
+
+    assert_eq!(staged.receipt.category, "Groceries");
+    let cats: Vec<&str> = staged
+        .line_items
+        .iter()
+        .map(|l| l.category.as_str())
+        .collect();
+    assert_eq!(cats, ["Household", "Groceries", "Groceries"]);
+    assert!(
+        staged.line_items[1].provenance.is_low_confidence(),
+        "a guessed category is flagged"
+    );
+    assert!(!staged.line_items[2].provenance.is_low_confidence());
+    assert_eq!(outcome.low_confidence_lines, 1);
+
+    phosk_ai::approve_suggestion(&db, outcome.suggestion_id)
+        .await
+        .expect("a fitted proposal is approvable");
+}
+
+/// An unknown receipt-level category becomes the category most of its lines
+/// carry; with nothing to go on it becomes the user's `Other`.
+#[tokio::test]
+async fn an_unknown_receipt_category_is_derived_not_invented() {
+    let db = empty_db();
+    let out = json!({
+        "shop": "Jumbo",
+        "category": "DIY",
+        "lineItems": [
+            {"name": "Sponge", "qty": 1.0, "unitPriceCentimes": 200, "category": "Household", "confidence": 0.9},
+            {"name": "Bucket", "qty": 1.0, "unitPriceCentimes": 900, "category": "household", "confidence": 0.9},
+            {"name": "Apple", "qty": 1.0, "unitPriceCentimes": 90, "category": "Groceries", "confidence": 0.9}
+        ]
+    });
+    let outcome = intake_with(&db, out, b"derive").await.expect("intake ok");
+    assert_eq!(outcome.receipt.category, "Household");
+
+    let out = json!({
+        "shop": "Kiosk",
+        "category": "Mystery",
+        "lineItems": [
+            {"name": "Thing", "qty": 1.0, "unitPriceCentimes": 500, "confidence": 0.9}
+        ]
+    });
+    let outcome = intake_with(&db, out, b"other").await.expect("intake ok");
+    assert_eq!(outcome.receipt.category, "Other");
+    assert_eq!(outcome.line_items[0].category, "Other");
+    assert!(outcome.line_items[0].provenance.is_low_confidence());
 }

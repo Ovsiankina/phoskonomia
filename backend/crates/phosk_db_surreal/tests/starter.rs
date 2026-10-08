@@ -100,3 +100,55 @@ async fn reopen_keeps_user_changes() {
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The starter store's two category views (the dashboard `Category` rows and
+/// the Budgets `CategoryCap` records) stay one list through every write.
+#[tokio::test(flavor = "multi_thread")]
+async fn category_writes_keep_both_views_aligned() {
+    use phosk_core::money::Money;
+
+    let db = SurrealDb::memory_starter().await.expect("starter");
+    let aligned = |cats: Vec<phosk_model::Category>, caps: Vec<phosk_model::CategoryCap>| {
+        let mut a: Vec<(String, Option<i64>)> = cats
+            .into_iter()
+            .map(|c| (c.name, c.cap.map(Money::centimes)))
+            .collect();
+        let mut b: Vec<(String, Option<i64>)> = caps
+            .into_iter()
+            .map(|c| (c.name, c.cap.map(Money::centimes)))
+            .collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "dashboard rows and budget records disagree");
+    };
+    let check = || async {
+        aligned(
+            db.categories().await.expect("categories"),
+            db.category_caps().await.expect("caps"),
+        );
+    };
+
+    check().await;
+    db.set_category_cap("Groceries", Some(Money::from_centimes(60_000)))
+        .await
+        .expect("cap");
+    check().await;
+    db.set_category_cap("Shopping", Some(Money::from_centimes(10_000)))
+        .await
+        .expect("cap");
+    db.rename_category("Groceries", "Food")
+        .await
+        .expect("rename");
+    check().await;
+    db.merge_categories("Shopping", "Food")
+        .await
+        .expect("merge");
+    check().await;
+    assert_eq!(
+        db.category_cap_by_name("Food").await.expect("food").cap,
+        Some(Money::from_centimes(70_000)),
+        "the caps folded"
+    );
+    db.delete_category("Other").await.expect("delete");
+    check().await;
+}

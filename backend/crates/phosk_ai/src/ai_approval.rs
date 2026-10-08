@@ -5,7 +5,9 @@
 //! The receipt-intake pipeline stages a [`ReceiptProposal`] and enqueues one
 //! `kind == "receipt"` [`AiSuggestion`] (`status == "open"`). Nothing is booked
 //! until a human calls [`approve_suggestion`] / [`approve_receipt`] here, which
-//! re-validates the (hostile) payload and applies it via `insert_receipt` —
+//! re-validates the (hostile) payload — including that every category it names
+//! is one of the user's ([`unknown_categories`]), so nothing is ever booked
+//! into a category that does not exist — and applies it via `insert_receipt` —
 //! model provenance (`Ocr` / `LlmInferred`) is kept, never relabelled as
 //! user-entered; staged ids and ledger flags are not trusted (ids are derived
 //! from the suggestion id, `fixed` / `signal_id` dropped).
@@ -132,8 +134,9 @@ pub async fn pending_suggestions(
 /// # Errors
 /// - [`PhoskError::NotFound`] if the suggestion or its staged proposal is missing.
 /// - [`PhoskError::Invalid`] if it is not a receipt suggestion, was rejected,
-///   another proposal for the same receipt is also open, or its proposal fails
-///   validation (the ledger is left untouched).
+///   another proposal for the same receipt is also open, its proposal fails
+///   validation, or it names a category the user does not have
+///   ([`unknown_categories`]) — the ledger is left untouched.
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn approve_suggestion(
     db: &dyn DatabaseAdapter,
@@ -291,7 +294,44 @@ async fn checked_proposal(
         return invalid("proposal belongs to another suggestion");
     }
     validate_proposal(&p, slug)?;
+    let known = known_category_names(db).await?;
+    if let Some(name) = unknown_categories(&p, &known).first() {
+        return invalid(&format!("category {name} is not one of your categories"));
+    }
     Ok(p)
+}
+
+/// The category names a booked receipt may carry: the user's category records
+/// ([`CategoryCap`](phosk_model::CategoryCap) — what Budgets and /categories
+/// show), or the dashboard [`Category`](phosk_model::Category) names for a
+/// store that has no records yet. The receipt pipeline constrains the model to
+/// this list, and approval refuses anything outside it.
+///
+/// # Errors
+/// Propagates any [`PhoskError`] from the adapter reads.
+pub async fn known_category_names(db: &dyn DatabaseAdapter) -> Result<Vec<String>, PhoskError> {
+    let caps = db.category_caps().await?;
+    if !caps.is_empty() {
+        return Ok(caps.into_iter().map(|c| c.name).collect());
+    }
+    Ok(db.categories().await?.into_iter().map(|c| c.name).collect())
+}
+
+/// The categories a proposal names (receipt first, then its lines, each once)
+/// that are not in `known` — exact spelling, since the name is the identity
+/// (ADR-008) and a booked row must point at a category that exists. Empty when
+/// the proposal can be booked as read.
+#[must_use]
+pub fn unknown_categories(p: &ReceiptProposal, known: &[String]) -> Vec<String> {
+    let mut unknown: Vec<String> = Vec::new();
+    let names =
+        std::iter::once(&p.receipt.category).chain(p.line_items.iter().map(|l| &l.category));
+    for name in names {
+        if !known.iter().any(|k| k == name) && !unknown.contains(name) {
+            unknown.push(name.clone());
+        }
+    }
+    unknown
 }
 
 /// The `open` receipt suggestions targeting `slug`.

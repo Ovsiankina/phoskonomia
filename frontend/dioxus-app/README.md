@@ -49,6 +49,10 @@ database and a fake OCR — no external services needed.
 
 `PHOSK_DATA_DIR` holds encrypted photos and keys at runtime — never commit it.
 
+To use the app on your own data, run `scripts/phosk` from the repository
+root (a release build on 127.0.0.1). `docs/USING.md` covers it and lists
+every variable.
+
 ## Check
 
 Both sides must type-check (run from this directory):
