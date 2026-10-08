@@ -384,6 +384,19 @@ pub fn DashboardPage() -> Element {
     let alerts_failed = matches!(&*alerts.read(), Some(Err(_)));
     let insight_loading = insight.read().is_none();
 
+    // read failures (an `Err` from the server fn) — passed to <Awaiting error/>
+    // so a failed panel says so instead of passing for an empty one.
+    let failed =
+        |e: bool| e.then(|| "Could not load this section. Reload to try again.".to_string());
+    let totals_err = failed(matches!(&*totals.read(), Some(Err(_))));
+    let series_err = failed(matches!(&*series.read(), Some(Err(_))));
+    let shops_err = failed(matches!(&*shops.read(), Some(Err(_))));
+    let cats_err = failed(matches!(&*cats.read(), Some(Err(_))));
+    let txns_err = failed(matches!(&*txns.read(), Some(Err(_))));
+    let recurring_err = failed(matches!(&*recurring.read(), Some(Err(_))));
+    let alerts_err = failed(alerts_failed);
+    let insight_err = failed(matches!(&*insight.read(), Some(Err(_))));
+
     // tracked signals + AI candidates (candidates carry candidate=true already).
     let signal_list: Vec<Sig> = {
         let mut v: Vec<Sig> = signals_v
@@ -633,7 +646,7 @@ pub fn DashboardPage() -> Element {
                                             projected: t.savings_projected.as_chf_f64(),
                                         }
                                     } else {
-                                        Awaiting { label: "SAVINGS".to_string(), loading: totals_loading }
+                                        Awaiting { label: "SAVINGS".to_string(), loading: totals_loading, error: totals_err.clone() }
                                     }
                                 }
                                 // snapshot ministats
@@ -657,7 +670,7 @@ pub fn DashboardPage() -> Element {
                                             span { class: "v", style: "color:{vs_last_col}", "{vs_last_str}" }
                                         }
                                     } else {
-                                        Awaiting { label: "SNAPSHOT".to_string(), loading: totals_loading }
+                                        Awaiting { label: "SNAPSHOT".to_string(), loading: totals_loading, error: totals_err.clone() }
                                     }
                                 }
                                 // NEXT dock
@@ -666,7 +679,7 @@ pub fn DashboardPage() -> Element {
                                     style: "margin-top:auto;border:1px solid var(--hairline-warm);background:rgba(22,8,16,.4);padding:14px 13px 11px",
                                     span { class: "osc-leg", "NEXT" }
                                     if !recurring_ok {
-                                        Awaiting { label: "NEXT DUE".to_string(), loading: recurring_loading, tone: "coral".to_string() }
+                                        Awaiting { label: "NEXT DUE".to_string(), loading: recurring_loading, error: recurring_err.clone(), tone: "coral".to_string() }
                                     } else if next_due.is_empty() {
                                         div { class: "dim", style: "font-size:11px;padding:8px 0;letter-spacing:.04em", "No upcoming charges." }
                                     } else {
@@ -756,7 +769,7 @@ pub fn DashboardPage() -> Element {
                                         }
                                     } else {
                                         div { style: "padding:40px 14px",
-                                            Awaiting { label: "SPEND TRACE".to_string(), loading: series_loading, tone: "coral".to_string() }
+                                            Awaiting { label: "SPEND TRACE".to_string(), loading: series_loading, error: series_err.clone(), tone: "coral".to_string() }
                                         }
                                     }
                                     div { style: "position:absolute;bottom:8px;left:16px;display:flex;gap:16px",
@@ -771,7 +784,7 @@ pub fn DashboardPage() -> Element {
                                 // channels strip (top 5 categories)
                                 div { class: "c-channels",
                                     if cats_v.is_none() {
-                                        Awaiting { label: "CHANNELS".to_string(), loading: cats_loading }
+                                        Awaiting { label: "CHANNELS".to_string(), loading: cats_loading, error: cats_err.clone() }
                                     } else {
                                         for cc in channels.iter() {
                                             {
@@ -918,14 +931,14 @@ pub fn DashboardPage() -> Element {
                                                 span { class: "v", style: "font-size:13px", "CHF {chf0(t.last_cycle_spent)}" }
                                             }
                                         } else {
-                                            Awaiting { label: "RATES".to_string(), loading: totals_loading }
+                                            Awaiting { label: "RATES".to_string(), loading: totals_loading, error: totals_err.clone() }
                                         }
                                     }
                                     div { class: "b-shops osc-bkt blue", style: "padding-top:16px",
                                         span { class: "osc-leg", "TOP SHOPS" }
                                         div { class: "hud sm", style: "margin-bottom:11px", "THIS CYCLE" }
                                         if shops_v.is_none() {
-                                            Awaiting { label: "TOP SHOPS".to_string(), loading: shops_loading }
+                                            Awaiting { label: "TOP SHOPS".to_string(), loading: shops_loading, error: shops_err.clone() }
                                         } else if shops_v.as_ref().is_some_and(|s| s.shops.is_empty()) {
                                             div { class: "dim", style: "font-size:11px", "No shops this cycle." }
                                         } else {
@@ -972,7 +985,7 @@ pub fn DashboardPage() -> Element {
                                             Link { class: "gbtn p", to: Route::BudgetsPage {}, style: "margin-left:11px;white-space:nowrap", "BUDGETS ↗" }
                                         }
                                         if cats_v.is_none() {
-                                            Awaiting { label: "CATEGORY BUDGETS".to_string(), loading: cats_loading }
+                                            Awaiting { label: "CATEGORY BUDGETS".to_string(), loading: cats_loading, error: cats_err.clone() }
                                         } else {
                                             CatRows { cats: cat_rows }
                                         }
@@ -985,7 +998,7 @@ pub fn DashboardPage() -> Element {
                                             Link { class: "gbtn p", to: Route::TransactionsPage {}, style: "margin-left:11px;white-space:nowrap", "ALL TXNS ↗" }
                                         }
                                         if txns_v.is_none() {
-                                            Awaiting { label: "RECENT TXNS".to_string(), loading: txns_loading }
+                                            Awaiting { label: "RECENT TXNS".to_string(), loading: txns_loading, error: txns_err.clone() }
                                         } else {
                                             TxnTape { rows: txn_rows }
                                         }
@@ -999,7 +1012,7 @@ pub fn DashboardPage() -> Element {
                                         span { class: "coral num", style: "font-size:15px", "{alerts_count_str}" }
                                     }
                                     if alerts_v.is_none() {
-                                        Awaiting { label: "NEEDS ATTENTION".to_string(), loading: alerts_loading, tone: "coral".to_string() }
+                                        Awaiting { label: "NEEDS ATTENTION".to_string(), loading: alerts_loading, error: alerts_err.clone(), tone: "coral".to_string() }
                                     } else if alert_list.is_empty() {
                                         div { class: "dim", style: "font-size:11px;padding:6px 0", "Nothing needs attention." }
                                     } else {
@@ -1050,7 +1063,7 @@ pub fn DashboardPage() -> Element {
                                         span { class: "dim", "{monthly_total_str}" }
                                     }
                                     if !recurring_ok {
-                                        Awaiting { label: "RECURRING".to_string(), loading: recurring_loading }
+                                        Awaiting { label: "RECURRING".to_string(), loading: recurring_loading, error: recurring_err.clone() }
                                     } else if recurring_list.is_empty() {
                                         div { class: "dim", style: "font-size:11px;padding:6px 0", "No recurring charges." }
                                     } else {
@@ -1066,7 +1079,7 @@ pub fn DashboardPage() -> Element {
                                             "{insight_head}"
                                         }
                                         if insight_v.is_none() {
-                                            Awaiting { label: "INSIGHT".to_string(), loading: insight_loading }
+                                            Awaiting { label: "INSIGHT".to_string(), loading: insight_loading, error: insight_err.clone() }
                                         } else {
                                             div { class: "q",
                                                 {

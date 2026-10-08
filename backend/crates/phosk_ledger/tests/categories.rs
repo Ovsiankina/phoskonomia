@@ -102,15 +102,16 @@ async fn category_spend_full_ranking_is_exact() {
         .await
         .expect("category_spend ok");
 
-    // (category, total_centimes, txns) in the expected rank order.
+    // (category, total_centimes, txns) in the expected rank order. Item-level:
+    // t1's 560 c flat-white line counts under Coffee & snacks, not Groceries.
     let expected = [
         ("Rent", 168_000_i64, 1_u32),
         ("Health insurance", 31_800, 1),
-        ("Groceries", 13_095, 3),
         ("Shopping", 12_990, 1),
+        ("Groceries", 12_535, 3),
         ("Going out", 6_450, 1),
         ("Transport", 3_400, 1),
-        ("Coffee & snacks", 1_280, 1),
+        ("Coffee & snacks", 1_840, 2),
     ];
     assert_eq!(
         rows.len(),
@@ -137,8 +138,9 @@ async fn category_spend_is_sorted_non_increasing() {
     );
 }
 
-/// Groceries spans three receipts (t1 5_875 + t3 4_230 + t6 2_990); they are
-/// aggregated into ONE row, not listed separately, with a count of 3.
+/// Groceries spans three receipts (t1's grocery lines 5_315 + t3 4_230 + t6
+/// 2_990); they are aggregated into ONE row, not listed separately, with a
+/// count of 3.
 #[tokio::test]
 async fn category_spend_aggregates_repeat_category_receipts() {
     let db = seeded();
@@ -153,13 +155,13 @@ async fn category_spend_aggregates_repeat_category_receipts() {
     let groceries = find(&rows, "Groceries");
     assert_eq!(
         groceries.total.centimes(),
-        13_095,
+        12_535,
         "3 grocery receipts summed"
     );
     assert_eq!(groceries.txns, 3, "three grocery receipts counted");
 }
 
-/// A single-receipt category (Coffee & snacks: only t5) carries txns == 1 and the
+/// A single-receipt category (Shopping: only t4) carries txns == 1 and the
 /// receipt's exact amount.
 #[tokio::test]
 async fn category_spend_single_receipt_category_is_exact() {
@@ -167,13 +169,27 @@ async fn category_spend_single_receipt_category_is_exact() {
     let rows = category_spend(&db, as_of())
         .await
         .expect("category_spend ok");
+    let shopping = find(&rows, "Shopping");
+    assert_eq!(shopping.total.centimes(), 12_990, "lone t4 amount");
+    assert_eq!(shopping.txns, 1, "one Shopping receipt");
+}
+
+/// A receipt's lines count under their own category: Coffee & snacks holds
+/// t5 (1_280) and t1's flat-white line (560), so two receipts add to it.
+#[tokio::test]
+async fn category_spend_counts_lines_under_their_own_category() {
+    let db = seeded();
+    let rows = category_spend(&db, as_of())
+        .await
+        .expect("category_spend ok");
     let coffee = find(&rows, "Coffee & snacks");
-    assert_eq!(coffee.total.centimes(), 1_280, "lone t5 amount");
-    assert_eq!(coffee.txns, 1, "one Coffee & snacks receipt");
+    assert_eq!(coffee.total.centimes(), 1_280 + 560);
+    assert_eq!(coffee.txns, 2, "t5 and t1's line");
 }
 
 /// The per-category totals sum to the June receipt total (CHF 2370.15), and the
-/// counts sum to the nine seeded receipts — the roll-up is exhaustive and lossless.
+/// counts sum to the nine seeded receipts plus t1's second category share —
+/// the roll-up is exhaustive and lossless.
 #[tokio::test]
 async fn category_spend_totals_and_counts_are_exhaustive() {
     let db = seeded();
@@ -188,8 +204,11 @@ async fn category_spend_totals_and_counts_are_exhaustive() {
         "category totals sum to CHF 2370.15"
     );
 
-    let receipts: u32 = rows.iter().map(|r| r.txns).sum();
-    assert_eq!(receipts, 9, "counts sum to the nine June receipts");
+    let shares: u32 = rows.iter().map(|r| r.txns).sum();
+    assert_eq!(
+        shares, 10,
+        "nine June receipts, t1 split over two categories"
+    );
 }
 
 /// The fixed standing charges (Rent, Health insurance) are present in the spend
@@ -685,7 +704,7 @@ async fn delete_category_refuses_while_the_category_is_used() {
     let rows = category_spend(&db, as_of()).await.expect("spend ok");
     assert_eq!(
         find(&rows, "Groceries").total.centimes(),
-        13_095,
+        12_535,
         "its spend is intact"
     );
 }

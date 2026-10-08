@@ -405,6 +405,18 @@ impl DatabaseAdapter for MemoryDb {
             .collect())
     }
 
+    async fn line_items_for(&self, receipts: &[ReceiptId]) -> Result<Vec<LineItem>, PhoskError> {
+        let lines = lock(&self.line_items)?;
+        let mut seen = std::collections::HashSet::with_capacity(receipts.len());
+        let mut out = Vec::new();
+        for &id in receipts {
+            if seen.insert(id) {
+                out.extend(lines.iter().filter(|l| l.receipt_id == id).cloned());
+            }
+        }
+        Ok(out)
+    }
+
     async fn all_receipts(&self) -> Result<Vec<Receipt>, PhoskError> {
         Ok(lock(&self.receipts)?.clone())
     }

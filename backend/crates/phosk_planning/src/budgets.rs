@@ -14,8 +14,12 @@
 //!
 //! Let `S` = current-cycle spend-to-date `[start, as_of]`, `cap` = category cap,
 //! `N` = cycle length (days), `d` = day index. Per the build contract §5.2:
-//! - `spent` = Σ current-cycle receipts in this category.
-//! - `proj` (`projectedSpend`) = `S · N / d` (run-rate; checked centime math).
+//! - `spent` = Σ current-cycle spend in this category, item-level: a receipt's
+//!   lines count under their own category, a total-only receipt under its own
+//!   (`phosk_adapter_db::spend`).
+//! - `proj` (`projectedSpend`) = fixed spend + variable spend `· N / d`
+//!   ([`CycleWindow::project_spend`]): a fixed/standing charge (rent paid on
+//!   day 1) is carried over as is, never run-rated; only the rest is projected.
 //! - `remaining` = `cap − spent` (signed); `0` for an uncapped envelope, which
 //!   has nothing to run out of.
 //! - `usedPct` = `round(100 · spent / cap)` (0 when cap is 0/unlimited).
@@ -48,6 +52,7 @@ use chrono::{Datelike, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_db::spend::{self, CategoryPart};
 use phosk_core::cycle::{CycleWindow, Period};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
@@ -207,10 +212,11 @@ pub async fn categories(
     let window = Period::Month.resolve(as_of)?;
     let caps = db.category_caps().await?;
     let receipts = receipts_to_date(db, window).await?;
+    let parts = spend::receipt_parts(db, &receipts).await?;
     let prior = prior_cycles(db, window).await?;
     let mut out = Vec::with_capacity(caps.len());
     for cap in &caps {
-        out.push(envelope_for(db, cap, &receipts, &prior, window).await?);
+        out.push(envelope_for(db, cap, &caps, &parts, &prior, window).await?);
     }
     Ok(out)
 }
@@ -245,12 +251,13 @@ pub async fn category_history(
     history_for(db, name, &prior, window).await
 }
 
-/// The settled cycles a derived history covers, and their receipts.
+/// The settled cycles a derived history covers, and their spend.
 struct PriorCycles {
     /// Cycle starts, oldest → newest, from the first month with any receipt.
     starts: Vec<NaiveDate>,
-    /// Every receipt in those cycles.
-    receipts: Vec<Receipt>,
+    /// Every item-level share in those cycles: `(cycle start, category,
+    /// amount)`, see [`spend::split_receipt`].
+    parts: Vec<(Option<NaiveDate>, String, Money)>,
 }
 
 /// Read the receipts of the [`DERIVED_HISTORY_CYCLES`] months before `window`
@@ -272,7 +279,7 @@ async fn prior_cycles(
     let (Some(&first), Some(last_day)) = (starts.first(), window.start.pred_opt()) else {
         return Ok(PriorCycles {
             starts: Vec::new(),
-            receipts: Vec::new(),
+            parts: Vec::new(),
         });
     };
     let receipts = db.receipts_between(first, last_day).await?;
@@ -280,9 +287,14 @@ async fn prior_cycles(
         .iter()
         .position(|s| receipts.iter().any(|r| month_start(r.date) == Some(*s)))
         .map_or_else(Vec::new, |i| starts[i..].to_vec());
+    let parts = spend::receipt_parts(db, &receipts)
+        .await?
+        .into_iter()
+        .map(|p| (month_start(p.receipt.date), p.category, p.amount))
+        .collect();
     Ok(PriorCycles {
         starts: active,
-        receipts,
+        parts,
     })
 }
 
@@ -314,10 +326,10 @@ async fn history_for(
         .map(|&start| {
             let spent = Money::sum(
                 prior
-                    .receipts
+                    .parts
                     .iter()
-                    .filter(|r| r.category == name && month_start(r.date) == Some(start))
-                    .map(|r| r.amount),
+                    .filter(|(cycle, category, _)| category == name && *cycle == Some(start))
+                    .map(|(_, _, amount)| *amount),
             )?;
             Ok(CycleSpend {
                 cycle_start: start,
@@ -340,18 +352,20 @@ async fn receipts_to_date(
     db.receipts_between(window.start, window.as_of).await
 }
 
-/// Build one envelope DTO from its cap and the current-cycle receipts.
+/// Build one envelope DTO from its cap and the current-cycle receipt shares
+/// (one per receipt and category, see [`spend::split_receipt`]).
 async fn envelope_for(
     db: &dyn DatabaseAdapter,
     cap: &CategoryCap,
-    receipts: &[Receipt],
+    caps: &[CategoryCap],
+    parts: &[CategoryPart<'_>],
     prior: &PriorCycles,
     window: CycleWindow,
 ) -> Result<CategoryDto, PhoskError> {
-    let in_cat: Vec<&Receipt> = receipts.iter().filter(|r| r.category == cap.name).collect();
-    let spent = Money::sum(in_cat.iter().map(|r| r.amount))?;
+    let in_cat: Vec<&CategoryPart<'_>> = parts.iter().filter(|p| p.category == cap.name).collect();
+    let spent = Money::sum(in_cat.iter().map(|p| p.amount))?;
     let cap_money = cap.cap.unwrap_or(Money::ZERO);
-    let proj = project_run_rate(spent, window)?;
+    let proj = project_parts(in_cat.iter().copied(), caps, window)?;
     // An uncapped envelope has nothing to run out of: never negative.
     let remaining = match cap.cap {
         Some(c) => c.checked_sub(spent)?,
@@ -361,7 +375,7 @@ async fn envelope_for(
     let hist = history_for(db, &cap.name, prior, window).await?;
     let hist_series: Vec<f64> = hist.iter().map(|h| h.spent.as_chf_f64()).collect();
     let hist_labels: Vec<String> = hist.iter().map(|h| month_label(h.cycle_start)).collect();
-    let spark: Vec<f64> = in_cat.iter().map(|r| r.amount.as_chf_f64()).collect();
+    let spark: Vec<f64> = in_cat.iter().map(|p| p.amount.as_chf_f64()).collect();
     Ok(CategoryDto {
         name: cap.name.clone(),
         budget: cap_money,
@@ -465,15 +479,15 @@ pub async fn category_detail(
 ) -> Result<CategoryDetailDto, PhoskError> {
     // `category_cap_by_name` surfaces `NotFound` for an unknown channel.
     let cap = db.category_cap_by_name(name).await?;
+    let caps = db.category_caps().await?;
     let window = Period::Month.resolve(as_of)?;
     let receipts = receipts_to_date(db, window).await?;
-    let spent = Money::sum(
-        receipts
-            .iter()
-            .filter(|r| r.category == cap.name)
-            .map(|r| r.amount),
+    let parts = spend::receipt_parts(db, &receipts).await?;
+    let projected_spend = project_parts(
+        parts.iter().filter(|p| p.category == cap.name),
+        &caps,
+        window,
     )?;
-    let projected_spend = project_run_rate(spent, window)?;
     // Only a real cap can be overshot.
     let over_cap_amount = match cap.cap {
         Some(c) => projected_spend.checked_sub(c)?.max(Money::ZERO),
@@ -507,22 +521,26 @@ pub async fn category_transactions(
     // Surface `NotFound` for an unknown channel before listing anything.
     let cap = db.category_cap_by_name(name).await?;
     let window = Period::Month.resolve(as_of)?;
-    let mut rows: Vec<&Receipt> = Vec::new();
     let receipts = receipts_to_date(db, window).await?;
-    for r in &receipts {
-        if r.category == cap.name {
-            rows.push(r);
-        }
-    }
+    // Every receipt with a share in this channel, at that share: viewing
+    // Health lists a Migros receipt with just its toothpaste line's amount.
+    let parts = spend::receipt_parts(db, &receipts).await?;
+    let mut rows: Vec<&CategoryPart<'_>> =
+        parts.iter().filter(|p| p.category == cap.name).collect();
     // Newest first; ties broken by slug for a stable order.
-    rows.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.slug.cmp(&b.slug)));
+    rows.sort_by(|a, b| {
+        b.receipt
+            .date
+            .cmp(&a.receipt.date)
+            .then_with(|| a.receipt.slug.cmp(&b.receipt.slug))
+    });
     Ok(rows
         .into_iter()
-        .map(|r| CategoryTxnDto {
-            id: r.slug.clone(),
-            date: date_label(r.date),
-            shop: r.shop.clone(),
-            amount: r.amount,
+        .map(|p| CategoryTxnDto {
+            id: p.receipt.slug.clone(),
+            date: date_label(p.receipt.date),
+            shop: p.receipt.shop.clone(),
+            amount: p.amount,
         })
         .collect())
 }
@@ -545,22 +563,18 @@ pub async fn set_cap(
 
 // ── derived-field helpers ───────────────────────────────────────────────────────
 
-/// Run-rate projection: `spent · N / d` (checked integer-centime math). Returns
-/// `spent` unchanged when the window's day index is `0` (never divides by zero).
+/// End-of-cycle projection of some spend shares: the fixed ones as they are,
+/// the rest run-rated ([`CycleWindow::project_spend`]).
 ///
 /// # Errors
-/// [`PhoskError::Overflow`] if the scaled multiplication overflows i64.
-fn project_run_rate(spent: Money, window: CycleWindow) -> Result<Money, PhoskError> {
-    let day_index = i64::from(window.day_index());
-    if day_index == 0 {
-        return Ok(spent);
-    }
-    let len_days = i64::from(window.len_days());
-    let scaled = spent
-        .centimes()
-        .checked_mul(len_days)
-        .ok_or_else(|| PhoskError::Overflow(format!("projecting {spent} over {len_days} days")))?;
-    Ok(Money::from_centimes(scaled / day_index))
+/// [`PhoskError::Overflow`] if a step overflows i64 centimes.
+fn project_parts<'p, 'a: 'p>(
+    parts: impl IntoIterator<Item = &'p CategoryPart<'a>>,
+    caps: &[CategoryCap],
+    window: CycleWindow,
+) -> Result<Money, PhoskError> {
+    let (fixed, variable) = spend::fixed_and_variable(parts, caps)?;
+    window.project_spend(fixed, variable)
 }
 
 /// `round(100 · spent / cap)` as an integer percent; `0` when `cap` is `0`.

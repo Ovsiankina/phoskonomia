@@ -45,24 +45,30 @@
 //! | t8      | 06-01  | Rent (fixed)     |    168_000 |
 //! | t9      | 06-01  | Health insurance |     31_800 |
 //!
-//! Per-category spend-to-date (centimes), and `proj = spent * 30 / 18`
-//! (integer-centime run-rate; day_index 18, N 30):
+//! Spend is **item-level**: t1 (Migros, filed under Groceries) carries an
+//! "Oat-milk flat white" line of 560 c booked under Coffee & snacks, so that
+//! line counts there, not under Groceries. Receipts without lines (t4, t6–t9)
+//! count under their own category.
 //!
-//! | category         | cap (c) | spent (c) | items | proj = spent*30/18 (c) |
-//! |------------------|--------:|----------:|------:|-----------------------:|
-//! | Groceries        |  80_000 |    13_095 |     3 |   13_095*30/18 = 21_825 |
+//! Per-category spend-to-date (centimes), and `proj = spent * 30 / 18`
+//! (integer-centime run-rate; day_index 18, N 30) for a variable channel;
+//! a fixed channel (Rent, Health insurance) is not run-rated: `proj = spent`.
+//!
+//! | category         | cap (c) | spent (c) | items | proj (c)                |
+//! |------------------|--------:|----------:|------:|------------------------:|
+//! | Groceries        |  80_000 |    12_535 |     3 |   12_535*30/18 = 20_891 |
 //! | Going out        |  40_000 |     6_450 |     1 |    6_450*30/18 = 10_750 |
-//! | Coffee & snacks  |  12_000 |     1_280 |     1 |    1_280*30/18 =  2_133 |
+//! | Coffee & snacks  |  12_000 |     1_840 |     2 |    1_840*30/18 =  3_066 |
 //! | Transport        |  18_000 |     3_400 |     1 |    3_400*30/18 =  5_666 |
-//! | Rent             | 168_000 |   168_000 |     1 |  168_000*30/18 = 280_000 |
-//! | Health insurance |  31_800 |    31_800 |     1 |   31_800*30/18 =  53_000 |
-//! | Shopping         |  50_000 |    12_990 |     1 |   12_990*30/18 =  21_650 |
+//! | Rent             | 168_000 |   168_000 |     1 |   fixed      = 168_000 |
+//! | Health insurance |  31_800 |    31_800 |     1 |   fixed      =  31_800 |
+//! | Shopping         |  50_000 |    12_990 |     1 |   12_990*30/18 = 21_650 |
 //! | Subscriptions    |  26_000 |         0 |     0 |                       0 |
 //!
 //! Totals: Σcaps (allocated) = 80+40+12+18+168+31.8+50+26 (×1000) = 425_800;
-//! Σspent = 13_095+6_450+1_280+3_400+168_000+31_800+12_990 = 237_015;
+//! Σspent = 12_535+6_450+1_840+3_400+168_000+31_800+12_990 = 237_015;
 //! budget = 420_000;
-//! Σproj = 21_825+10_750+2_133+5_666+280_000+53_000+21_650+0 = 395_024.
+//! Σproj = 20_891+10_750+3_066+5_666+168_000+31_800+21_650+0 = 261_823.
 //!
 //! `remaining` (totals) = budget − Σspent = 420_000 − 237_015 = 182_985.
 //! `overAllocated` = max(0, allocated − budget) = max(0, 425_800 − 420_000) = 5_800.
@@ -71,14 +77,14 @@
 //!
 //! Per-category `remaining = cap − spent` (signed) and
 //! `usedPct = round(100*spent/cap)`:
-//!   Groceries 80_000−13_095=66_905, round(100*13_095/80_000)=round(16.36)=16.
+//!   Groceries 80_000−12_535=67_465, round(100*12_535/80_000)=round(15.67)=16.
 //!   Rent 0 remaining, 100%. Subscriptions 26_000 remaining, 0%.
 //!
 //! `histAvg` (detail) = trailing-N=3 average of the prior-cycle spends in
 //! `seed_budget_history` (excludes the current cycle). Groceries prior spends
 //! (CHF) [720,690,810,740,760,880] → last 3 = [740,760,880] CHF =
 //! [74_000,76_000,88_000] c, avg = 238_000/3 = 79_333 c (integer division).
-//! `overCapAmount` (detail) = max(0, proj − cap); Groceries max(0,21_825−80_000)=0.
+//! `overCapAmount` (detail) = max(0, proj − cap); Groceries max(0,20_891−80_000)=0.
 
 use chrono::NaiveDate;
 
@@ -152,10 +158,12 @@ async fn categories_carry_the_seeded_caps_as_budget() {
 #[tokio::test]
 async fn categories_spend_to_date_is_summed_from_receipts() {
     let cats = categories(&seeded(), as_of()).await.expect("categories ok");
-    // Groceries = t1 5_875 + t3 4_230 + t6 2_990 = 13_095.
-    assert_eq!(find(&cats, "Groceries").spent.centimes(), 13_095);
+    // Groceries = t1's grocery lines 5_315 (5_875 less its 560 flat white)
+    // + t3 4_230 + t6 2_990 = 12_535.
+    assert_eq!(find(&cats, "Groceries").spent.centimes(), 12_535);
     assert_eq!(find(&cats, "Going out").spent.centimes(), 6_450);
-    assert_eq!(find(&cats, "Coffee & snacks").spent.centimes(), 1_280);
+    // Coffee & snacks = t5 1_280 + t1's flat white line 560.
+    assert_eq!(find(&cats, "Coffee & snacks").spent.centimes(), 1_840);
     assert_eq!(find(&cats, "Transport").spent.centimes(), 3_400);
     assert_eq!(find(&cats, "Rent").spent.centimes(), 168_000);
     assert_eq!(find(&cats, "Health insurance").spent.centimes(), 31_800);
@@ -168,6 +176,7 @@ async fn categories_spend_to_date_is_summed_from_receipts() {
 async fn categories_item_counts_are_receipt_counts_this_cycle() {
     let cats = categories(&seeded(), as_of()).await.expect("categories ok");
     assert_eq!(find(&cats, "Groceries").items, 3, "t1/t3/t6");
+    assert_eq!(find(&cats, "Coffee & snacks").items, 2, "t5 + t1's line");
     assert_eq!(find(&cats, "Going out").items, 1);
     assert_eq!(find(&cats, "Shopping").items, 1);
     assert_eq!(find(&cats, "Subscriptions").items, 0, "empty envelope");
@@ -177,15 +186,18 @@ async fn categories_item_counts_are_receipt_counts_this_cycle() {
 async fn categories_projection_is_run_rate_spent_times_n_over_d() {
     let cats = categories(&seeded(), as_of()).await.expect("categories ok");
     // proj = spent * 30 / 18 (integer-centime division).
-    assert_eq!(find(&cats, "Groceries").proj.centimes(), 13_095 * 30 / 18);
-    assert_eq!(find(&cats, "Groceries").proj.centimes(), 21_825);
+    assert_eq!(find(&cats, "Groceries").proj.centimes(), 12_535 * 30 / 18);
+    assert_eq!(find(&cats, "Groceries").proj.centimes(), 20_891);
     assert_eq!(find(&cats, "Going out").proj.centimes(), 6_450 * 30 / 18);
     assert_eq!(find(&cats, "Going out").proj.centimes(), 10_750);
     assert_eq!(
         find(&cats, "Coffee & snacks").proj.centimes(),
-        1_280 * 30 / 18
+        1_840 * 30 / 18
     );
     assert_eq!(find(&cats, "Transport").proj.centimes(), 3_400 * 30 / 18);
+    // A fixed charge paid on day 1 is the month's charge: not run-rated.
+    assert_eq!(find(&cats, "Rent").proj.centimes(), 168_000);
+    assert_eq!(find(&cats, "Health insurance").proj.centimes(), 31_800);
     // Empty envelope projects to zero, never divides by anything bad.
     assert_eq!(find(&cats, "Subscriptions").proj.centimes(), 0);
 }
@@ -195,9 +207,9 @@ async fn categories_remaining_is_cap_minus_spent_signed() {
     let cats = categories(&seeded(), as_of()).await.expect("categories ok");
     assert_eq!(
         find(&cats, "Groceries").remaining.centimes(),
-        80_000 - 13_095
+        80_000 - 12_535
     );
-    assert_eq!(find(&cats, "Groceries").remaining.centimes(), 66_905);
+    assert_eq!(find(&cats, "Groceries").remaining.centimes(), 67_465);
     // Fixed full-cap charge → exactly zero remaining.
     assert_eq!(find(&cats, "Rent").remaining.centimes(), 0);
     // Untouched envelope → full cap remaining.
@@ -207,7 +219,7 @@ async fn categories_remaining_is_cap_minus_spent_signed() {
 #[tokio::test]
 async fn categories_used_pct_is_rounded_percent_of_cap() {
     let cats = categories(&seeded(), as_of()).await.expect("categories ok");
-    // round(100*13_095/80_000) = round(16.369) = 16.
+    // round(100*12_535/80_000) = round(15.669) = 16.
     assert_eq!(find(&cats, "Groceries").used_pct, 16);
     // Fixed full charge → 100%.
     assert_eq!(find(&cats, "Rent").used_pct, 100);
@@ -249,7 +261,8 @@ async fn budget_totals_spent_is_sum_of_all_receipts_to_date() {
     let t = budget_totals(&seeded(), as_of())
         .await
         .expect("budget totals ok");
-    // 13_095+6_450+1_280+3_400+168_000+31_800+12_990 = 237_015.
+    // 12_535+6_450+1_840+3_400+168_000+31_800+12_990 = 237_015 (moving a
+    // line between categories does not change the cycle total).
     assert_eq!(t.spent.centimes(), 237_015);
 }
 
@@ -258,16 +271,17 @@ async fn budget_totals_projected_is_sum_of_per_category_projections() {
     let t = budget_totals(&seeded(), as_of())
         .await
         .expect("budget totals ok");
-    // Σ proj = 21_825+10_750+2_133+5_666+280_000+53_000+21_650+0 = 395_024.
-    let expected = (13_095 * 30 / 18)
+    // Σ proj = 20_891+10_750+3_066+5_666+168_000+31_800+21_650+0 = 261_823:
+    // the fixed rent and health insurance count once, as paid.
+    let expected = (12_535 * 30 / 18)
         + (6_450 * 30 / 18)
-        + (1_280 * 30 / 18)
+        + (1_840 * 30 / 18)
         + (3_400 * 30 / 18)
-        + (168_000 * 30 / 18)
-        + (31_800 * 30 / 18)
+        + 168_000
+        + 31_800
         + (12_990 * 30 / 18);
     assert_eq!(t.projected.centimes(), expected);
-    assert_eq!(t.projected.centimes(), 395_024);
+    assert_eq!(t.projected.centimes(), 261_823);
 }
 
 #[tokio::test]
@@ -392,8 +406,8 @@ async fn category_detail_projected_spend_is_run_rate() {
     let d = category_detail(&seeded(), as_of(), "Groceries")
         .await
         .expect("detail ok");
-    // proj = 13_095 * 30 / 18 = 21_825.
-    assert_eq!(d.projected_spend.centimes(), 21_825);
+    // proj = 12_535 * 30 / 18 = 20_891.
+    assert_eq!(d.projected_spend.centimes(), 20_891);
 }
 
 #[tokio::test]
@@ -412,20 +426,20 @@ async fn category_detail_over_cap_amount_is_zero_when_proj_under_cap() {
     let d = category_detail(&seeded(), as_of(), "Groceries")
         .await
         .expect("detail ok");
-    // max(0, proj 21_825 − cap 80_000) = 0.
+    // max(0, proj 20_891 − cap 80_000) = 0.
     assert_eq!(d.over_cap_amount.centimes(), 0);
 }
 
 #[tokio::test]
 async fn category_detail_over_cap_amount_for_fixed_full_cap_charge() {
-    // Rent: spent 168_000 == cap, proj = 168_000*30/18 = 280_000 > cap ⇒
-    // overCap = max(0, 280_000 − 168_000) = 112_000.
+    // Rent: spent 168_000 == cap, paid on day 1. A fixed charge is not
+    // run-rated (it used to project to 168_000*30/18 = 280_000 and report a
+    // phantom 112_000 overshoot): proj = 168_000, overCap = 0.
     let d = category_detail(&seeded(), as_of(), "Rent")
         .await
         .expect("detail ok");
-    assert_eq!(d.projected_spend.centimes(), 168_000 * 30 / 18);
-    assert_eq!(d.over_cap_amount.centimes(), 280_000 - 168_000);
-    assert_eq!(d.over_cap_amount.centimes(), 112_000);
+    assert_eq!(d.projected_spend.centimes(), 168_000);
+    assert_eq!(d.over_cap_amount.centimes(), 0);
 }
 
 #[tokio::test]
@@ -442,7 +456,7 @@ async fn category_detail_serializes_money_as_centimes() {
         .await
         .expect("detail ok");
     let v = serde_json::to_value(&d).expect("serialize");
-    assert_eq!(v["projectedSpend"], serde_json::json!(21_825));
+    assert_eq!(v["projectedSpend"], serde_json::json!(20_891));
     assert_eq!(v["histAvg"], serde_json::json!(79_333));
     assert_eq!(v["overCapAmount"], serde_json::json!(0));
     let back: CategoryDetailDto = serde_json::from_value(v).expect("deserialize");
@@ -471,7 +485,8 @@ async fn category_transactions_lists_this_cycle_receipts_newest_first() {
     assert_eq!(rows.len(), 3, "three Groceries receipts this cycle");
     // Newest first.
     assert_eq!(rows[0].shop, "Migros", "t1 06-16 is newest");
-    assert_eq!(rows[0].amount.centimes(), 5_875);
+    // Only t1's grocery share: its 560 c flat white is Coffee & snacks.
+    assert_eq!(rows[0].amount.centimes(), 5_315);
     assert_eq!(rows[1].shop, "Coop", "t3 06-13");
     assert_eq!(rows[1].amount.centimes(), 4_230);
     assert_eq!(rows[2].shop, "Denner", "t6 06-09 is oldest");
@@ -579,9 +594,9 @@ async fn category_dto_serializes_money_fields_as_centimes() {
     let groc = find(&cats, "Groceries").clone();
     let v = serde_json::to_value(&groc).expect("serialize");
     assert_eq!(v["budget"], serde_json::json!(80_000));
-    assert_eq!(v["spent"], serde_json::json!(13_095));
-    assert_eq!(v["proj"], serde_json::json!(21_825));
-    assert_eq!(v["remaining"], serde_json::json!(66_905));
+    assert_eq!(v["spent"], serde_json::json!(12_535));
+    assert_eq!(v["proj"], serde_json::json!(20_891));
+    assert_eq!(v["remaining"], serde_json::json!(67_465));
     assert_eq!(v["usedPct"], serde_json::json!(16));
     let back: CategoryDto = serde_json::from_value(v).expect("deserialize");
     assert_eq!(back, groc);
@@ -744,4 +759,169 @@ async fn budget_totals_carry_the_savings_target() {
         .expect("totals ok");
     assert_eq!(t.budget, Money::ZERO, "not set yet");
     assert_eq!(t.savings_target, Money::ZERO);
+}
+
+// ── item-level spend + fixed charges (real-use store) ───────────────────────
+
+/// Record a receipt filed under `category` with `lines` of `(name, line
+/// category, centimes)`; its amount is the lines' sum.
+async fn receipt_with_lines(
+    db: &MemoryDb,
+    date: NaiveDate,
+    shop: &str,
+    category: &str,
+    lines: &[(&str, &str, i64)],
+) {
+    use phosk_id::{LineItemId, ReceiptId};
+    use phosk_model::{LineItem, Provenance, Receipt};
+
+    let id = ReceiptId::new();
+    let rows: Vec<LineItem> = lines
+        .iter()
+        .map(|(name, cat, c)| LineItem {
+            id: LineItemId::new(),
+            receipt_id: id,
+            name: (*name).to_owned(),
+            qty: 1.0,
+            unit_price: Money::from_centimes(*c),
+            line_total: Money::from_centimes(*c),
+            category: (*cat).to_owned(),
+            signal_id: None,
+            provenance: Provenance::user_entered(),
+        })
+        .collect();
+    let amount: i64 = lines.iter().map(|(_, _, c)| c).sum();
+    db.insert_receipt(
+        Receipt {
+            id,
+            slug: format!("r-{shop}-{date}"),
+            shop: shop.to_owned(),
+            date,
+            category: category.to_owned(),
+            amount: Money::from_centimes(amount),
+            fixed: false,
+            provenance: Provenance::user_entered(),
+            source_kind: "PHOTO".to_owned(),
+            ocr_engine: String::new(),
+            ocr_regions: 0,
+        },
+        rows,
+    )
+    .await
+    .expect("receipt inserted");
+}
+
+/// The live-run case: a Migros receipt filed under Groceries whose toothpaste
+/// line is categorised Health. Budgets count the toothpaste under Health and
+/// only the grocery lines under Groceries; a total-only entry still counts
+/// under its own category.
+#[tokio::test]
+async fn a_mixed_receipt_splits_its_spend_by_line_category() {
+    let db = starter_store().await;
+    db.insert_category(phosk_model::CategoryCap {
+        id: phosk_id::CategoryId::new(),
+        slug: "health".to_owned(),
+        name: "Health".to_owned(),
+        cap: Some(Money::from_centimes(10_000)),
+        fixed: false,
+        glyph: String::new(),
+        note: String::new(),
+        provenance: phosk_model::Provenance::user_entered(),
+    })
+    .await
+    .expect("category inserted");
+    receipt_with_lines(
+        &db,
+        naive(2026, 6, 12),
+        "Migros",
+        "Groceries",
+        &[
+            ("Milk", "Groceries", 195),
+            ("Bread", "Groceries", 350),
+            ("Toothpaste", "Health", 495),
+            ("Apples", "Groceries", 420),
+            ("Pasta", "Groceries", 240),
+            ("Cheese", "Groceries", 780),
+            ("Tomatoes", "Groceries", 310),
+        ],
+    )
+    .await;
+    // A manual total-only entry.
+    spend(&db, naive(2026, 6, 14), "Groceries", 1_000).await;
+
+    let cats = categories(&db, as_of()).await.expect("categories ok");
+    let groceries = find(&cats, "Groceries");
+    assert_eq!(
+        groceries.spent.centimes(),
+        195 + 350 + 420 + 240 + 780 + 310 + 1_000
+    );
+    assert_eq!(groceries.items, 2, "the Migros receipt + the manual entry");
+    let health = find(&cats, "Health");
+    assert_eq!(health.spent.centimes(), 495);
+    assert_eq!(health.items, 1);
+
+    // The Health channel lists the Migros receipt at its Health share.
+    let rows = category_transactions(&db, as_of(), "Health")
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].shop, "Migros");
+    assert_eq!(rows[0].amount.centimes(), 495);
+
+    let d = category_detail(&db, as_of(), "Health")
+        .await
+        .expect("detail ok");
+    assert_eq!(d.projected_spend.centimes(), 495 * 30 / 18);
+
+    // The cycle total is unchanged by the split.
+    let t = budget_totals(&db, as_of()).await.expect("totals ok");
+    assert_eq!(t.spent.centimes(), 2_295 + 495 + 1_000);
+}
+
+/// Derived history is item-level too: last month's toothpaste line counts
+/// under Health in May's bar.
+#[tokio::test]
+async fn derived_history_counts_lines_under_their_category() {
+    let db = starter_store().await;
+    receipt_with_lines(
+        &db,
+        naive(2026, 5, 20),
+        "Migros",
+        "Groceries",
+        &[("Toothpaste", "Dining", 495), ("Milk", "Groceries", 195)],
+    )
+    .await;
+    let cats = categories(&db, as_of()).await.expect("categories ok");
+    assert_eq!(find(&cats, "Groceries").hist, vec![1.95]);
+    assert_eq!(find(&cats, "Dining").hist, vec![4.95]);
+}
+
+/// Rent paid on day 1 is the month's rent: the envelope projects it as paid,
+/// while the day's groceries run at ×30.
+#[tokio::test]
+async fn a_day_one_fixed_charge_is_not_projected() {
+    let db = starter_store().await;
+    db.insert_category(phosk_model::CategoryCap {
+        id: phosk_id::CategoryId::new(),
+        slug: "rent".to_owned(),
+        name: "Rent".to_owned(),
+        cap: Some(Money::from_centimes(168_000)),
+        fixed: true,
+        glyph: String::new(),
+        note: String::new(),
+        provenance: phosk_model::Provenance::user_entered(),
+    })
+    .await
+    .expect("category inserted");
+    let day1 = naive(2026, 6, 1);
+    spend(&db, day1, "Rent", 168_000).await;
+    spend(&db, day1, "Groceries", 3_000).await;
+
+    let cats = categories(&db, day1).await.expect("categories ok");
+    assert_eq!(find(&cats, "Rent").proj.centimes(), 168_000);
+    assert_eq!(find(&cats, "Groceries").proj.centimes(), 90_000);
+    let d = category_detail(&db, day1, "Rent").await.expect("detail ok");
+    assert_eq!(d.over_cap_amount, Money::ZERO, "no phantom overshoot");
+    let t = budget_totals(&db, day1).await.expect("totals ok");
+    assert_eq!(t.projected.centimes(), 168_000 + 90_000);
 }

@@ -199,8 +199,10 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
     };
     let cx = |i: usize| pad_l + slot * (i as f64 + 0.5);
 
-    // Budget line: prefer first point's budget; fall back to max spend.
-    let budget_line = data.first().map_or(0.0, |d| money_chf(d.budget));
+    // Budget line: prefer first point's budget; fall back to max spend. The
+    // exact `Money` is what the legend prints; the f64 only places the line.
+    let budget = data.first().map_or(Money::ZERO, |d| d.budget);
+    let budget_line = money_chf(budget);
     let max_y = if is_rate {
         let m = data.iter().map(|d| d.rate).fold(0.0001_f64, f64::max);
         m * 1.25
@@ -329,10 +331,10 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
                             i { class: "k spend" }
                             " SPEND"
                         }
-                        if budget_line > 0.0 {
+                        if budget > Money::ZERO {
                             span {
                                 i { class: "k bud" }
-                                " BUDGET {num(Some(Money::from_centimes((budget_line * 100.0) as i64)))}"
+                                " BUDGET {num(Some(budget))}"
                             }
                         }
                     }
@@ -1398,7 +1400,7 @@ pub fn AnalyticsPage() -> Element {
                                 Awaiting {
                                     label: "SPEND TREND".to_string(),
                                     loading: history_loading,
-                                    message: history_err.clone(),
+                                    error: history_err.clone(),
                                     tone: "blue".to_string(),
                                 }
                             }
@@ -1470,7 +1472,7 @@ pub fn AnalyticsPage() -> Element {
                                 Awaiting {
                                     label: "ITEM-SIGNALS".to_string(),
                                     loading: signals_loading,
-                                    message: signals_err.clone(),
+                                    error: signals_err.clone(),
                                     tone: "blue".to_string(),
                                 }
                             }
@@ -1489,7 +1491,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "FASTEST RISER".to_string(),
                                         loading: movers_loading,
-                                        message: movers_err.clone(),
+                                        error: movers_err.clone(),
                                         tone: "coral".to_string(),
                                     }
                                 }
@@ -1505,7 +1507,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "FASTEST FALLER".to_string(),
                                         loading: movers_loading,
-                                        message: movers_err.clone(),
+                                        error: movers_err.clone(),
                                         tone: "blue".to_string(),
                                     }
                                 }
@@ -1564,7 +1566,7 @@ pub fn AnalyticsPage() -> Element {
                                         Awaiting {
                                             label: "READ".to_string(),
                                             loading: insights_loading,
-                                            message: insights_err.clone(),
+                                            error: insights_err.clone(),
                                             tone: "blue".to_string(),
                                         }
                                     }
@@ -1595,7 +1597,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "CATEGORY MOMENTUM".to_string(),
                                         loading: momentum_loading,
-                                        message: momentum_err.clone(),
+                                        error: momentum_err.clone(),
                                         tone: "blue".to_string(),
                                     }
                                 }
@@ -1620,7 +1622,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "SPENDING RHYTHM".to_string(),
                                         loading: rhythm_loading,
-                                        message: rhythm_err.clone(),
+                                        error: rhythm_err.clone(),
                                         tone: "coral".to_string(),
                                     }
                                 }

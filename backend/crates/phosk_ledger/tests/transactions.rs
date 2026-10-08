@@ -548,9 +548,10 @@ async fn correct_line_category_succeeds() {
 
 // ══ categories ═══════════════════════════════════════════════════════════════════
 
-/// June category spend, ranked by total descending. Computed from the receipts:
-/// Rent 168000 > Health insurance 31800 > Groceries 13095 > Shopping 12990 >
-/// Going out 6450 > Transport 3400 > Coffee & snacks 1280.
+/// June category spend, ranked by total descending. Computed from the receipts
+/// at item level (t1's 560 flat-white line is Coffee & snacks):
+/// Rent 168000 > Health insurance 31800 > Shopping 12990 > Groceries 12535 >
+/// Going out 6450 > Transport 3400 > Coffee & snacks 1840.
 #[tokio::test]
 async fn category_spend_june_ranked_descending() {
     let db = seeded();
@@ -560,11 +561,11 @@ async fn category_spend_june_ranked_descending() {
     let expected: [(&str, i64, u32); 7] = [
         ("Rent", 168_000, 1),
         ("Health insurance", 31_800, 1),
-        ("Groceries", 13_095, 3),
         ("Shopping", 12_990, 1),
+        ("Groceries", 12_535, 3),
         ("Going out", 6_450, 1),
         ("Transport", 3_400, 1),
-        ("Coffee & snacks", 1_280, 1),
+        ("Coffee & snacks", 1_840, 2),
     ];
     assert_eq!(cats.len(), 7, "seven distinct June categories");
     for (got, (name, cents, txns)) in cats.iter().zip(expected) {
@@ -585,7 +586,11 @@ async fn category_spend_groceries_aggregates_three_receipts() {
         .iter()
         .find(|c| c.category == "Groceries")
         .expect("Groceries present");
-    assert_eq!(groceries.total.centimes(), 13_095);
+    assert_eq!(
+        groceries.total.centimes(),
+        12_535,
+        "t1's grocery lines + t3 + t6"
+    );
     assert_eq!(groceries.txns, 3, "three Groceries receipts aggregated");
     assert_eq!(
         cats.iter().filter(|c| c.category == "Groceries").count(),

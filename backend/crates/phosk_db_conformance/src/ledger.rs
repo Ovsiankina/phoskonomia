@@ -294,6 +294,53 @@ pub async fn line_items_keep_insertion_order(db: &dyn DatabaseAdapter) -> Outcom
     )
 }
 
+/// `line_items_for` reads several receipts' lines at once: per receipt in the
+/// order asked, each in insertion order (= `line_items`), an unknown id adds
+/// nothing and a repeated id adds its lines once. The item-level spend
+/// roll-ups (`phosk_adapter_db::spend`) stand on this.
+pub async fn line_items_for_reads_many_receipts_in_order(db: &dyn DatabaseAdapter) -> Outcome {
+    let (a, b) = (ReceiptId::new(), ReceiptId::new());
+    let a_lines: Vec<LineItem> = ["Milk", "Bread", "Toothpaste"]
+        .iter()
+        .map(|n| line(a, n, 300))
+        .collect();
+    let b_lines: Vec<LineItem> = ["Ticket", "Coffee"]
+        .iter()
+        .map(|n| line(b, n, 250))
+        .collect();
+    db.insert_receipt(
+        receipt(a, "conf-bulk-a", date(2027, 1, 10)?, 900),
+        a_lines.clone(),
+    )
+    .await?;
+    db.insert_receipt(
+        receipt(b, "conf-bulk-b", date(2027, 1, 11)?, 500),
+        b_lines.clone(),
+    )
+    .await?;
+    let lone = ReceiptId::new();
+    db.insert_receipt(
+        receipt(lone, "conf-bulk-none", date(2027, 1, 12)?, 700),
+        Vec::new(),
+    )
+    .await?;
+
+    let got = db
+        .line_items_for(&[b, ReceiptId::new(), a, lone, b])
+        .await?;
+    let want: Vec<LineItem> = b_lines.iter().chain(a_lines.iter()).cloned().collect();
+    ensure_eq(&got, &want, "lines of b then a, each in insertion order")?;
+    ensure_eq(
+        &db.line_items_for(&[a]).await?,
+        &db.line_items(a).await?,
+        "one receipt = line_items",
+    )?;
+    ensure(
+        db.line_items_for(&[]).await?.is_empty(),
+        "no receipts, no lines",
+    )
+}
+
 /// The audit log accepts events (it has no read path on the port) and is
 /// separate from the entity: recording an event does not apply the edit.
 pub async fn record_correction_accepts_events(db: &dyn DatabaseAdapter) -> Outcome {

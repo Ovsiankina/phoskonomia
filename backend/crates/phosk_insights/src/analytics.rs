@@ -20,6 +20,7 @@ use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_db::spend;
 use phosk_core::cycle::Period;
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
@@ -108,8 +109,8 @@ pub struct SpendStatsDto {
     pub cur_vs_avg_pct: i32,
     /// Signed percent vs the previous cycle.
     pub cur_vs_prev_pct: i32,
-    /// This cycle's spend projected to its end at the pace so far
-    /// (spend-to-date · N / d), exact i64 centimes.
+    /// This cycle's spend projected to its end at the pace so far: fixed
+    /// charges as paid, the rest `· N / d`, exact i64 centimes.
     #[serde(with = "phosk_model::money_centimes")]
     pub run_rate: Money,
     /// Signed percent of `runRate` vs `avg` (0 with no settled cycle).
@@ -257,7 +258,8 @@ pub async fn spend_history(
 /// last up-to-6 settled ones (`avgCycles`), `totalSaved` sums their savings and
 /// `peak`/`low` pick from them (falling back to `cur` when there is none yet).
 /// `cur`/`prev` are the last two history points; `runRate` projects the
-/// spend-to-date at `as_of` to the cycle end. `curVsAvgPct = pct_delta(cur,
+/// spend-to-date at `as_of` to the cycle end (fixed charges as paid, see
+/// `run_rate`). `curVsAvgPct = pct_delta(cur,
 /// avg)`, `runRateVsAvgPct = pct_delta(runRate, avg)` (both 0 without a settled
 /// cycle), `curVsPrevPct = pct_delta(cur, prev)` with
 /// `pct_delta(a,b) = round(100·(a−b)/b)` (0 when `b == 0`).
@@ -349,20 +351,22 @@ pub async fn spend_stats(
     })
 }
 
-/// The current cycle's spend-to-date at `as_of`, projected to its end:
-/// `S · N / d` (checked integer-centime math; `S` itself on day 0).
+/// The current cycle's spend-to-date at `as_of`, projected to its end: the
+/// fixed charges as paid plus the rest run-rated, `F + (S − F) · N / d`
+/// ([`CycleWindow::project_spend`](phosk_core::cycle::CycleWindow::project_spend)).
+///
+/// `S` is the same transaction total the history points use; `F` is the
+/// fixed share of this cycle's receipts so far (a receipt flagged fixed, or a
+/// share booked under a fixed category), never more than `S`.
 async fn run_rate(db: &dyn DatabaseAdapter, as_of: chrono::NaiveDate) -> Result<Money, PhoskError> {
     let window = Period::Month.resolve(as_of)?;
     let to_date = sum_window(db, window.start, window.as_of).await?;
-    let day = i64::from(window.day_index());
-    if day == 0 {
-        return Ok(to_date);
-    }
-    let scaled = to_date
-        .centimes()
-        .checked_mul(i64::from(window.len_days()))
-        .ok_or_else(|| PhoskError::Overflow("projecting the run-rate".to_owned()))?;
-    Ok(Money::from_centimes(scaled / day))
+    let receipts = db.receipts_between(window.start, window.as_of).await?;
+    let parts = spend::receipt_parts(db, &receipts).await?;
+    let caps = db.category_caps().await?;
+    let (fixed, _) = spend::fixed_and_variable(&parts, &caps)?;
+    let fixed = fixed.min(to_date).max(Money::ZERO);
+    window.project_spend(fixed, to_date.checked_sub(fixed)?)
 }
 
 /// Per-category momentum cards (`GET /analytics/category-momentum`).
@@ -387,16 +391,13 @@ pub async fn category_momentum(
     // Current-cycle spend per category, from this cycle's receipts.
     let window = Period::Month.resolve(as_of)?;
     let receipts = db.receipts_between(window.start, window.end).await?;
+    let parts = spend::receipt_parts(db, &receipts).await?;
 
     let mut cards = Vec::with_capacity(caps.len());
     for cap in caps {
-        // `now` = Σ this cycle's receipts in this category.
-        let now = Money::sum(
-            receipts
-                .iter()
-                .filter(|r| r.category == cap.name)
-                .map(|r| r.amount),
-        )?;
+        // `now` = Σ this cycle's spend in this category, item-level (a
+        // receipt's lines count under their own category).
+        let now = spend::spent_in(&parts, &cap.name)?;
 
         // Prior-cycle spends (oldest → newest) drive the trailing-N average and
         // the 12-point spark: the stored history, else derived from receipts.

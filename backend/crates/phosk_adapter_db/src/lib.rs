@@ -24,6 +24,7 @@
 
 #[cfg(feature = "contract")]
 pub mod contract;
+pub mod spend;
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -175,6 +176,18 @@ pub trait DatabaseAdapter: Send + Sync {
     /// # Errors
     /// [`PhoskError`] if the store fails to answer.
     async fn line_items(&self, receipt: ReceiptId) -> Result<Vec<LineItem>, PhoskError>;
+
+    /// The [`LineItem`]s of several receipts in one read: for each receipt
+    /// in the order given, its lines in stored order (exactly what
+    /// [`Self::line_items`] returns for it). An unknown id contributes
+    /// nothing; an id listed twice contributes its lines once.
+    ///
+    /// The bulk form behind every item-level spend roll-up ([`spend`]), so a
+    /// cycle's worth of receipts costs one store read, not one per receipt.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the store fails to answer.
+    async fn line_items_for(&self, receipts: &[ReceiptId]) -> Result<Vec<LineItem>, PhoskError>;
 
     /// Every [`Receipt`] regardless of date (unfiltered list / shop directory).
     ///
@@ -770,6 +783,12 @@ mod tests {
             Err(PhoskError::NotFound("receipt".to_owned()))
         }
         async fn line_items(&self, _receipt: ReceiptId) -> Result<Vec<LineItem>, PhoskError> {
+            Ok(Vec::new())
+        }
+        async fn line_items_for(
+            &self,
+            _receipts: &[ReceiptId],
+        ) -> Result<Vec<LineItem>, PhoskError> {
             Ok(Vec::new())
         }
         async fn all_receipts(&self) -> Result<Vec<Receipt>, PhoskError> {

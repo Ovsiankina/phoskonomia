@@ -154,10 +154,10 @@ fn abs_money(m: Money) -> Money {
     Money::from_centimes(m.centimes().abs())
 }
 
-/// The message + hint for a read that failed (`errored`, the `#[server]` fn
+/// The error + hint for a read that failed (`errored`, the `#[server]` fn
 /// returned an error); nothing otherwise, so `Awaiting` shows its loading line.
 const OFFLINE_HINT: &str = "reload the page to try again";
-fn offline_message(errored: bool) -> (Option<String>, Option<String>) {
+fn offline_error(errored: bool) -> (Option<String>, Option<String>) {
     if errored {
         (
             Some("Could not load this section".to_string()),
@@ -597,12 +597,12 @@ pub fn BudgetsPage() -> Element {
 
                             if !cats_ready {
                                 {
-                                    let (msg, hint) = offline_message(cats_err);
+                                    let (error, hint) = offline_error(cats_err);
                                     rsx! {
                                         Awaiting {
                                             label: "ENVELOPES".to_string(),
                                             loading: cats_loading,
-                                            message: msg,
+                                            error,
                                             hint,
                                         }
                                     }
@@ -1368,9 +1368,9 @@ fn AllocationBar(
     let advice = alloc.as_ref().map(|a| a.ai_advice.clone());
 
     if alloc.is_none() || segments.is_empty() {
-        let (msg, hint) = offline_message(errored);
+        let (error, hint) = offline_error(errored);
         return rsx! {
-            Awaiting { label: "ALLOCATION".to_string(), loading, message: msg, hint }
+            Awaiting { label: "ALLOCATION".to_string(), loading, error, hint }
         };
     }
     // Nothing capped yet (a new store): there is no mix to draw.

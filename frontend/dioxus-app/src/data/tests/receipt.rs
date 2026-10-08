@@ -477,16 +477,20 @@ async fn real_mode_an_approved_photo_shows_everywhere() {
         ]
     );
 
-    // Budgets: the Groceries envelope counts the receipt against its cap.
+    // Budgets: item-level. The Groceries envelope counts the milk and apples
+    // against its cap; the dish soap line counts under Household.
     let envelopes = phosk_planning::budgets::categories(&db, today)
         .await
         .expect("envelopes");
-    let groceries = envelopes
-        .iter()
-        .find(|e| e.name == "Groceries")
-        .expect("Groceries envelope");
-    assert_eq!(groceries.budget, money(40_000));
-    assert_eq!(groceries.spent, total);
+    let envelope = |name: &str| {
+        envelopes
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} envelope"))
+    };
+    assert_eq!(envelope("Groceries").budget, money(40_000));
+    assert_eq!(envelope("Groceries").spent, money(2 * 165 + 420));
+    assert_eq!(envelope("Household").spent, money(395));
 
     // Dashboard: the month's spend and the allocation include it.
     let totals = phosk_insights::dashboard_totals(&db, today)
