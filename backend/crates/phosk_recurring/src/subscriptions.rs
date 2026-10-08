@@ -163,8 +163,12 @@ pub struct SubscriptionDto {
     pub since: String,
     /// `true` if the last charge rose vs the prior one.
     pub price_rose: bool,
-    /// Price-history bars (raw chart numbers).
+    /// Price-history bars (raw chart numbers), oldest charge first.
     pub hist: Vec<f64>,
+    /// One axis label per `hist` bar, from that charge's date: the month
+    /// (`"MAR"`) for a monthly charge, the two-digit year (`"'25"`) for a
+    /// yearly one.
+    pub hist_labels: Vec<String>,
     /// One-line note / AI guidance.
     pub note: String,
 }
@@ -736,6 +740,19 @@ fn price_rose(charges: &[Charge]) -> bool {
     }
 }
 
+/// The price-history axis label for a charge billed on `date`: `"'25"` for a
+/// yearly charge, `"MAR"` for a monthly one.
+fn hist_label(date: NaiveDate, cadence: &str) -> String {
+    if cadence == "yearly" {
+        return format!("'{:02}", date.year().rem_euclid(100));
+    }
+    MONTHS
+        .get((date.month() as usize).saturating_sub(1))
+        .copied()
+        .unwrap_or("")
+        .to_owned()
+}
+
 /// Build the full [`SubscriptionDto`] for a subscription + its charge history.
 fn build_dto(
     sub: &Subscription,
@@ -746,11 +763,13 @@ fn build_dto(
     let annual_total = annual(sub.amount, &sub.cadence)?;
     let days = days_until(as_of, sub.day, &sub.cadence, &sub.month)?;
     let label = next_label(as_of, sub.day, &sub.cadence, &sub.month)?;
-    let hist: Vec<f64> = {
-        let mut sorted: Vec<&Charge> = charges.iter().collect();
-        sorted.sort_by_key(|c| c.date);
-        sorted.iter().map(|c| c.amount.as_chf_f64()).collect()
-    };
+    let mut sorted: Vec<&Charge> = charges.iter().collect();
+    sorted.sort_by_key(|c| c.date);
+    let hist: Vec<f64> = sorted.iter().map(|c| c.amount.as_chf_f64()).collect();
+    let hist_labels: Vec<String> = sorted
+        .iter()
+        .map(|c| hist_label(c.date, &sub.cadence))
+        .collect();
     Ok(SubscriptionDto {
         id: sub.slug.clone(),
         name: sub.name.clone(),
@@ -770,6 +789,7 @@ fn build_dto(
         since: sub.since.to_string(),
         price_rose: price_rose(charges),
         hist,
+        hist_labels,
         note: sub.note.clone(),
     })
 }

@@ -26,10 +26,12 @@
 //!     and IOU create / edit / delete / partial payment / settle go through
 //!     `data::debt_actions`; the forms live in `pages::debt_forms`, each in its
 //!     own page-level signal, and every success refetches the reads it feeds.
-//!     The plan (monthly / day / term) and the APR are create-only: changing
-//!     them must run T17's `debt_plan` rules, which have no UI yet, so
-//!     REFINANCE / ADJUST PLAN render disabled. REMIND had no backend and is
-//!     replaced by RECORD PAYMENT.
+//!     The plan (monthly / day / months left) and the APR change through
+//!     ADJUST PLAN / REFINANCE, which run T17's `debt_plan` rules server-side
+//!     (`adjust_debt_plan` / `refinance_debt`) and show a refusal inline.
+//!     The design's single slot keeps REFINANCE for a rate above 8 % and
+//!     ADJUST PLAN otherwise; the other one sits next to EDIT. REMIND had no
+//!     backend and is replaced by RECORD PAYMENT.
 //!   * SVG charts (`PayoffTrajectory`, `DecayLine`, `NetBeam`) are hand-written
 //!     inline here, faithful to the JSX (Debts owns these page-specific charts;
 //!     they are not shared F2 primitives). `Spark` (the card balance trace) IS a
@@ -58,6 +60,7 @@ use crate::pages::debt_forms::{
     debt_draft, iou_draft, new_debt_draft, new_iou_draft, submit, DebtFormPanel, DeleteConfirm,
     IouFormPanel, Panel, PayDraft, PayField,
 };
+use crate::pages::debt_forms::{plan_draft, PlanDraft, PlanFormPanel};
 
 // ── pure presentation helpers (faithful to the JSX) ─────────────────────────
 
@@ -65,11 +68,20 @@ const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 
-/// `(month-index 0..11, year)` anchor for the cycle, parsed from its label.
+/// `(month-index 0..11, year)` anchor for the cycle: the month the server's
+/// "today" falls in.
 ///
-/// Faithful to the JSX `cycleAnchor`: prefer the label's `MON` token + a 4-digit
-/// year, else fall back to the seeded today (JUN 2026).
-fn cycle_anchor(cycle: &CycleDto) -> (i32, i32) {
+/// Read from the cycle's ISO `start_date` (`"2026-10-01"`), else from its label
+/// (`"OCT 2026"`). `None` until the cycle has loaded — never a made-up month.
+fn cycle_anchor(cycle: &CycleDto) -> Option<(i32, i32)> {
+    let mut iso = cycle.start_date.split('-');
+    if let (Some(y), Some(m)) = (iso.next(), iso.next()) {
+        if let (Ok(y), Ok(m)) = (y.parse::<i32>(), m.parse::<i32>()) {
+            if (1..=12).contains(&m) {
+                return Some((m - 1, y));
+            }
+        }
+    }
     let upper = cycle.label.to_uppercase();
     let mut mi: Option<i32> = None;
     let mut yr: Option<i32> = None;
@@ -86,24 +98,19 @@ fn cycle_anchor(cycle: &CycleDto) -> (i32, i32) {
             yr = tok.parse::<i32>().ok();
         }
     }
-    (mi.unwrap_or(5), yr.unwrap_or(2026))
+    Some((mi?, yr?))
 }
 
-/// Month label `offset` months ahead of the cycle anchor (e.g. `"NOV 28"`).
+/// Month label `offset` months ahead of the cycle anchor (e.g. `"NOV 28"`), or
+/// `"—"` while the cycle is unknown.
 ///
 /// Faithful to the JSX `monthLabel`: `MON` + 2-digit year.
 fn month_label(offset: i32, cycle: &CycleDto) -> String {
-    let (a_m, a_y) = cycle_anchor(cycle);
-    let mut m = a_m + offset;
-    let mut y = a_y;
-    while m > 11 {
-        m -= 12;
-        y += 1;
-    }
-    while m < 0 {
-        m += 12;
-        y -= 1;
-    }
+    let Some((a_m, a_y)) = cycle_anchor(cycle) else {
+        return "—".to_string();
+    };
+    let total = a_y * 12 + a_m + offset;
+    let (y, m) = (total.div_euclid(12), total.rem_euclid(12));
     let yy = y.rem_euclid(100);
     format!("{} {:02}", MONTHS[m as usize], yy)
 }
@@ -169,6 +176,7 @@ pub fn DebtsPage() -> Element {
     let mut debt_edit = use_signal(Panel::<DebtForm>::default);
     let debt_pay = use_signal(Panel::<PayDraft>::default);
     let debt_row = use_signal(Panel::<bool>::default);
+    let debt_plan = use_signal(Panel::<PlanDraft>::default);
     let mut iou_edit = use_signal(Panel::<IouForm>::default);
     let iou_pay = use_signal(Panel::<PayDraft>::default);
     let iou_row = use_signal(Panel::<bool>::default);
@@ -253,7 +261,7 @@ pub fn DebtsPage() -> Element {
         submit(debt_pay, action, refresh_debts);
     });
     let delete_debt_cb = use_callback(move |id: String| {
-        let (mut edit, mut pay) = (debt_edit, debt_pay);
+        let (mut edit, mut pay, mut plan) = (debt_edit, debt_pay, debt_plan);
         let action = async move {
             delete_debt(id.clone()).await?;
             // No panel may stay open on a record that is gone.
@@ -262,6 +270,9 @@ pub fn DebtsPage() -> Element {
             }
             if pay.peek().is_open_for(&id) {
                 pay.write().close();
+            }
+            if plan.peek().is_open_for(&id) {
+                plan.write().close();
             }
             Ok(())
         };
@@ -767,6 +778,8 @@ pub fn DebtsPage() -> Element {
                         },
                         debt_pay,
                         debt_row,
+                        debt_plan,
+                        on_plan_saved: refresh_debts,
                         on_pay: pay_debt_cb,
                         on_delete: delete_debt_cb,
                     }
@@ -792,6 +805,8 @@ pub fn DebtsPage() -> Element {
                             },
                             debt_pay,
                             debt_row,
+                            debt_plan,
+                            on_plan_saved: refresh_debts,
                             on_pay: pay_debt_cb,
                             on_delete: delete_debt_cb,
                         }
@@ -1442,8 +1457,8 @@ fn DebtRow(
 
 // ════════════════════════════ INSPECTOR (right dock) ════════════════════════
 
-/// Debt inspector (`DebtInspector` in the JSX). REFINANCE / ADJUST PLAN have
-/// no UI for T17's `debt_plan` yet, so they render (faithful DOM) disabled.
+/// Debt inspector (`DebtInspector` in the JSX). REFINANCE / ADJUST PLAN open
+/// the plan form (`PlanFormPanel`) for a debt that is still owed.
 #[component]
 fn DebtInspector(
     d: Option<DebtDto>,
@@ -1457,6 +1472,8 @@ fn DebtInspector(
     on_edit: EventHandler<DebtDto>,
     debt_pay: Signal<Panel<PayDraft>>,
     debt_row: Signal<Panel<bool>>,
+    debt_plan: Signal<Panel<PlanDraft>>,
+    on_plan_saved: Callback<()>,
     on_pay: Callback<(String, PayDraft), ()>,
     on_delete: Callback<String>,
 ) -> Element {
@@ -1542,6 +1559,14 @@ fn DebtInspector(
     };
     let recent: Vec<DebtPaymentDto> = payments.iter().take(4).cloned().collect();
     let (pay_id, extra_id, edit_d) = (d.id.clone(), d.id.clone(), d.clone());
+    let (refi_d, adjust_d) = (d.clone(), d.clone());
+    let plan_open = debt_plan.read().is_open_for(&d.id);
+    let can_plan = d.actions.pay && !plan_open;
+    let refi_cls = if d.status == "high" {
+        "gbtn coral"
+    } else {
+        "gbtn"
+    };
     let instalment = crate::data::budgets::cap_input_text(d.monthly);
     let pay_label = if debt_pay.read().draft.extra {
         "Extra payment · CHF".to_string()
@@ -1623,14 +1648,54 @@ fn DebtInspector(
                 } else {
                     span { class: "dx-note", "PAID OFF · NO PAYMENT DUE" }
                 }
-                if refinance {
-                    button { class: if d.status == "high" { "gbtn coral" } else { "gbtn" }, r#type: "button", disabled: true, "REFINANCE" }
-                } else {
-                    button { class: "gbtn", r#type: "button", disabled: true, "ADJUST PLAN" }
+                if d.actions.pay {
+                    if refinance {
+                        button {
+                            class: "{refi_cls}",
+                            r#type: "button",
+                            disabled: !can_plan,
+                            onclick: {
+                                let d = refi_d.clone();
+                                move |_| debt_plan.write().open(&d.id, plan_draft(&d, true))
+                            },
+                            "REFINANCE"
+                        }
+                    } else {
+                        button {
+                            class: "gbtn",
+                            r#type: "button",
+                            disabled: !can_plan,
+                            onclick: {
+                                let d = adjust_d.clone();
+                                move |_| debt_plan.write().open(&d.id, plan_draft(&d, false))
+                            },
+                            "ADJUST PLAN"
+                        }
+                    }
                 }
             }
             PayField { panel: debt_pay, target: d.id.clone(), label: pay_label, on_pay }
+            PlanFormPanel { panel: debt_plan, d: d.clone(), on_saved: on_plan_saved }
             div { class: "insp-acts",
+                if d.actions.pay {
+                    if refinance {
+                        button {
+                            class: "gbtn",
+                            r#type: "button",
+                            disabled: !can_plan,
+                            onclick: move |_| debt_plan.write().open(&adjust_d.id, plan_draft(&adjust_d, false)),
+                            "ADJUST PLAN"
+                        }
+                    } else {
+                        button {
+                            class: "gbtn",
+                            r#type: "button",
+                            disabled: !can_plan,
+                            onclick: move |_| debt_plan.write().open(&refi_d.id, plan_draft(&refi_d, true)),
+                            "REFINANCE"
+                        }
+                    }
+                }
                 button { class: "gbtn", r#type: "button", onclick: move |_| on_edit.call(edit_d.clone()), "EDIT" }
                 DeleteConfirm { panel: debt_row, target: d.id.clone(), on_confirm: on_delete }
             }

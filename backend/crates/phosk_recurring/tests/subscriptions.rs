@@ -143,6 +143,33 @@ async fn list_derives_monthly_run_rates_for_monthly_subs() {
 }
 
 #[tokio::test]
+async fn history_labels_come_from_the_charge_dates() {
+    let db = db();
+    let subs = subscriptions::list_subscriptions(&db, as_of(), SubFilter::default())
+        .await
+        .expect("list ok");
+    for s in &subs {
+        assert_eq!(
+            s.hist.len(),
+            s.hist_labels.len(),
+            "{}: one label per bar",
+            s.id
+        );
+    }
+    // The seed records charges on the 1st of MAR / APR / MAY 2026.
+    let netflix = subs.iter().find(|s| s.id == "netflix").expect("netflix");
+    assert_eq!(netflix.hist_labels, ["MAR", "APR", "MAY"]);
+    // A yearly charge is labelled by its year, not a fixed '23 '24 '25 axis.
+    let nyt = subs.iter().find(|s| s.id == "nyt").expect("nyt");
+    assert!(!nyt.hist_labels.is_empty());
+    assert!(
+        nyt.hist_labels.iter().all(|l| l == "'26"),
+        "{:?}",
+        nyt.hist_labels
+    );
+}
+
+#[tokio::test]
 async fn list_derives_monthly_equiv_for_yearly_subs_via_integer_division() {
     let db = db();
     let subs = subscriptions::list_subscriptions(&db, as_of(), SubFilter::default())

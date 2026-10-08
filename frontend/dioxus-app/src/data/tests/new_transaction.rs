@@ -9,7 +9,7 @@ use phosk_model::Source;
 
 use super::support::{fresh_db, money, today};
 use crate::data::new_transaction::{
-    create_error_text, create_transaction_with, NewTxnForm, NewTxnLineForm,
+    create_error_text, create_transaction_with, new_transaction_date, NewTxnForm, NewTxnLineForm,
 };
 
 fn total_only(total: &str) -> NewTxnForm {
@@ -50,6 +50,19 @@ fn refusal<T: std::fmt::Debug>(r: Result<T, ServerFnError>) -> (u16, String) {
         Err(err @ ServerFnError::ServerError { code, .. }) => (code, create_error_text(&err)),
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn the_form_starts_on_the_servers_today_in_the_format_it_saves() {
+    let date = new_transaction_date().await.expect("today");
+    assert_eq!(date, today().format("%Y-%m-%d").to_string());
+    assert_eq!(date, "2026-06-18", "the demo stack's seeded day");
+    let mut form = total_only("12.00");
+    form.date = date;
+    let created = create_transaction_with(&fresh_db(), form)
+        .await
+        .expect("a form left on its default date saves");
+    assert_eq!(created.amount, money(1_200));
 }
 
 #[tokio::test]

@@ -5,9 +5,9 @@ use phosk_debts::{debts as svc, personal_ious};
 
 use super::support::{fresh_db, money, server_error, today};
 use crate::data::debt_actions::{
-    create_debt_with, create_iou_with, delete_debt_with, delete_iou_with, edit_debt_with,
-    edit_iou_with, pay_debt_extra_with, pay_debt_with, pay_iou_with, settle_iou_with, DebtForm,
-    IouForm, DEBT_KINDS,
+    adjust_debt_plan_with, create_debt_with, create_iou_with, delete_debt_with, delete_iou_with,
+    edit_debt_with, edit_iou_with, pay_debt_extra_with, pay_debt_with, pay_iou_with,
+    refinance_debt_with, settle_iou_with, DebtForm, IouForm, PlanForm, DEBT_KINDS,
 };
 use crate::data::debts::{map_debt, map_iou};
 use dioxus::prelude::ServerFnError;
@@ -415,5 +415,175 @@ async fn iou_payment_settle_and_delete() {
     assert_eq!(
         msg(settle_iou_with(&db, "i2".into()).await),
         "This IOU no longer exists."
+    );
+}
+
+// ── plan: ADJUST PLAN / REFINANCE (T17 through the page) ──────────────────────
+
+fn plan(monthly: &str, term: &str, day: &str) -> PlanForm {
+    PlanForm {
+        monthly: monthly.into(),
+        term: term.into(),
+        day: day.into(),
+        ..PlanForm::default()
+    }
+}
+
+fn refi(apr: &str) -> PlanForm {
+    PlanForm {
+        apr: apr.into(),
+        ..PlanForm::default()
+    }
+}
+
+#[tokio::test]
+async fn adjust_plan_sets_a_new_instalment_and_rederives_the_payoff() {
+    let db = fresh_db();
+    let before = debt(&db, "vw").await.expect("vw");
+    adjust_debt_plan_with(&db, "vw".into(), plan("500", "", ""))
+        .await
+        .expect("adjusted");
+    let after = debt(&db, "vw").await.expect("vw");
+    assert_eq!(after.monthly, money(50_000));
+    assert!(
+        after.months_to_payoff < before.months_to_payoff,
+        "a higher instalment pays off sooner: {} -> {}",
+        before.months_to_payoff,
+        after.months_to_payoff
+    );
+    assert_eq!(after.day, before.day, "a blank day keeps it");
+    assert!(
+        (after.apr - before.apr).abs() < 1e-12,
+        "the rate is untouched"
+    );
+}
+
+#[tokio::test]
+async fn adjust_plan_by_months_left_derives_the_instalment() {
+    let db = fresh_db();
+    adjust_debt_plan_with(&db, "vw".into(), plan("", "24", "15"))
+        .await
+        .expect("adjusted");
+    let after = debt(&db, "vw").await.expect("vw");
+    assert!(after.months_to_payoff <= 24, "{}", after.months_to_payoff);
+    assert!(
+        after.monthly > money(45_000),
+        "a shorter plan costs more a month"
+    );
+    assert_eq!(after.day, 15);
+}
+
+#[tokio::test]
+async fn adjust_plan_refusals_are_fixed_texts_and_write_nothing() {
+    let db = fresh_db();
+    let before = debt(&db, "vw").await.expect("vw");
+    let cases: [(PlanForm, &str); 9] = [
+        (plan("", "", ""), "Nothing to change"),
+        (
+            plan("500", "24", ""),
+            "Give the monthly payment or the remaining term",
+        ),
+        (plan("lots", "", ""), "Monthly payment"),
+        (plan("0", "", ""), "Monthly payment"),
+        (plan("", "0", ""), "Remaining term"),
+        (plan("", "600", ""), "Remaining term"),
+        (plan("", "", "32"), "Payment day"),
+        // 18 200 CHF at 3.9 % accrues about 59 CHF a month.
+        (
+            plan("50", "", ""),
+            "That monthly payment does not cover the interest",
+        ),
+        (plan("  ", "\t", " "), "Nothing to change"),
+    ];
+    for (form, want) in cases {
+        let m = msg(adjust_debt_plan_with(&db, "vw".into(), form.clone()).await);
+        assert!(m.starts_with(want), "{form:?}: {m}");
+    }
+    assert_eq!(
+        debt(&db, "vw").await.expect("vw"),
+        before,
+        "nothing was written"
+    );
+    assert_eq!(
+        msg(adjust_debt_plan_with(&db, "nope".into(), plan("500", "", "")).await),
+        "This debt no longer exists."
+    );
+    assert_eq!(
+        msg(adjust_debt_plan_with(&db, "../vw".into(), plan("500", "", "")).await),
+        "This debt no longer exists."
+    );
+}
+
+#[tokio::test]
+async fn a_paid_off_debt_has_no_plan_to_change() {
+    let db = fresh_db();
+    pay_debt_extra_with(&db, "tax".into(), "2100".into())
+        .await
+        .expect("cleared");
+    let m = msg(adjust_debt_plan_with(&db, "tax".into(), plan("100", "", "")).await);
+    assert!(m.starts_with("This debt is paid off"), "{m}");
+    let m = msg(refinance_debt_with(&db, "tax".into(), refi("2")).await);
+    assert!(m.starts_with("This debt is paid off"), "{m}");
+}
+
+#[tokio::test]
+async fn refinance_reprices_the_balance_and_keeps_the_instalment() {
+    let db = fresh_db();
+    let before = debt(&db, "card").await.expect("card");
+    let mut form = refi("6.9");
+    form.lender = "  Neon Bank ".into();
+    refinance_debt_with(&db, "card".into(), form)
+        .await
+        .expect("refinanced");
+    let after = debt(&db, "card").await.expect("card");
+    assert!((after.apr - 0.069).abs() < 1e-12, "{}", after.apr);
+    assert_eq!(after.lender, "Neon Bank");
+    assert_eq!(after.monthly, before.monthly, "a blank instalment is kept");
+    assert_eq!(
+        after.balance, before.balance,
+        "nothing about the past moves"
+    );
+    assert!(after.annual_interest < before.annual_interest);
+}
+
+#[tokio::test]
+async fn refinance_with_a_new_plan_and_blank_lender() {
+    let db = fresh_db();
+    let mut form = refi("4.5");
+    form.term = "12".into();
+    refinance_debt_with(&db, "card".into(), form)
+        .await
+        .expect("refinanced");
+    let after = debt(&db, "card").await.expect("card");
+    assert_eq!(after.lender, "Migros Bank", "a blank lender is kept");
+    assert!(after.months_to_payoff <= 12, "{}", after.months_to_payoff);
+}
+
+#[tokio::test]
+async fn refinance_refusals_are_fixed_texts_and_write_nothing() {
+    let db = fresh_db();
+    let before = debt(&db, "card").await.expect("card");
+    let mut long_lender = refi("5");
+    long_lender.lender = "L".repeat(61);
+    let mut both = refi("5");
+    both.monthly = "200".into();
+    both.term = "12".into();
+    let cases: [(PlanForm, &str); 6] = [
+        (refi(""), "APR"),
+        (refi("150"), "APR"),
+        (refi("five"), "APR"),
+        (long_lender, "Lender"),
+        (both, "Give the monthly payment or the remaining term"),
+        // 3 400 CHF at 99 % accrues about 280 CHF a month > the 150 kept.
+        (refi("99"), "At the new rate the current monthly payment"),
+    ];
+    for (form, want) in cases {
+        let m = msg(refinance_debt_with(&db, "card".into(), form.clone()).await);
+        assert!(m.starts_with(want), "{form:?}: {m}");
+    }
+    assert_eq!(
+        debt(&db, "card").await.expect("card"),
+        before,
+        "nothing was written"
     );
 }

@@ -81,6 +81,21 @@ pub async fn create_transaction(form: NewTxnForm) -> Result<CreatedTxnDto, Serve
     }
 }
 
+/// The date a new entry starts on: the server's "today" as `YYYY-MM-DD`, the
+/// format the form's date input reads and [`create_transaction`] parses. In
+/// real mode that is the local calendar date; in demo mode the seeded day.
+#[server]
+pub async fn new_transaction_date() -> Result<String, ServerFnError> {
+    #[cfg(feature = "server-deps")]
+    {
+        Ok(crate::data::today().format("%Y-%m-%d").to_string())
+    }
+    #[cfg(not(feature = "server-deps"))]
+    {
+        Err(ServerFnError::new("server-only"))
+    }
+}
+
 /// The text to show for a failed save: the server's own message, or a generic
 /// line when the server could not be reached.
 #[must_use]

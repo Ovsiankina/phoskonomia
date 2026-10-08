@@ -33,8 +33,11 @@
 //!     write-path server fns; the inspector offers only the actions the
 //!     backend reports it accepts (`SubscriptionDetailDto::actions`). One write
 //!     at a time; every write re-reads the list, roll-ups, sweep and inspector.
-//!   * DETECT / SNOOZE have no server fn yet, so those buttons render
-//!     faithfully but are inert.
+//!   * the design's SNOOZE became KEEP · CLEAR REVIEW: a lifecycle action the
+//!     backend offers only while a charge is flagged for review; it clears the
+//!     flag and re-derives the status from the billing cycle.
+//!   * DETECT has no server fn yet, so that button renders faithfully but is
+//!     inert.
 
 use dioxus::prelude::*;
 use phosk_core::money::Money;
@@ -252,7 +255,14 @@ fn BillingSweep(
             }
 
             if !ok {
-                Awaiting { label: "BILLING SWEEP".to_string(), loading, tone: "blue".to_string(), style: awaiting_margin }
+                Awaiting {
+                    label: "BILLING SWEEP".to_string(),
+                    loading,
+                    legend: (!loading).then(|| "EMPTY".to_string()),
+                    message: (!loading).then(|| "No charges land in this cycle yet.".to_string()),
+                    tone: "blue".to_string(),
+                    style: awaiting_margin,
+                }
             } else {
                 svg {
                     width: "100%",
@@ -394,22 +404,40 @@ fn BillingSweep(
 //  price-history bars — page-specific SVG (React `SubHistBars`).
 // ════════════════════════════════════════════════════════════════════════════
 
+/// How many recorded charges the price-history chart shows (the latest ones).
+const HIST_MAX: usize = 12;
+
+/// The latest [`HIST_MAX`] bars and their labels (one label per bar; a
+/// missing label renders blank rather than shifting the axis).
+fn recent_history(hist: &[f64], labels: &[String]) -> (Vec<f64>, Vec<String>) {
+    let skip = hist.len().saturating_sub(HIST_MAX);
+    let bars = hist[skip..].to_vec();
+    let names = (skip..hist.len())
+        .map(|i| labels.get(i).cloned().unwrap_or_default())
+        .collect();
+    (bars, names)
+}
+
+/// The chart's left axis caption: how many charges it shows.
+fn hist_axis_label(n: usize) -> String {
+    match n {
+        0 => "NO CHARGES YET".to_string(),
+        1 => "1 CHARGE".to_string(),
+        n => format!("LAST {n} CHARGES"),
+    }
+}
+
 /// Faithful port of React `SubHistBars`: per-charge price history bars with the
-/// last bar coloured by `price_rose`.
+/// last bar coloured by `price_rose`. Each bar is labelled from its charge's
+/// date (`labels`, from the server), never a fixed month/year axis.
 #[component]
 fn SubHistBars(
     hist: Vec<f64>,
-    cadence: String,
+    labels: Vec<String>,
     price_rose: bool,
     #[props(default = 300.0)] w: f64,
     #[props(default = 96.0)] h: f64,
 ) -> Element {
-    let yearly = cadence == "yearly";
-    let labels: Vec<&str> = if yearly {
-        vec!["'23", "'24", "'25"]
-    } else {
-        vec!["JAN", "FEB", "MAR", "APR", "MAY", "JUN"]
-    };
     if hist.is_empty() {
         return rsx! {
             svg {
@@ -447,7 +475,7 @@ fn SubHistBars(
                     let bh = h - PAD_B - by;
                     let bar_style = if last && rose { "filter:drop-shadow(0 0 4px var(--neon))" } else { "" };
                     let txt_fill = if last { "var(--ink-2)" } else { "var(--ink-3)" };
-                    let lbl = labels.get(i).copied().unwrap_or("");
+                    let lbl = labels.get(i).cloned().unwrap_or_default();
                     rsx! {
                         g { key: "{i}",
                             rect {
@@ -817,7 +845,8 @@ fn SubInspector(
     } else {
         String::new()
     };
-    let axis_label = if yearly { "3 YEARS" } else { "6 CHARGES" };
+    let (hist, hist_labels) = recent_history(&s.hist, &s.hist_labels);
+    let axis_label = hist_axis_label(hist.len());
     // CONFIRM/DISMISS only while the record is still an OPEN proposal (a
     // dismissed one is LLM-sourced too, but can no longer be confirmed).
     let candidate = d.candidate && candidate_open;
@@ -859,8 +888,6 @@ fn SubInspector(
     let deleting = confirm_del().as_deref() == Some(s.id.as_str());
     let charge_v = charge().filter(|c| c.id == s.id);
     let edit_form = form_from_sub(&s);
-    let hist = s.hist.clone();
-    let cadence_str = s.cadence.clone();
     let price_rose = s.price_rose;
     let auto = s.source == "llm";
     let guidance_coral = sev == "coral";
@@ -883,7 +910,7 @@ fn SubInspector(
             }
 
             div { class: "sig-chart",
-                SubHistBars { hist, cadence: cadence_str, price_rose }
+                SubHistBars { hist, labels: hist_labels, price_rose }
                 div { class: "axis",
                     span { "{axis_label}" }
                     span { "{axis_rose}" }
@@ -989,7 +1016,6 @@ fn SubInspector(
             }
 
             div { class: "insp-acts", style: "margin-top:var(--s-2)",
-                button { class: "gbtn", "SNOOZE" }
                 if can_charge && !candidate {
                     button {
                         class: "gbtn",
@@ -1418,6 +1444,7 @@ fn CandidateSection(
             Some(list) if list.is_empty() => rsx! {
                 Awaiting {
                     label: "AI CANDIDATES".to_string(),
+                    legend: Some("EMPTY".to_string()),
                     message: Some("No open candidates. Nothing is waiting for your approval.".to_string()),
                     style: state_style,
                 }
@@ -1506,8 +1533,10 @@ pub fn SubscriptionsPage() -> Element {
         .unwrap_or_default();
     let list_loading = list.read().is_none();
     let list_ok = list.read().as_ref().is_some_and(|r| r.is_ok()) && !subs.is_empty();
+    let list_failed = matches!(&*list.read(), Some(Err(_)));
 
     let stats_v = stats.read().as_ref().and_then(|r| r.as_ref().ok()).cloned();
+    let stats_loading = stats.read().is_none();
 
     let sweep_v = sweep.read().as_ref().and_then(|r| r.as_ref().ok()).cloned();
     let sweep_loading = sweep.read().is_none();
@@ -1710,7 +1739,13 @@ pub fn SubscriptionsPage() -> Element {
         .as_ref()
         .map_or(DASH.to_string(), |s| s.flagged.count.to_string());
     let flagged_note = stats_v.as_ref().map_or_else(
-        || "Awaiting backend".to_string(),
+        || {
+            if stats_loading {
+                "Loading…".to_string()
+            } else {
+                "Could not load".to_string()
+            }
+        },
         |s| {
             if s.flagged.note.is_empty() {
                 "Flagged by GEMMA4 for review".to_string()
@@ -1930,8 +1965,32 @@ pub fn SubscriptionsPage() -> Element {
                                 span { class: "meta", "▌ IMPULSE = CHARGE · ━ CYCLE COUNTDOWN · CLICK TO INSPECT" }
                             }
 
-                            if !list_ok {
-                                Awaiting { label: "STANDING CHARGES".to_string(), loading: list_loading, tone: "blue".to_string() }
+                            if list_loading {
+                                Awaiting { label: "STANDING CHARGES".to_string(), loading: true, tone: "blue".to_string() }
+                            } else if list_failed {
+                                Awaiting {
+                                    label: "STANDING CHARGES".to_string(),
+                                    error: "Could not load your subscriptions. Reload the page to try again.".to_string(),
+                                    tone: "blue".to_string(),
+                                }
+                            } else if !list_ok {
+                                div { class: "osc-bkt blue", style: "padding:var(--s-5) var(--s-4);text-align:center",
+                                    span { class: "osc-leg", "EMPTY" }
+                                    div { class: "hud sm", style: "justify-content:center;color:var(--indigo-neon)", "⌁ STANDING CHARGES" }
+                                    div { class: "dim", style: "margin-top:var(--s-2);font-size:var(--t-xs);line-height:var(--lh-body)",
+                                        "No subscriptions yet. Track a standing charge — rent, phone, streaming — with + NEW."
+                                    }
+                                    button {
+                                        class: "gbtn",
+                                        style: "margin-top:var(--s-3)",
+                                        disabled: write_busy,
+                                        onclick: move |_| {
+                                            write_error.set(None);
+                                            form.set(Some((None, blank_form())));
+                                        },
+                                        "+ NEW SUBSCRIPTION"
+                                    }
+                                }
                             } else {
                                 for (gi , g) in groups.iter().enumerate() {
                                     {

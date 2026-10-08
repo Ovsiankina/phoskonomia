@@ -27,7 +27,7 @@ use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
 use phosk_db_memory::MemoryDb;
 use phosk_recurring::lifecycle::{
-    LifecycleAction, NewCharge, cancel_subscription, mark_paid, pause_subscription,
+    LifecycleAction, NewCharge, cancel_subscription, clear_review, mark_paid, pause_subscription,
     record_subscription_charge, resume_subscription,
 };
 use phosk_recurring::subscription_write::{NewSubscription, create_subscription};
@@ -270,6 +270,50 @@ async fn resume_clears_a_review_flag() {
         "due",
         "resuming is an explicit decision: the cycle, not the old flag, decides"
     );
+}
+
+#[tokio::test]
+async fn clear_review_recomputes_the_status_from_the_cycle() {
+    let db = db();
+    assert_eq!(stored_status(&db, "gym").await, "watch");
+    clear_review(&db, "gym", as_of()).await.expect("cleared");
+    assert_eq!(
+        stored_status(&db, "gym").await,
+        "due",
+        "the June charge on the 1st was never recorded"
+    );
+    let detail = subscriptions::subscription_detail(&db, as_of(), "gym")
+        .await
+        .expect("detail");
+    assert!(
+        !detail.actions.contains(&LifecycleAction::ClearReview),
+        "nothing left to clear"
+    );
+}
+
+#[tokio::test]
+async fn clear_review_keeps_a_settled_cycle_settled() {
+    let db = db();
+    record_subscription_charge(&db, "gym", as_of(), cycle_charge(day(2026, 6, 1), 8_900))
+        .await
+        .expect("recorded");
+    assert_eq!(
+        stored_status(&db, "gym").await,
+        "watch",
+        "a recorded charge keeps the flag"
+    );
+    clear_review(&db, "gym", as_of()).await.expect("cleared");
+    assert_eq!(stored_status(&db, "gym").await, "ok");
+}
+
+#[tokio::test]
+async fn clear_review_on_an_unflagged_charge_is_rejected() {
+    assert_invalid(clear_review(&db(), "netflix", as_of()).await, "clear");
+}
+
+#[tokio::test]
+async fn clear_review_on_an_unknown_charge_is_not_found() {
+    assert_not_found(clear_review(&db(), "nope", as_of()).await, "clear");
 }
 
 #[tokio::test]
@@ -615,6 +659,7 @@ async fn offered_actions_are_exactly_the_accepted_transitions() {
                 LifecycleAction::Pause,
                 LifecycleAction::Resume,
                 LifecycleAction::Cancel,
+                LifecycleAction::ClearReview,
             ] {
                 let db = prepared(slug, prep).await;
                 let accepted = match action {
@@ -622,6 +667,7 @@ async fn offered_actions_are_exactly_the_accepted_transitions() {
                     LifecycleAction::Pause => pause_subscription(&db, slug).await,
                     LifecycleAction::Resume => resume_subscription(&db, slug, as_of()).await,
                     LifecycleAction::Cancel => cancel_subscription(&db, slug).await,
+                    LifecycleAction::ClearReview => clear_review(&db, slug, as_of()).await,
                 }
                 .is_ok();
                 assert_eq!(
