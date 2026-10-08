@@ -156,12 +156,17 @@ pub async fn intake_receipt(
     let sanitised = strip_metadata(photo.bytes, kind);
     let photo_ref = storage.put(&sanitised).await?;
 
-    // The user's own category names: read here, outside the sandbox seam, and
-    // handed in as plain data so the model can only pick among them.
-    let categories: Vec<String> = db.categories().await?.into_iter().map(|c| c.name).collect();
+    // The user's own category names (the list approval checks against): read
+    // here, outside the sandbox seam, and handed in as plain data so the
+    // model can only pick among them.
+    let categories = phosk_ai::known_category_names(db).await?;
 
     // ── Steps 3–4: the SANDBOX seam — attacker bytes meet OCR + the model. ──
     let extracted = transcribe_and_extract(ocr, llm, &sanitised, &categories).await?;
+    // A model that ignored the constraint never books into a made-up
+    // category: every answer is mapped onto the user's spelling, and a line
+    // that had to be guessed is flagged for review.
+    let extracted = fit_categories(extracted, &categories);
 
     // ── Step 5: assemble the Receipt + LineItems with Provenance. ──
     // The date printed on the slip wins when it is plausible (not in the
@@ -546,6 +551,69 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
 
 /// Placeholder name of a line the model could not read.
 const ILLEGIBLE: &str = "?";
+
+/// Confidence a line is capped at when its category had to be guessed —
+/// below [`phosk_ai::CONFIDENCE_THRESHOLD`], so the review flags it.
+const GUESSED_CATEGORY_CONFIDENCE: f64 = 0.5;
+
+/// Map every category in the model's answer onto one of the user's `known`
+/// categories, so a staged proposal only ever names a category that exists.
+///
+/// - A case-insensitive match takes the user's spelling (`"groceries"` →
+///   `"Groceries"`).
+/// - An unknown receipt category becomes the category most of its resolved
+///   lines carry, else `"Other"` (when the user has it), else their first
+///   category.
+/// - An unknown line category becomes the receipt's, and the line's
+///   confidence drops to [`GUESSED_CATEGORY_CONFIDENCE`] — flagged for the
+///   human, never silently booked.
+///
+/// With no categories configured there is nothing to map onto; the answer is
+/// kept as read (approval refuses it until the category exists).
+fn fit_categories(mut ex: Extracted, known: &[String]) -> Extracted {
+    let resolve = |name: &str| {
+        known
+            .iter()
+            .find(|k| k.eq_ignore_ascii_case(name.trim()))
+            .cloned()
+    };
+    let Some(fallback) = known
+        .iter()
+        .find(|k| k.eq_ignore_ascii_case("other"))
+        .or_else(|| known.first())
+        .cloned()
+    else {
+        return ex;
+    };
+
+    let receipt_category = resolve(&ex.category).unwrap_or_else(|| {
+        // The resolved line category with the most lines (first seen on a tie).
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for c in ex.lines.iter().filter_map(|l| resolve(&l.category)) {
+            match counts.iter_mut().find(|(n, _)| *n == c) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((c, 1)),
+            }
+        }
+        let mut best: Option<(String, usize)> = None;
+        for (name, n) in counts {
+            if best.as_ref().is_none_or(|(_, b)| n > *b) {
+                best = Some((name, n));
+            }
+        }
+        best.map_or(fallback, |(name, _)| name)
+    });
+    for line in &mut ex.lines {
+        if let Some(c) = resolve(&line.category) {
+            line.category = c;
+        } else {
+            line.category.clone_from(&receipt_category);
+            line.confidence = line.confidence.min(GUESSED_CATEGORY_CONFIDENCE);
+        }
+    }
+    ex.category = receipt_category;
+    ex
+}
 
 /// Normalise hostile model text before it is persisted: control and invisible
 /// format characters ([`phosk_ai::ai_approval::is_unsafe_text_char`]) stripped, trimmed, clamped to [`phosk_ai::ai_approval::MAX_TEXT_CHARS`];
