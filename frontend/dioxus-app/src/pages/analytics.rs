@@ -199,8 +199,10 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
     };
     let cx = |i: usize| pad_l + slot * (i as f64 + 0.5);
 
-    // Budget line: prefer first point's budget; fall back to max spend.
-    let budget_line = data.first().map_or(0.0, |d| money_chf(d.budget));
+    // Budget line: prefer first point's budget; fall back to max spend. The
+    // exact `Money` is what the legend prints; the f64 only places the line.
+    let budget = data.first().map_or(Money::ZERO, |d| d.budget);
+    let budget_line = money_chf(budget);
     let max_y = if is_rate {
         let m = data.iter().map(|d| d.rate).fold(0.0001_f64, f64::max);
         m * 1.25
@@ -329,10 +331,10 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
                             i { class: "k spend" }
                             " SPEND"
                         }
-                        if budget_line > 0.0 {
+                        if budget > Money::ZERO {
                             span {
                                 i { class: "k bud" }
-                                " BUDGET {num(Some(Money::from_centimes((budget_line * 100.0) as i64)))}"
+                                " BUDGET {num(Some(budget))}"
                             }
                         }
                     }
