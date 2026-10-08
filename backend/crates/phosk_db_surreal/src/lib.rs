@@ -206,6 +206,21 @@ impl SurrealDb {
         Ok(me)
     }
 
+    /// A **file-backed** adapter for real use: on first run (empty store) it
+    /// writes only the [starter set](seed::load_starter) — categories, a zero
+    /// budget and default preferences — never the demo ledger. Re-opening an
+    /// existing store writes nothing.
+    ///
+    /// # Errors
+    /// [`PhoskError`] if the engine, migration, or starter insert fails.
+    pub async fn file_starter(path: &str) -> Result<Self, PhoskError> {
+        let me = Self::file(path).await?;
+        if me.store.count(Bucket::BudgetConfig).await? == 0 {
+            seed::load_starter(&me.store).await?;
+        }
+        Ok(me)
+    }
+
     /// Whether any stored row still names `category` — the guard behind
     /// `delete_category` (receipts, their lines, subscriptions and signals).
     async fn category_is_referenced(&self, category: &str) -> Result<bool, PhoskError> {

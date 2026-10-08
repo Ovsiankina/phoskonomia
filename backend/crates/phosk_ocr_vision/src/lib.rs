@@ -367,6 +367,10 @@ impl OcrAdapter for OllamaVisionOcr {
             "images": [b64],
             "format": "json",
             "stream": false,
+            // Transcription needs no chain-of-thought: on thinking-capable
+            // models (qwen3.6, gemma4) it multiplies latency for no gain.
+            "think": false,
+            "options": { "temperature": 0 },
         });
         let url = self.generate_endpoint();
 

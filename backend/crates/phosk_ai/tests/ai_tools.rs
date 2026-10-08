@@ -44,7 +44,7 @@ fn as_of() -> chrono::NaiveDate {
 async fn chat_reply_uses_the_model_completion() {
     let db = db();
     let llm = FakeLlm::new(); // echo-only
-    let reply = chat_reply(&db, &llm, "how much on coffee?")
+    let reply = chat_reply(&db, &llm, "how much on coffee?", as_of())
         .await
         .expect("chat_reply produces a model reply");
     assert_eq!(reply.who, "sys");
@@ -59,12 +59,12 @@ async fn chat_reply_uses_the_model_completion() {
 #[tokio::test]
 async fn chat_reply_persists_user_then_reply() {
     let db = db();
-    let llm = FakeLlm::with_model("qwen3.6:35b-custom").with_reply(
-        "You are Phoskonomia's budgeting assistant. Answer the user concisely.\nUser: hi",
-        "Hello!",
-    );
+    let llm = FakeLlm::with_model("qwen3.6:35b-custom")
+        .with_reply_ending("User: hi\nAssistant:", "Hello!");
     let before = ai_panel(&db).await.expect("before").msgs.len();
-    let reply = chat_reply(&db, &llm, "hi").await.expect("chat_reply ok");
+    let reply = chat_reply(&db, &llm, "hi", as_of())
+        .await
+        .expect("chat_reply ok");
     assert_eq!(
         reply.text, "Hello!",
         "scripted model reply is returned verbatim"
@@ -87,7 +87,7 @@ async fn chat_reply_empty_text_is_invalid_and_persists_nothing() {
     let db = db();
     let llm = FakeLlm::new();
     let before = ai_panel(&db).await.expect("before").msgs.len();
-    match chat_reply(&db, &llm, "   ").await {
+    match chat_reply(&db, &llm, "   ", as_of()).await {
         Err(PhoskError::Invalid(_)) => {}
         other => panic!("expected Invalid for blank text, got {other:?}"),
     }
@@ -104,7 +104,9 @@ async fn chat_reply_model_failure_persists_nothing() {
         FakeLlm::new().fail_completions(true), // healthy, then fails to answer
     ] {
         assert!(
-            chat_reply(&db, &llm, "am I on budget?").await.is_err(),
+            chat_reply(&db, &llm, "am I on budget?", as_of())
+                .await
+                .is_err(),
             "a failed completion is an error"
         );
         assert_eq!(
@@ -118,10 +120,11 @@ async fn chat_reply_model_failure_persists_nothing() {
 #[tokio::test]
 async fn chat_reply_bounds_the_saved_model_reply() {
     let db = db();
-    let prompt =
-        "You are Phoskonomia's budgeting assistant. Answer the user concisely.\nUser: essay";
-    let llm = FakeLlm::new().with_reply(prompt, "é".repeat(CHAT_REPLY_MAX_CHARS * 3));
-    let reply = chat_reply(&db, &llm, "essay").await.expect("chat_reply ok");
+    let prompt = "User: essay\nAssistant:";
+    let llm = FakeLlm::new().with_reply_ending(prompt, "é".repeat(CHAT_REPLY_MAX_CHARS * 3));
+    let reply = chat_reply(&db, &llm, "essay", as_of())
+        .await
+        .expect("chat_reply ok");
     assert_eq!(reply.text.chars().count(), CHAT_REPLY_MAX_CHARS + 1);
     assert!(reply.text.ends_with('…'), "the cut is marked");
     let saved = ai_panel(&db).await.expect("after").msgs;
@@ -134,8 +137,10 @@ async fn chat_reply_bounds_the_saved_model_reply() {
     // A reply at the limit is kept whole.
     let db = crate::db();
     let exact = "x".repeat(CHAT_REPLY_MAX_CHARS);
-    let llm = FakeLlm::new().with_reply(prompt, exact.clone());
-    let reply = chat_reply(&db, &llm, "essay").await.expect("chat_reply ok");
+    let llm = FakeLlm::new().with_reply_ending(prompt, exact.clone());
+    let reply = chat_reply(&db, &llm, "essay", as_of())
+        .await
+        .expect("chat_reply ok");
     assert_eq!(reply.text, exact);
 }
 
@@ -303,4 +308,16 @@ async fn suggest_missing_text_is_invalid() {
         Err(PhoskError::Invalid(_)) => {}
         other => panic!("expected Invalid when model omits `text`, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn chat_context_is_built_from_the_users_data() {
+    let db = db();
+    let ctx = phosk_ai::ai_tools::chat_context(&db, as_of())
+        .await
+        .expect("context");
+    assert!(ctx.contains("Spent this month"), "{ctx}");
+    assert!(ctx.contains("Latest transactions"), "{ctx}");
+    // The seeded June cycle has grocery spend; it must reach the model.
+    assert!(ctx.contains("Migros"), "{ctx}");
 }

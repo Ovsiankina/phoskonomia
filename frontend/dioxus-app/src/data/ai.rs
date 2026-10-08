@@ -310,7 +310,7 @@ pub(crate) async fn send_chat_message_with(
 
     // `chat_reply` saves nothing until the model has answered, so a failed
     // turn leaves the transcript as it was and a retry adds no duplicate.
-    match phosk_ai::ai_tools::chat_reply(db, llm, line).await {
+    match phosk_ai::ai_tools::chat_reply(db, llm, line, super::today()).await {
         Ok(reply) => Ok(ChatSendOutcome::Replied {
             reply: chat_line(&reply.who, &reply.text),
         }),

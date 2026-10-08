@@ -156,12 +156,23 @@ pub async fn intake_receipt(
     let sanitised = strip_metadata(photo.bytes, kind);
     let photo_ref = storage.put(&sanitised).await?;
 
+    // The user's own category names: read here, outside the sandbox seam, and
+    // handed in as plain data so the model can only pick among them.
+    let categories: Vec<String> = db.categories().await?.into_iter().map(|c| c.name).collect();
+
     // ── Steps 3–4: the SANDBOX seam — attacker bytes meet OCR + the model. ──
-    let extracted = transcribe_and_extract(ocr, llm, &sanitised).await?;
+    let extracted = transcribe_and_extract(ocr, llm, &sanitised, &categories).await?;
 
     // ── Step 5: assemble the Receipt + LineItems with Provenance. ──
-    let (receipt, line_items, low_confidence_lines) =
-        assemble(&slug, photo.captured_on, &extracted, kind)?;
+    // The date printed on the slip wins when it is plausible (not in the
+    // future, at most a year old); otherwise the capture date.
+    let date = extracted
+        .date
+        .filter(|d| {
+            *d <= photo.captured_on && photo.captured_on - *d <= chrono::Duration::days(366)
+        })
+        .unwrap_or(photo.captured_on);
+    let (receipt, line_items, low_confidence_lines) = assemble(&slug, date, &extracted, kind)?;
 
     // ── Step 6: STAGE the payload + ENQUEUE one per-receipt proposal — never
     // auto-write. Staged first, so an open suggestion always has its payload;
@@ -356,6 +367,8 @@ fn strip_png_meta_chunks(bytes: &[u8]) -> Option<Vec<u8>> {
 #[derive(Debug, Clone)]
 struct Extracted {
     ocr: OcrResult,
+    /// The purchase date printed on the slip, if the model found a valid one.
+    date: Option<chrono::NaiveDate>,
     shop: String,
     category: String,
     lines: Vec<ParsedLine>,
@@ -381,26 +394,34 @@ async fn transcribe_and_extract(
     ocr: &dyn OcrAdapter,
     llm: &dyn LlmAdapter,
     sanitised: &[u8],
+    categories: &[String],
 ) -> Result<Extracted, PhoskError> {
     // Step 3: OCR the (sanitised) photo bytes.
     let ocr_result = ocr.extract(sanitised).await?;
 
     // Step 4: constrained-output extraction (ADR-008). The OCR text is the
     // model's only input — never the raw bytes — and the answer is schema-checked.
-    let schema = extraction_schema();
-    let prompt = extraction_prompt(&ocr_result.full_text);
+    let schema = extraction_schema(categories);
+    let prompt = extraction_prompt(&ocr_result.full_text, categories);
     let out = llm.generate_structured(&prompt, &schema).await?;
     parse_extraction(ocr_result, &out)
 }
 
 /// JSON Schema for the structured receipt-extraction output (ADR-008). The
 /// adapter guarantees the returned `Value` validates against this.
-fn extraction_schema() -> serde_json::Value {
+fn extraction_schema(categories: &[String]) -> serde_json::Value {
+    // With a configured category list the model may only answer one of them.
+    let category = if categories.is_empty() {
+        serde_json::json!({ "type": "string" })
+    } else {
+        serde_json::json!({ "type": "string", "enum": categories })
+    };
     serde_json::json!({
         "type": "object",
         "properties": {
             "shop": { "type": "string" },
-            "category": { "type": "string" },
+            "date": { "type": "string" },
+            "category": category,
             "lineItems": {
                 "type": "array",
                 "items": {
@@ -409,7 +430,7 @@ fn extraction_schema() -> serde_json::Value {
                         "name": { "type": "string" },
                         "qty": { "type": "number" },
                         "unitPriceCentimes": { "type": "integer" },
-                        "category": { "type": "string" },
+                        "category": category,
                         "confidence": { "type": "number" }
                     },
                     "required": ["name", "qty", "unitPriceCentimes", "confidence"]
@@ -421,11 +442,21 @@ fn extraction_schema() -> serde_json::Value {
 }
 
 /// Build the extraction prompt from the OCR transcription.
-fn extraction_prompt(ocr_text: &str) -> String {
+fn extraction_prompt(ocr_text: &str, categories: &[String]) -> String {
+    let list = if categories.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Every category (overall and per line) must be one of: {}.",
+            categories.join(", ")
+        )
+    };
     format!(
-        "Extract the shop, an overall category, and the line items from this \
-         Swiss receipt transcription. Reply as JSON matching the schema; amounts \
-         are integer centimes (CHF). Transcription:\n{ocr_text}"
+        "Extract the shop, the purchase date (YYYY-MM-DD, empty if not printed), \
+         an overall category, and the line items from this Swiss receipt \
+         transcription. Reply as JSON matching the schema; amounts are integer \
+         centimes (CHF); skip totals, payment, change and VAT lines.{list} \
+         Transcription:\n{ocr_text}"
     )
 }
 
@@ -499,8 +530,14 @@ fn parse_extraction(ocr: OcrResult, out: &serde_json::Value) -> Result<Extracted
         });
     }
 
+    let date = out
+        .get("date")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").ok());
+
     Ok(Extracted {
         ocr,
+        date,
         shop,
         category,
         lines,

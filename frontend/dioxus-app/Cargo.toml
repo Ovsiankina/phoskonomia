@@ -5,6 +5,9 @@ authors = ["ovsiankina <ovsiankina@proton.me>"]
 edition = "2021"
 
 [dependencies]
+# Server-only: the composition root implements the OCR port for its real-mode
+# "no engine available" guard.
+async-trait = { workspace = true, optional = true }
 # Fullstack: one codebase -> web (default) + desktop + mobile. `router` for the
 # 8 routes. The client compiles to WASM (web) or native (desktop/mobile) — no JS.
 # Pinned to =0.7.6 to match the installed `dx` CLI (dx and the dioxus crate must
@@ -131,4 +134,5 @@ server-deps = [
     "dep:phosk_ocr_paddle",
     "dep:phosk_ocr_vision",
     "dep:tokio",
+    "dep:async-trait",
 ]

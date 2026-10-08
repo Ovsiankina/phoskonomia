@@ -399,7 +399,7 @@ fn invalid<T>(why: &str) -> Result<T, PhoskError> {
 /// U+2060, U+FEFF). ZWJ (U+200D) is included too: receipt text has no use for
 /// emoji sequences, and it can hide a join between look-alike words.
 /// The intake pipeline strips these; approval refuses them.
-pub fn is_unsafe_text_char(c: char) -> bool {
+pub const fn is_unsafe_text_char(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

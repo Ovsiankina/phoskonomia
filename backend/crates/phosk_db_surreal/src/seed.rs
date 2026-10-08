@@ -167,6 +167,65 @@ pub(crate) async fn load(store: &Store) -> Result<(), PhoskError> {
     Ok(())
 }
 
+/// The real-use starter set: a category list (each with an unset cap, the same
+/// names on the ledger and the budget side so spend lines up), a zero global
+/// budget and the default preferences. No transactions, receipts, debts or AI
+/// history — the user's own data starts from nothing.
+///
+/// # Errors
+/// [`PhoskError`] if a write fails.
+pub(crate) async fn load_starter(store: &Store) -> Result<(), PhoskError> {
+    let rows: [(&str, &str, bool, &str); 10] = [
+        ("groceries", "Groceries", false, "▤"),
+        ("dining", "Dining & cafés", false, "◇"),
+        ("housing", "Housing", true, "⌂"),
+        ("health", "Health", false, "+"),
+        ("transport", "Transport", false, "→"),
+        ("subscriptions", "Subscriptions", false, "↻"),
+        ("utilities", "Utilities", true, "⚡"),
+        ("household", "Household", false, "◫"),
+        ("shopping", "Shopping", false, "◈"),
+        ("other", "Other", false, "·"),
+    ];
+    for (slug, name, fixed, glyph) in rows {
+        let category = Category {
+            name: name.to_owned(),
+            cap: None,
+        };
+        store.put(Bucket::Category, name, &category).await?;
+        let cap = CategoryCap {
+            id: CategoryId::new(),
+            slug: slug.to_owned(),
+            name: name.to_owned(),
+            cap: None,
+            fixed,
+            glyph: glyph.to_owned(),
+            note: String::new(),
+            provenance: Provenance::user_entered(),
+        };
+        store
+            .put(Bucket::CategoryCap, &cap.id.to_string(), &cap)
+            .await?;
+    }
+    let budget = BudgetConfig {
+        monthly_budget: Money::from_centimes(0),
+        savings_target: Money::from_centimes(0),
+    };
+    store
+        .put(Bucket::BudgetConfig, "singleton", &budget)
+        .await?;
+    for p in preferences() {
+        store.put(Bucket::Preference, &p.key.clone(), &p).await?;
+    }
+    // One empty chat session for the assistant panel to write to.
+    let chat = Chat {
+        id: ChatId::new(),
+        started: chrono::Local::now().date_naive(),
+    };
+    store.put(Bucket::Chat, &chat.id.to_string(), &chat).await?;
+    Ok(())
+}
+
 // ── Dashboard builders (mirror phosk_db_memory::lib) ───────────────────────────
 
 fn tx(

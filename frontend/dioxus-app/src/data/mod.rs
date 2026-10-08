@@ -70,13 +70,27 @@ pub mod signals;
 pub mod subscriptions;
 pub mod transactions;
 
-/// The demo "today": 2026-06-18 (day 18 of the seeded June cycle). Server fns
-/// resolve cycle windows against this so the seeded reads line up with the
-/// `phosk_insights` dashboard logic. The literal is always valid, so the
-/// `unwrap_or` arm ([`NaiveDate::MIN`]) is unreachable and this never panics.
+/// Whether this process runs on the user's real data (`PHOSK_DB=surreal`
+/// without `PHOSK_DEMO=1`) rather than the deterministic demo seed.
+#[cfg(feature = "server-deps")]
+#[must_use]
+pub fn real_mode() -> bool {
+    let surreal = std::env::var("PHOSK_DB").is_ok_and(|v| v.eq_ignore_ascii_case("surreal"));
+    let demo = std::env::var("PHOSK_DEMO").is_ok_and(|v| v == "1");
+    surreal && !demo
+}
+
+/// "Today" for cycle windows. In [real mode](real_mode) it is the local
+/// calendar date; otherwise it is the demo date 2026-06-18 (day 18 of the
+/// seeded June cycle), so the seeded reads line up with the `phosk_insights`
+/// dashboard logic. The literal is always valid, so the `unwrap_or` arm
+/// ([`NaiveDate::MIN`]) is unreachable and this never panics.
 #[cfg(feature = "server-deps")]
 #[must_use]
 pub fn today() -> chrono::NaiveDate {
+    if real_mode() {
+        return chrono::Local::now().date_naive();
+    }
     chrono::NaiveDate::from_ymd_opt(2026, 6, 18).unwrap_or(chrono::NaiveDate::MIN)
 }
 
@@ -122,16 +136,31 @@ mod composition {
     }
 
     /// Resolve the data directory for the file-backed adapters
-    /// (`PHOSK_DATA_DIR`, default `./phosk-data`).
+    /// (`PHOSK_DATA_DIR`; default `$XDG_DATA_HOME/phoskonomia`, i.e.
+    /// `~/.local/share/phoskonomia`, in real mode and `./phosk-data` otherwise).
     fn data_dir() -> std::path::PathBuf {
-        std::env::var_os("PHOSK_DATA_DIR")
-            .map_or_else(|| std::path::PathBuf::from("phosk-data"), Into::into)
+        if let Some(dir) = std::env::var_os("PHOSK_DATA_DIR") {
+            return dir.into();
+        }
+        if super::real_mode() {
+            let base = std::env::var_os("XDG_DATA_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+                });
+            if let Some(base) = base {
+                return base.join("phoskonomia");
+            }
+        }
+        std::path::PathBuf::from("phosk-data")
     }
 
     /// Select + open the DATABASE adapter.
     ///
-    /// * `PHOSK_DB=surreal` → file-backed [`phosk_db_surreal::SurrealDb`], seeded
-    ///   on first run (idempotent re-open), stored under `<data_dir>/surreal`.
+    /// * `PHOSK_DB=surreal` → file-backed [`phosk_db_surreal::SurrealDb`] under
+    ///   `<data_dir>/surreal`: the empty starter store in real mode, the demo
+    ///   seed with `PHOSK_DEMO=1` (both written on first run only).
     /// * anything else (default `memory`) → seeded
     ///   [`phosk_db_memory::MemoryDb`] (deterministic 2026-06-18 Swiss seed).
     async fn build_db() -> Result<Arc<dyn DatabaseAdapter>, phosk_core::error::PhoskError> {
@@ -142,7 +171,12 @@ mod composition {
                 phosk_core::error::PhoskError::Invalid(format!("create surreal dir: {e}"))
             })?;
             let path = dir.join("phosk.db");
-            let db = phosk_db_surreal::SurrealDb::file_seeded(&path.to_string_lossy()).await?;
+            let path = path.to_string_lossy();
+            let db = if super::real_mode() {
+                phosk_db_surreal::SurrealDb::file_starter(&path).await?
+            } else {
+                phosk_db_surreal::SurrealDb::file_seeded(&path).await?
+            };
             Ok(Arc::new(db))
         } else {
             let db = phosk_db_memory::MemoryDb::seeded()?;
@@ -187,12 +221,39 @@ mod composition {
         }
         if kind.eq_ignore_ascii_case("vision") || kind.eq_ignore_ascii_case("auto") {
             if let Ok(v) = phosk_ocr_vision::OllamaVisionOcr::from_env() {
-                if matches!(v.has_vision_model().await, Ok(true)) {
+                // Use the configured model when it can see; otherwise the first
+                // installed model that advertises `vision`.
+                if matches!(v.model_has_vision(v.model()).await, Ok(true)) {
                     return Arc::new(v);
+                }
+                if let Ok(Some(model)) = v.detect_vision_model().await {
+                    if let Ok(v) = phosk_ocr_vision::OllamaVisionOcr::new(v.base_url(), model) {
+                        return Arc::new(v);
+                    }
                 }
             }
         }
+        if super::real_mode() {
+            // Never invent a receipt from a real photo.
+            return Arc::new(UnavailableOcr);
+        }
         Arc::new(phosk_adapter_ocr::FakeOcr::new())
+    }
+
+    /// The real-mode OCR when no engine is reachable: every photo is refused
+    /// with a clear reason instead of being read by the canned fake.
+    struct UnavailableOcr;
+
+    #[async_trait::async_trait]
+    impl OcrAdapter for UnavailableOcr {
+        async fn extract(
+            &self,
+            _image: &[u8],
+        ) -> Result<phosk_adapter_ocr::OcrResult, phosk_core::error::PhoskError> {
+            Err(phosk_core::error::PhoskError::Invalid(
+                "no OCR engine available: start Ollama with a vision model (or PaddleOCR) and restart the app".to_owned(),
+            ))
+        }
     }
 
     /// The stack unit tests run against: the seeded memory DB plus the

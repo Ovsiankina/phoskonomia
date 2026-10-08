@@ -28,6 +28,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use chrono::{Datelike, NaiveDate};
 use phosk_adapter_db::DatabaseAdapter;
 use phosk_adapter_llm::LlmAdapter;
 use phosk_core::error::PhoskError;
@@ -124,6 +125,7 @@ pub async fn chat_reply(
     db: &dyn DatabaseAdapter,
     llm: &dyn LlmAdapter,
     text: &str,
+    as_of: NaiveDate,
 ) -> Result<AiChatMsgDto, PhoskError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -134,9 +136,17 @@ pub async fn chat_reply(
         return Err(PhoskError::NotFound("no chat to append to".to_owned()));
     };
 
+    // The model only sees what we hand it: a read-only snapshot of the cycle
+    // and the last few turns. It cannot write anything from here.
+    let context = chat_context(db, as_of).await?;
+    let history = db.chat_messages(chat.id).await?;
+    let recent = &history[history.len().saturating_sub(CHAT_HISTORY_TURNS)..];
+
     // Ask the model first (the only place the chat reply comes from now): a
     // failure here must not leave a saved question without an answer.
-    let raw = llm.complete(&chat_prompt(trimmed)).await?;
+    let raw = llm
+        .complete(&chat_prompt(&context, recent, trimmed))
+        .await?;
     let reply_text = normalize_reply(&raw);
 
     // Persist the user turn verbatim, then the reply.
@@ -145,7 +155,7 @@ pub async fn chat_reply(
         chat_id: chat.id,
         who: "usr".to_owned(),
         text: text.to_owned(),
-        at: chat.started,
+        at: as_of,
     })
     .await?;
 
@@ -154,7 +164,7 @@ pub async fn chat_reply(
         chat_id: chat.id,
         who: "sys".to_owned(),
         text: reply_text.clone(),
-        at: chat.started,
+        at: as_of,
     })
     .await?;
 
@@ -311,10 +321,93 @@ const INSIGHT_PROMPT: &str =
 const SUGGEST_PROMPT: &str =
     "Propose one concrete budgeting action for this cycle as structured JSON.";
 
-/// Build the chat prompt for a user turn.
-fn chat_prompt(user_text: &str) -> String {
+/// How many earlier chat messages the model sees with each new turn.
+const CHAT_HISTORY_TURNS: usize = 8;
+
+/// How many of the latest transactions the chat snapshot lists.
+const CHAT_RECENT_TX: usize = 15;
+
+/// A plain-text, read-only snapshot of the user's money for the chat model:
+/// the calendar month containing `as_of` (budget, savings target, spend per
+/// category against its cap) plus the latest transactions of the last 90
+/// days. Amounts are rendered from exact centimes.
+///
+/// # Errors
+/// Propagates adapter errors.
+pub async fn chat_context(
+    db: &dyn DatabaseAdapter,
+    as_of: NaiveDate,
+) -> Result<String, PhoskError> {
+    use std::fmt::Write as _;
+
+    let month_start = as_of.with_day(1).unwrap_or(as_of);
+    let window_start = as_of - chrono::Days::new(90);
+    let mut txs = db.transactions_between(window_start, as_of).await?;
+    txs.sort_by_key(|t| std::cmp::Reverse(t.date));
+
+    let month: Vec<_> = txs.iter().filter(|t| t.date >= month_start).collect();
+    let spent = Money::sum(month.iter().map(|t| t.amount))?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Today: {as_of}. Currency CHF.");
+    if let Ok(cfg) = db.budget_config().await {
+        let _ = writeln!(
+            out,
+            "Monthly budget: {} · savings target: {} (0 means not set).",
+            cfg.monthly_budget, cfg.savings_target
+        );
+    }
+    let _ = writeln!(out, "Spent this month ({month_start} to {as_of}): {spent}.");
+
+    let caps = db.category_caps().await?;
+    let mut names: Vec<String> = caps.iter().map(|c| c.name.clone()).collect();
+    for t in &month {
+        if !names.contains(&t.category) {
+            names.push(t.category.clone());
+        }
+    }
+    let _ = writeln!(out, "By category this month:");
+    for name in &names {
+        let cat_spent = Money::sum(
+            month
+                .iter()
+                .filter(|t| &t.category == name)
+                .map(|t| t.amount),
+        )?;
+        let cap = caps
+            .iter()
+            .find(|c| &c.name == name)
+            .and_then(|c| c.cap)
+            .map_or_else(|| "no cap".to_owned(), |c| format!("cap {c}"));
+        let _ = writeln!(out, "- {name}: {cat_spent} ({cap})");
+    }
+
+    let _ = writeln!(out, "Latest transactions (newest first):");
+    if txs.is_empty() {
+        let _ = writeln!(out, "- none recorded yet");
+    }
+    for t in txs.iter().take(CHAT_RECENT_TX) {
+        let _ = writeln!(out, "- {} {} [{}] {}", t.date, t.shop, t.category, t.amount);
+    }
+    Ok(out)
+}
+
+/// Build the chat prompt for a user turn: the data snapshot, the recent
+/// conversation, then the new question.
+fn chat_prompt(context: &str, recent: &[Message], user_text: &str) -> String {
+    let mut history = String::new();
+    for m in recent {
+        let who = if m.who == "usr" { "User" } else { "Assistant" };
+        history.push_str(who);
+        history.push_str(": ");
+        history.push_str(&m.text);
+        history.push('\n');
+    }
     format!(
-        "You are Phoskonomia's budgeting assistant. Answer the user concisely.\nUser: {user_text}"
+        "You are Phoskonomia's budgeting assistant for one person in Switzerland. \
+         Answer concisely in plain text (no markdown tables), using only the data below; \
+         if the data does not answer the question, say so. You cannot change any data.\n\n\
+         DATA\n{context}\nCONVERSATION\n{history}User: {user_text}\nAssistant:"
     )
 }
 

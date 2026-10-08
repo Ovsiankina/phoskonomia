@@ -140,20 +140,21 @@ impl OllamaLlm {
     /// `POST /api/generate` with `stream:false` and an optional `format` (the
     /// constrained-output JSON Schema). Returns the model's `response` text.
     async fn generate(&self, prompt: &str, format: Option<&Value>) -> Result<String, PhoskError> {
+        // Thinking stays off for plain completions too: replies from a local
+        // thinking model otherwise take minutes for a one-line answer.
         let mut body = json!({
             "model": self.model,
             "prompt": prompt,
             "stream": false,
+            "think": false,
         });
         if let Some(schema) = format {
             // `body` was just built as an object literal; insert defensively.
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("format".to_owned(), schema.clone());
-                // Disable chain-of-thought for constrained output: thinking
-                // models (e.g. qwen3.6) otherwise emit the schema-constrained
-                // JSON into a `thinking` field and leave `response` empty. With
-                // `think:false` the JSON lands in `response` where we read it.
-                obj.insert("think".to_owned(), Value::Bool(false));
+                // `think:false` (set above) matters doubly here: thinking models
+                // (e.g. qwen3.6) otherwise emit the schema-constrained JSON
+                // into a `thinking` field and leave `response` empty.
             }
         }
 

@@ -350,7 +350,7 @@ pub(crate) async fn list_categories_with(
             uses,
         });
     }
-    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    rows.sort_by_key(|r| r.name.to_lowercase());
     Ok(CategoriesDto {
         rows,
         palette: COLOUR_TOKENS.iter().map(|t| (*t).to_owned()).collect(),

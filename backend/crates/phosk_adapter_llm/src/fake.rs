@@ -58,6 +58,7 @@ use crate::LlmAdapter;
 pub struct FakeLlm {
     model: String,
     replies: HashMap<String, String>,
+    suffix_replies: Vec<(String, String)>,
     structured: HashMap<String, Value>,
     healthy: bool,
     reachable: bool,
@@ -81,6 +82,7 @@ impl FakeLlm {
         Self {
             model: Self::DEFAULT_MODEL.to_owned(),
             replies: HashMap::new(),
+            suffix_replies: Vec::new(),
             structured: HashMap::new(),
             healthy: true,
             reachable: true,
@@ -102,6 +104,19 @@ impl FakeLlm {
     #[must_use]
     pub fn with_reply(mut self, prompt: impl Into<String>, reply: impl Into<String>) -> Self {
         self.replies.insert(prompt.into(), reply.into());
+        self
+    }
+
+    /// Script a reply for any [`LlmAdapter::complete`] prompt that ENDS with
+    /// `suffix` — for prompts whose front is a data snapshot the test does not
+    /// want to restate. Exact-match replies win over suffix ones. Builder-style.
+    #[must_use]
+    pub fn with_reply_ending(
+        mut self,
+        suffix: impl Into<String>,
+        reply: impl Into<String>,
+    ) -> Self {
+        self.suffix_replies.push((suffix.into(), reply.into()));
         self
     }
 
@@ -215,11 +230,14 @@ impl LlmAdapter for FakeLlm {
         if prompt.is_empty() {
             return Err(PhoskError::Invalid("empty prompt".to_owned()));
         }
+        if let Some(reply) = self.replies.get(prompt) {
+            return Ok(reply.clone());
+        }
         Ok(self
-            .replies
-            .get(prompt)
-            .cloned()
-            .unwrap_or_else(|| format!("echo: {prompt}")))
+            .suffix_replies
+            .iter()
+            .find(|(suffix, _)| prompt.ends_with(suffix.as_str()))
+            .map_or_else(|| format!("echo: {prompt}"), |(_, reply)| reply.clone()))
     }
 
     async fn generate_structured(
