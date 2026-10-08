@@ -335,7 +335,9 @@ const CHAT_RECENT_TX: usize = 15;
 /// A plain-text, read-only snapshot of the user's money for the chat model:
 /// the calendar month containing `as_of` (budget, savings target, spend per
 /// category against its cap) plus the latest transactions of the last 90
-/// days. Amounts are rendered from exact centimes.
+/// days. Amounts are rendered from exact centimes. Spend per category is
+/// item-level: a receipt's lines count under their own category
+/// (`phosk_adapter_db::spend`).
 ///
 /// # Errors
 /// Propagates adapter errors.
@@ -365,20 +367,17 @@ pub async fn chat_context(
     let _ = writeln!(out, "Spent this month ({month_start} to {as_of}): {spent}.");
 
     let caps = db.category_caps().await?;
+    let receipts = db.receipts_between(month_start, as_of).await?;
+    let parts = phosk_adapter_db::spend::receipt_parts(db, &receipts).await?;
     let mut names: Vec<String> = caps.iter().map(|c| c.name.clone()).collect();
-    for t in &month {
-        if !names.contains(&t.category) {
-            names.push(t.category.clone());
+    for p in &parts {
+        if !names.contains(&p.category) {
+            names.push(p.category.clone());
         }
     }
     let _ = writeln!(out, "By category this month:");
     for name in &names {
-        let cat_spent = Money::sum(
-            month
-                .iter()
-                .filter(|t| &t.category == name)
-                .map(|t| t.amount),
-        )?;
+        let cat_spent = phosk_adapter_db::spend::spent_in(&parts, name)?;
         let cap = caps
             .iter()
             .find(|c| &c.name == name)

@@ -393,3 +393,20 @@ async fn chat_context_is_built_from_the_users_data() {
     // The seeded June cycle has grocery spend; it must reach the model.
     assert!(ctx.contains("Migros"), "{ctx}");
 }
+
+/// The chat snapshot's per-category spend is item-level: the seeded Migros
+/// receipt t1 (filed under Groceries) has a CHF 5.60 flat-white line booked
+/// under Coffee & snacks, and the model sees it there.
+#[tokio::test]
+async fn chat_context_counts_spend_by_line_category() {
+    let db = db();
+    let ctx = chat_context(&db, as_of()).await.expect("context");
+    assert!(
+        ctx.contains("- Groceries: CHF 125.35 (cap CHF 800.00)"),
+        "{ctx}"
+    );
+    assert!(
+        ctx.contains("- Coffee & snacks: CHF 18.40 (cap CHF 120.00)"),
+        "{ctx}"
+    );
+}

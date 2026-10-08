@@ -12,10 +12,11 @@
 use serde::{Deserialize, Serialize};
 
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_db::spend::{self, CategoryPart};
 use phosk_core::cycle::{CycleWindow, Period};
 use phosk_core::error::PhoskError;
 use phosk_core::money::Money;
-use phosk_model::{CategoryCap, Receipt};
+use phosk_model::CategoryCap;
 
 /// The `source` label of an insight computed from the user's data by plain
 /// arithmetic (no language model involved).
@@ -51,13 +52,17 @@ pub async fn dismiss_feed_item(db: &dyn DatabaseAdapter, id: &str) -> Result<(),
 /// computed from the data, in this order of priority:
 ///
 /// 1. no spend recorded this cycle → says so;
-/// 2. a capped category whose run-rate projection overshoots its cap → the
-///    worst one, with the avoidable overshoot as the estimated saving;
+/// 2. a capped, non-fixed category whose projection overshoots its cap →
+///    the worst one, with the avoidable overshoot as the estimated saving;
 /// 3. a monthly budget is set → the cycle's pace against it (an overshoot
 ///    is the estimated saving);
 /// 4. otherwise → the cycle's spend so far and its biggest category.
 ///
-/// Spend is "to date" (`[start, as_of]`), projected linearly to the cycle end.
+/// Spend is "to date" (`[start, as_of]`) and item-level (a receipt's lines
+/// count under their own category, `phosk_adapter_db::spend`). It is
+/// projected to the cycle end with fixed charges as paid and only the rest
+/// run-rated ([`CycleWindow::project_spend`]): rent paid on day 1 is the
+/// month's rent, not a daily habit.
 ///
 /// # Errors
 /// Propagates any [`PhoskError`] from cycle resolution, the adapter reads, or
@@ -69,14 +74,16 @@ pub async fn dashboard_insight(
 ) -> Result<InsightDto, PhoskError> {
     let window = Period::Month.resolve(as_of)?;
     let receipts = db.receipts_between(window.start, window.as_of).await?;
+    let parts = spend::receipt_parts(db, &receipts).await?;
     let caps = db.category_caps().await?;
     let budget = db.budget_config().await?.monthly_budget;
-    compose_insight(&receipts, &caps, budget, window)
+    compose_insight(&parts, &caps, budget, window)
 }
 
-/// The pure core of [`dashboard_insight`] (see there for the rules).
+/// The pure core of [`dashboard_insight`] (see there for the rules), over
+/// the cycle's item-level spend shares.
 fn compose_insight(
-    receipts: &[Receipt],
+    parts: &[CategoryPart<'_>],
     caps: &[CategoryCap],
     budget: Money,
     window: CycleWindow,
@@ -87,8 +94,8 @@ fn compose_insight(
         estimated_savings: saving.max(Money::ZERO),
     };
 
-    let spent = Money::sum(receipts.iter().map(|r| r.amount))?;
-    if receipts.is_empty() || spent.centimes() <= 0 {
+    let spent = Money::sum(parts.iter().map(|p| p.amount))?;
+    if parts.is_empty() || spent.centimes() <= 0 {
         return Ok(insight(
             "No spending recorded this cycle yet. Add a receipt or a transaction and this line will track your pace.".to_owned(),
             Money::ZERO,
@@ -96,19 +103,17 @@ fn compose_insight(
     }
     let days_left = window.days_left();
 
-    // (2) The capped category heading furthest past its cap.
+    // (2) The capped category heading furthest past its cap. A fixed channel
+    // is skipped: its charge is what it is, there is no pace to warn about.
     let mut worst: Option<(String, Money, Money, Money)> = None; // name, spent, cap, projected
-    for cap in caps {
+    for cap in caps.iter().filter(|c| !c.fixed) {
         let Some(limit) = cap.cap.filter(|c| c.centimes() > 0) else {
             continue;
         };
-        let cat_spent = Money::sum(
-            receipts
-                .iter()
-                .filter(|r| r.category == cap.name)
-                .map(|r| r.amount),
-        )?;
-        let projected = project(cat_spent, window)?;
+        let (fixed, variable) =
+            spend::fixed_and_variable(parts.iter().filter(|p| p.category == cap.name), caps)?;
+        let cat_spent = fixed.checked_add(variable)?;
+        let projected = window.project_spend(fixed, variable)?;
         let over = projected.checked_sub(limit)?;
         if over.centimes() > 0
             && worst
@@ -137,8 +142,9 @@ fn compose_insight(
         return Ok(insight(text, saving));
     }
 
-    // (3) Pace against the monthly budget.
-    let projected = project(spent, window)?;
+    // (3) Pace against the monthly budget: fixed charges as paid.
+    let (fixed, variable) = spend::fixed_and_variable(parts, caps)?;
+    let projected = window.project_spend(fixed, variable)?;
     if budget.centimes() > 0 {
         if projected > budget {
             let over = projected.checked_sub(budget)?;
@@ -160,7 +166,7 @@ fn compose_insight(
     }
 
     // (4) No budget: what the money went on.
-    let (top, top_spent) = biggest_category(receipts)?;
+    let (top, top_spent) = biggest_category(parts)?;
     let share = percent_of(top_spent, spent);
     Ok(insight(
         format!(
@@ -170,27 +176,9 @@ fn compose_insight(
     ))
 }
 
-/// Linear run-rate projection of `spent` (to date) to the end of the window:
-/// `spent · len_days / day_index`, in exact centimes.
-fn project(spent: Money, window: CycleWindow) -> Result<Money, PhoskError> {
-    let day_index = i64::from(window.day_index().max(1));
-    let len_days = i64::from(window.len_days());
-    let scaled = spent
-        .centimes()
-        .checked_mul(len_days)
-        .ok_or_else(|| PhoskError::Overflow(format!("projecting {spent} over {len_days} days")))?;
-    Ok(Money::from_centimes(scaled / day_index))
-}
-
 /// The category with the most spend (ties broken by name, ascending).
-fn biggest_category(receipts: &[Receipt]) -> Result<(String, Money), PhoskError> {
-    let mut totals: Vec<(String, Money)> = Vec::new();
-    for r in receipts {
-        match totals.iter_mut().find(|(n, _)| *n == r.category) {
-            Some((_, t)) => *t = t.checked_add(r.amount)?,
-            None => totals.push((r.category.clone(), r.amount)),
-        }
-    }
+fn biggest_category(parts: &[CategoryPart<'_>]) -> Result<(String, Money), PhoskError> {
+    let mut totals = spend::totals_by_category(parts)?;
     totals.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Ok(totals
         .into_iter()
@@ -226,6 +214,8 @@ mod tests {
         Period::Month.resolve(d(2026, 6, day)).expect("window")
     }
 
+    use phosk_model::{LineItem, Receipt};
+
     fn receipt(category: &str, chf: i64) -> Receipt {
         Receipt {
             id: phosk_id::ReceiptId::default(),
@@ -239,6 +229,21 @@ mod tests {
             source_kind: "MANUAL".to_owned(),
             ocr_engine: String::new(),
             ocr_regions: 0,
+        }
+    }
+
+    /// The shares of total-only receipts (one per receipt, its category).
+    fn parts(receipts: &[Receipt]) -> Vec<CategoryPart<'_>> {
+        receipts
+            .iter()
+            .flat_map(|r| spend::split_receipt(r, &[]).expect("split"))
+            .collect()
+    }
+
+    fn fixed_cap(name: &str, chf: i64) -> CategoryCap {
+        CategoryCap {
+            fixed: true,
+            ..cap(name, Some(chf))
         }
     }
 
@@ -264,11 +269,77 @@ mod tests {
     }
 
     #[test]
+    fn a_day_one_fixed_charge_is_not_projected() {
+        // Day 1 of 30: rent 1680 (fixed cap) + groceries 30. Rent is not
+        // a "worst overshoot" (it is the month's rent, not ×30), and the
+        // pace is 1680 + 30·30 = 2580 against a 3000 budget: on pace.
+        let receipts = [receipt("Rent", 1_680), receipt("Groceries", 30)];
+        let caps = [fixed_cap("Rent", 1_680), cap("Groceries", Some(1_000))];
+        let budget = Money::from_centimes(300_000);
+        let i = compose_insight(&parts(&receipts), &caps, budget, window(1)).expect("insight");
+        assert_eq!(
+            i.text,
+            "On pace: CHF 1'710.00 spent so far, heading for CHF 2'580.00 of your CHF 3'000.00 budget (CHF 420.00 to spare)."
+        );
+        assert_eq!(i.estimated_savings, Money::ZERO);
+    }
+
+    #[test]
+    fn a_fixed_receipt_in_a_variable_channel_is_carried_as_paid() {
+        // Day 10 of 30: a CHF 90 yearly fee flagged fixed + CHF 10 of use in
+        // one CHF 120 channel → 90 + 10·3 = 120, not (90 + 10)·3 = 300.
+        let mut fee = receipt("Sport", 90);
+        fee.fixed = true;
+        let receipts = [fee, receipt("Sport", 10)];
+        let caps = [cap("Sport", Some(120))];
+        let i = compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10))
+            .expect("insight");
+        assert!(i.text.starts_with("CHF 100.00 spent so far"), "{}", i.text);
+    }
+
+    #[test]
+    fn line_categories_drive_the_insight() {
+        // A CHF 100 grocery receipt whose CHF 40 line is Coffee: Coffee
+        // (40 → 120 projected) overshoots its 50 cap, Groceries (60 → 180)
+        // stays under its 200 cap.
+        let r = receipt("Groceries", 100);
+        let line = |category: &str, chf: i64| LineItem {
+            id: phosk_id::LineItemId::default(),
+            receipt_id: r.id,
+            name: String::new(),
+            qty: 1.0,
+            unit_price: Money::from_centimes(chf * 100),
+            line_total: Money::from_centimes(chf * 100),
+            category: category.to_owned(),
+            signal_id: None,
+            provenance: phosk_model::Provenance::user_entered(),
+        };
+        let lines = [line("Groceries", 60), line("Coffee", 40)];
+        let parts = spend::split_receipt(&r, &lines).expect("split");
+        let caps = [cap("Groceries", Some(200)), cap("Coffee", Some(50))];
+        let i = compose_insight(&parts, &caps, Money::ZERO, window(10)).expect("insight");
+        assert_eq!(
+            i.text,
+            "At this pace Coffee ends the cycle at CHF 120.00, CHF 70.00 over its CHF 50.00 cap."
+        );
+    }
+
+    #[test]
+    fn no_spend_says_so_even_with_caps() {
+        let caps = [cap("Coffee", Some(50))];
+        let i = compose_insight(&[], &caps, Money::ZERO, window(10)).expect("insight");
+        assert_eq!(i.source, COMPUTED_SOURCE);
+        assert!(i.text.starts_with("No spending recorded"), "{}", i.text);
+        assert_eq!(i.estimated_savings, Money::ZERO);
+    }
+
+    #[test]
     fn worst_projected_cap_overshoot_wins() {
         // Day 10 of 30: projections are ×3.
         let receipts = [receipt("Coffee", 30), receipt("Food", 100)];
         let caps = [cap("Coffee", Some(50)), cap("Food", Some(200))];
-        let i = compose_insight(&receipts, &caps, Money::ZERO, window(10)).expect("insight");
+        let i = compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10))
+            .expect("insight");
         // Coffee → 90 vs 50 (40 over); Food → 300 vs 200 (100 over).
         assert_eq!(
             i.text,
@@ -281,7 +352,8 @@ mod tests {
     fn a_blown_cap_counts_only_the_still_avoidable_spend() {
         let receipts = [receipt("Coffee", 60)];
         let caps = [cap("Coffee", Some(50))];
-        let i = compose_insight(&receipts, &caps, Money::ZERO, window(10)).expect("insight");
+        let i = compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10))
+            .expect("insight");
         assert_eq!(
             i.text,
             "Coffee is already CHF 10.00 over its CHF 50.00 cap, with 20 days left in the cycle."
@@ -295,7 +367,7 @@ mod tests {
         let receipts = [receipt("Food", 100)];
         let caps = [cap("Food", None)];
         let budget = Money::from_centimes(20_000);
-        let i = compose_insight(&receipts, &caps, budget, window(10)).expect("insight");
+        let i = compose_insight(&parts(&receipts), &caps, budget, window(10)).expect("insight");
         assert_eq!(
             i.text,
             "At this pace you spend CHF 300.00 this cycle, CHF 100.00 over your CHF 200.00 budget."
@@ -303,7 +375,7 @@ mod tests {
         assert_eq!(i.estimated_savings, Money::from_centimes(10_000));
 
         let roomy = Money::from_centimes(50_000);
-        let i = compose_insight(&receipts, &caps, roomy, window(10)).expect("insight");
+        let i = compose_insight(&parts(&receipts), &caps, roomy, window(10)).expect("insight");
         assert!(
             i.text.starts_with("On pace: CHF 100.00 spent"),
             "{}",
@@ -315,7 +387,7 @@ mod tests {
     #[test]
     fn no_budget_names_the_biggest_category() {
         let receipts = [receipt("Food", 75), receipt("Coffee", 25)];
-        let i = compose_insight(&receipts, &[], Money::ZERO, window(10)).expect("insight");
+        let i = compose_insight(&parts(&receipts), &[], Money::ZERO, window(10)).expect("insight");
         assert_eq!(
             i.text,
             "CHF 100.00 spent so far this cycle; Food is the biggest share at 75%. Set a monthly budget to see your pace."
