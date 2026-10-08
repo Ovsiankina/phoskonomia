@@ -286,6 +286,81 @@ mod composition {
             })
             .await
     }
+
+    /// A live run of the receipt intake through the REAL OCR and model wiring
+    /// (what [`stack`] builds outside tests) on a seeded in-memory DB and an
+    /// in-memory photo store. Ignored by default: it needs Ollama with a
+    /// vision model and takes about a minute.
+    ///
+    /// ```text
+    /// PHOSK_LIVE_RECEIPT=/path/to/receipt.jpg cargo test --no-default-features \
+    ///     --features server live_receipt -- --ignored --nocapture
+    /// ```
+    #[cfg(test)]
+    mod live {
+        #![allow(clippy::expect_used, clippy::panic, reason = "test code")]
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "needs a live Ollama with a vision model (~70 s)"]
+        async fn live_receipt_intake_reports_meaningful_confidence() {
+            let path = std::env::var("PHOSK_LIVE_RECEIPT")
+                .expect("set PHOSK_LIVE_RECEIPT to a receipt photo");
+            let bytes = std::fs::read(&path).expect("read the receipt photo");
+            let db = phosk_db_memory::MemoryDb::seeded().expect("seeded db");
+            let storage = phosk_adapter_storage::InMemoryStorage::new();
+            let ocr = super::build_ocr().await;
+            let llm = super::build_llm().expect("ollama llm");
+
+            let text = ocr.extract(&bytes).await.expect("ocr").full_text;
+            assert!(
+                !text.starts_with("MIGROS GENEVE"),
+                "no live OCR engine answered (got the canned fake)"
+            );
+            println!("── OCR ──\n{text}");
+
+            let out = phosk_pipeline_receipt::intake_receipt(
+                &db,
+                &storage,
+                ocr.as_ref(),
+                llm.as_ref(),
+                phosk_pipeline_receipt::IntakePhoto {
+                    bytes: &bytes,
+                    captured_on: chrono::Local::now().date_naive(),
+                },
+            )
+            .await
+            .expect("intake");
+            println!(
+                "── receipt ── {} · {} · {} · CHF {:.2} · confidence {:.2}",
+                out.receipt.shop,
+                out.receipt.date,
+                out.receipt.category,
+                out.receipt.amount.as_chf_f64(),
+                out.receipt.provenance.confidence
+            );
+            for l in &out.line_items {
+                println!(
+                    "{:<32} {:>6} × {:>8.2} = {:>8.2}  {:<16} conf {:.2}{}",
+                    l.name,
+                    l.qty,
+                    l.unit_price.as_chf_f64(),
+                    l.line_total.as_chf_f64(),
+                    l.category,
+                    l.provenance.confidence,
+                    if l.provenance.is_low_confidence() {
+                        "  LOW"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            assert!(!out.line_items.is_empty(), "the model read no line");
+            assert!(
+                out.low_confidence_lines < out.line_items.len(),
+                "every line came back low-confidence"
+            );
+        }
+    }
 }
 
 /// The server-side composition root for one `#[server]` invocation.
@@ -332,9 +407,10 @@ impl Session {
 /// | env var          | values                              | default                  |
 /// |------------------|-------------------------------------|--------------------------|
 /// | `PHOSK_DB`       | `surreal` (file) \| `memory`        | `memory` (seeded)        |
+/// | `PHOSK_DEMO`     | `1` = demo seed even on `surreal`   | unset                    |
 /// | `PHOSK_LLM_MODEL`| any Ollama model tag                | `qwen3.6:35b-custom`     |
-/// | `PHOSK_OCR`      | `paddle` \| `vision` \| `auto`      | `auto` (→ fake if none)  |
-/// | `PHOSK_DATA_DIR` | a path for file-backed adapters     | `./phosk-data`           |
+/// | `PHOSK_OCR`      | `paddle` \| `vision` \| `auto`      | `auto` (→ fake if none; refused in real mode) |
+/// | `PHOSK_DATA_DIR` | a path for file-backed adapters     | `~/.local/share/phoskonomia` in real mode, else `./phosk-data` |
 ///
 /// Server fns and feature services are untouched by a swap because they only
 /// ever see the `&dyn _` PORT objects [`Session`] exposes.

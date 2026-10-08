@@ -128,6 +128,22 @@ async fn a_staged_proposal_is_listed_with_its_lines() {
     assert_eq!(r.lines[1].unit_price, money(320));
     let low: Vec<bool> = r.lines.iter().map(|l| l.low_confidence).collect();
     assert_eq!(low, [false, false, true], "the shared < 0.7 rule");
+    assert!(!r.low_confidence, "a 0.82 receipt is not flagged");
+}
+
+/// A receipt intake flagged (a guessed category caps it below 0.7) carries
+/// the flag to the review, even when every line is confident.
+#[tokio::test]
+async fn a_low_confidence_receipt_is_flagged_in_the_queue() {
+    let db = fresh_db();
+    let mut p = proposal(SLUG);
+    p.receipt.provenance.confidence = 0.5;
+    enqueue(&db, &p).await;
+
+    let groups = queue(&db).await;
+    let r = groups[0].proposals[0].receipt.as_ref().expect("inline");
+    assert!(r.low_confidence);
+    assert!((r.confidence - 0.5).abs() < f64::EPSILON);
 }
 
 #[tokio::test]

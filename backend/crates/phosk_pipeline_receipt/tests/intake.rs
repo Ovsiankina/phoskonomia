@@ -820,3 +820,71 @@ async fn an_unknown_receipt_category_is_derived_not_invented() {
     assert_eq!(outcome.line_items[0].category, "Other");
     assert!(outcome.line_items[0].provenance.is_low_confidence());
 }
+
+/// A receipt whose category the model never chose — it answered a name the
+/// user does not have, and intake fell back to the lines' majority or
+/// `Other` — is booked into a guess, so the receipt itself is flagged below
+/// the review threshold (staged proposal and queue entry alike). A category
+/// the model did choose keeps the slip's OCR confidence.
+#[tokio::test]
+async fn a_guessed_receipt_category_is_flagged_for_review() {
+    let db = empty_db();
+    let lines = json!([
+        {"name": "Sponge", "qty": 1.0, "unitPriceCentimes": 200, "category": "Household", "confidence": 0.95},
+        {"name": "Bucket", "qty": 1.0, "unitPriceCentimes": 900, "category": "Household", "confidence": 0.95}
+    ]);
+
+    // Unknown → the lines' majority category, flagged.
+    let out = json!({ "shop": "Jumbo", "category": "DIY", "lineItems": lines.clone() });
+    let outcome = intake_with(&db, out, b"guess-majority")
+        .await
+        .expect("intake ok");
+    assert_eq!(outcome.receipt.category, "Household");
+    assert!(
+        outcome.receipt.provenance.is_low_confidence(),
+        "a guessed receipt category is flagged"
+    );
+    assert_eq!(outcome.low_confidence_lines, 0, "the lines were chosen");
+    let staged = db
+        .receipt_proposal(outcome.suggestion_id)
+        .await
+        .expect("read")
+        .expect("staged");
+    assert!(staged.receipt.provenance.is_low_confidence());
+    let queued = db
+        .ai_suggestions()
+        .await
+        .expect("queue")
+        .into_iter()
+        .find(|s| s.id == outcome.suggestion_id)
+        .expect("enqueued");
+    assert!(phosk_model::is_low_confidence(queued.confidence));
+    assert!(queued.text.contains("category guessed"), "{}", queued.text);
+
+    // No category at all → `Other`, flagged too.
+    let out = json!({ "shop": "Kiosk", "lineItems": [
+        {"name": "Thing", "qty": 1.0, "unitPriceCentimes": 500, "confidence": 0.95}
+    ]});
+    let outcome = intake_with(&db, out, b"guess-other")
+        .await
+        .expect("intake ok");
+    assert_eq!(outcome.receipt.category, "Other");
+    assert!(outcome.receipt.provenance.is_low_confidence());
+
+    // Chosen by the model (case aside) → not flagged.
+    let out = json!({ "shop": "Jumbo", "category": "household", "lineItems": lines });
+    let outcome = intake_with(&db, out, b"chosen").await.expect("intake ok");
+    assert_eq!(outcome.receipt.category, "Household");
+    assert!(
+        !outcome.receipt.provenance.is_low_confidence(),
+        "a chosen category keeps the OCR confidence"
+    );
+    let queued = db
+        .ai_suggestions()
+        .await
+        .expect("queue")
+        .into_iter()
+        .find(|s| s.id == outcome.suggestion_id)
+        .expect("enqueued");
+    assert!(!queued.text.contains("category guessed"));
+}

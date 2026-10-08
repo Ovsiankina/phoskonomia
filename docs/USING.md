@@ -4,7 +4,7 @@ One command starts the app on your own data:
 
 ```bash
 scripts/phosk            # your data
-scripts/phosk --demo     # the seeded demo on port 3718 (nothing you enter is kept)
+scripts/phosk --demo     # the seeded demo on port 3718, in a throw-away temp dir
 ```
 
 The launcher:
@@ -15,9 +15,13 @@ The launcher:
    `OLLAMA_MODELS` is not already set) and logs to
    `~/.local/state/phoskonomia/ollama.log`. Without Ollama the app still runs,
    but the assistant and receipt reading are unavailable.
-2. builds the release app with `dx build --release --platform web` — on the
-   first run, and again only when a source file is newer than the built
-   server. `--build` forces a rebuild.
+2. builds the release app with
+   `dx build --release --platform web --fullstack true --debug-symbols false`
+   — on the first run, and again only when a source file is newer than the
+   built server. `--build` forces a rebuild. `--debug-symbols false` is what
+   lets `wasm-opt` shrink the client: with dx's default (debug symbols on) it
+   aborts on the DWARF data ("this may be an unsupported version of DWARF")
+   and dx ships the unoptimised wasm.
 3. runs the release server bound to **127.0.0.1 only**, waits until it
    answers and opens it in your browser (`xdg-open`; `--no-open` skips that).
    `Ctrl-C` stops it.
@@ -38,11 +42,26 @@ the app runs in **real mode**:
   monthly budget, the default preferences, and one empty chat. The ledger
   starts empty;
 - "today" is your local date;
-- a receipt photo is read by a vision model on Ollama. If none is available
-  the photo is refused; the app never makes up a receipt.
+- a receipt photo is read by PaddleOCR when its service answers, otherwise by
+  a vision model on Ollama. If neither is available the photo is refused; the
+  app never makes up a receipt;
+- every start brings the category list back into one piece: each Budgets
+  category gets its dashboard row (with the same cap), and a dashboard-only
+  category is dropped, or, if a receipt, line or subscription still uses it,
+  added to Budgets with no cap. A store already in step is left as it is.
 
 Only one process can open the database at a time. A second `scripts/phosk`
 detects the running one and just opens the browser.
+
+## The demo
+
+`scripts/phosk --demo` runs the seeded demo (the 2026-06-18 Swiss data set,
+"today" pinned to that date) on port 3718, so it can run next to your real
+instance. It never touches your data: every demo run gets a fresh temp dir
+(`mktemp -d`), which replaces any `PHOSK_DATA_DIR` you exported and is deleted
+when the demo stops. Uploads land there, and so does the database if you ask
+for a file-backed demo with `PHOSK_DEMO_DB=surreal` (the default is the
+in-memory store). Nothing you enter in the demo is kept.
 
 ## Receipts, from photo to ledger
 
@@ -52,8 +71,8 @@ detects the running one and just opens the browser.
    future, at most a year old); otherwise today's date.
 2. The model can only pick from your categories. If it answers with a name
    that is not one of yours anyway, the receipt gets the category most of its
-   lines carry (else `Other`), and a line whose category had to be guessed is
-   flagged *LOW CONF · REVIEW*.
+   lines carry (else `Other`) and is flagged *LOW CONF* next to its category;
+   a line whose category had to be guessed is flagged *LOW CONF · REVIEW*.
 3. **APPROVE** (on /receipt or **/approvals**) books it. Then it shows in
    Transactions with its lines, counts against its envelope on Budgets, and in
    the dashboard totals.
@@ -83,7 +102,8 @@ and the receipt reader all see the same list:
 |--------------------|-------------------------------------------------|---------------------------|
 | `PHOSK_PORT`       | port the server listens on                      | `3717` (`3718` with `--demo`) |
 | `PHOSK_IP`         | address it binds to (keep it on loopback)       | `127.0.0.1`               |
-| `PHOSK_OLLAMA_URL` | where the launcher checks for Ollama            | `http://127.0.0.1:11434`  |
+| `PHOSK_DEMO_DB`    | `--demo` only: `memory` or `surreal` (a file store inside the demo's temp dir) | `memory` |
+| `PHOSK_OLLAMA_URL` | where the launcher checks for (and starts) Ollama; the app itself always talks to `http://localhost:11434` for chat and to `PHOSK_OCR_VISION_URL` for receipt reading | `http://127.0.0.1:11434`  |
 | `OLLAMA_MODELS`    | model dir for an `ollama serve` it starts       | `/var/lib/ollama` if present |
 | `CARGO_TARGET_DIR` | build output (the release server lives in `dx/dioxus-app/release/web/`) | `<repo>/target` |
 
@@ -94,9 +114,9 @@ adapters):
 |--------------------------|-----------------------------------------------|-----------------------------|
 | `PHOSK_DB`               | `surreal` (file) or `memory` (seeded demo)    | `memory`                    |
 | `PHOSK_DEMO`             | `1` = seeded demo even with `PHOSK_DB=surreal` | unset                      |
-| `PHOSK_DATA_DIR`         | data directory                                | `~/.local/share/phoskonomia` in real mode, `./phosk-data` otherwise |
+| `PHOSK_DATA_DIR`         | data directory (`scripts/phosk --demo` replaces it with a temp dir) | `~/.local/share/phoskonomia` in real mode, `./phosk-data` otherwise |
 | `PHOSK_LLM_MODEL`        | Ollama model for chat and receipt extraction  | `qwen3.6:35b-custom`        |
-| `PHOSK_OCR`              | `auto`, `paddle` or `vision`                  | `auto`                      |
+| `PHOSK_OCR`              | `auto` (PaddleOCR if it answers, else an Ollama vision model), `paddle` or `vision`. With no engine: refused in real mode, a canned fake receipt otherwise | `auto` |
 | `PHOSK_OCR_VISION_URL`   | Ollama URL for vision OCR                     | `http://localhost:11434`    |
 | `PHOSK_OCR_VISION_MODEL` | vision model (else the first installed one that can see) | `llava`          |
 | `PHOSK_OCR_URL`          | PaddleOCR service URL                         | `http://localhost:8868`     |
