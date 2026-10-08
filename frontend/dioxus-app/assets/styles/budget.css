@@ -168,7 +168,7 @@
 .cap-act:disabled, .cap-in input[readonly], .cap-val:disabled { cursor: progress; opacity: .5; }
 
 /* ---- global budget figures: MONTHLY BUDGET card editor (tokens only) ---- */
-.fig-val { display: block; background: none; border: 0; border-bottom: var(--bw-hair) dashed var(--hairline);
+.fig-val { display: block; white-space: nowrap; background: none; border: 0; border-bottom: var(--bw-hair) dashed var(--hairline);
   border-radius: var(--r-0); padding: 0; cursor: text; text-align: left; color: var(--ink);
   transition: color .12s, border-color .12s, text-shadow .12s; }
 .fig-val.sm { display: inline-block; font-family: var(--font-display); font-size: var(--t-sm); }

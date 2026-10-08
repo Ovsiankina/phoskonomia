@@ -273,6 +273,8 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
     // and leanest only exist once a cycle has settled.
     let num = |m: Option<Money>| m.map_or("—".to_string(), chf0);
     let settled = s.as_ref().filter(|st| st.avg_cycles > 0);
+    // Peak and leanest only mean something across two or more settled cycles.
+    let has_range = s.as_ref().is_some_and(|st| st.avg_cycles > 1);
     let avg_k = settled.map_or(String::new(), |st| format!("AVG · {} CYC", st.avg_cycles));
     let avg_str = num(settled.map(|st| st.avg));
     let peak_spend = num(settled.map(|st| st.peak.spend));
@@ -551,6 +553,8 @@ fn SpendTrend(points: Vec<SpendPointDto>, stats: Option<SpendStatsDto>, is_rate:
                         " "
                         b { "CHF {avg_str}" }
                     }
+                }
+                if has_range {
                     span { class: "tf",
                         i { "PEAK" }
                         " "
@@ -1060,6 +1064,11 @@ pub fn AnalyticsPage() -> Element {
     let months_str = stats_v
         .as_ref()
         .map_or("—".to_string(), |s| s.months.to_string());
+    let cycles_word = if stats_v.as_ref().is_some_and(|s| s.months == 1) {
+        "cycle"
+    } else {
+        "cycles"
+    };
     let sig_count_str = sig_count.to_string();
     let cats_count_str = sorted_cats.len().to_string();
     // The momentum baseline: the cycles the cards actually average (the
@@ -1089,9 +1098,20 @@ pub fn AnalyticsPage() -> Element {
         let arrow = if v > 0 { "↑" } else { "↓" };
         format!("{arrow} {}%", v.abs())
     });
-    let pace_vs_avg_cls = match pace_vs_avg {
-        Some(v) if v > 0 => "up",
-        _ => "dn",
+    // One line: "on pace for CHF X · ↑ 12% vs avg" (or "· first cycle on record").
+    let pace_lead = run_rate_str.as_ref().map_or(String::new(), |rr| {
+        let sep = if pace_vs_avg_str.is_some() {
+            " · "
+        } else {
+            ""
+        };
+        format!("on pace for CHF {rr}{sep}")
+    });
+    let pace_delta = pace_vs_avg_str.clone().unwrap_or_default();
+    let pace_tail = match (&run_rate_str, &pace_vs_avg_str) {
+        (None, _) => String::new(),
+        (Some(_), Some(_)) => " vs avg".to_string(),
+        (Some(_), None) => " · first cycle on record".to_string(),
     };
 
     let avg_cycles = stats_v.as_ref().map_or(0, |s| s.avg_cycles);
@@ -1116,7 +1136,11 @@ pub fn AnalyticsPage() -> Element {
             } else {
                 String::new()
             };
-            format!("{budget}peak {} {}", s.peak.m, chf0(s.peak.spend))
+            if s.avg_cycles > 1 {
+                format!("{budget}peak {} {}", s.peak.m, chf0(s.peak.spend))
+            } else {
+                format!("{budget}one settled cycle so far")
+            }
         }
     };
 
@@ -1284,7 +1308,7 @@ pub fn AnalyticsPage() -> Element {
                                     div { class: "ttl", "Analytics" }
                                     div { class: "sum",
                                         b { "{months_str}" }
-                                        " cycles on record · trending "
+                                        " {cycles_word} on record · trending "
                                         span { class: "coral", "CHF {cur_spend_str}" }
                                         " this cycle ·"
                                         b { " {sig_count_str}" }
@@ -1316,18 +1340,9 @@ pub fn AnalyticsPage() -> Element {
                                         span { class: "cur", "CHF" }
                                         "{cur_spend_str}"
                                     }
-                                    div { class: "sub",
-                                        if let Some(rr) = run_rate_str.clone() {
-                                            "on pace for CHF {rr}"
-                                            if let Some(d) = pace_vs_avg_str.clone() {
-                                                " · "
-                                                span { class: "{pace_vs_avg_cls}", "{d}" }
-                                                " vs avg"
-                                            } else {
-                                                " · first cycle on record"
-                                            }
-                                        }
-                                    }
+                                    // One text node: the KPI sub-line lays out its
+                                    // children as separate rows.
+                                    div { class: "sub", "{pace_lead}{pace_delta}{pace_tail}" }
                                 }
                                 div { class: "akpi blue",
                                     div { class: "lbl",

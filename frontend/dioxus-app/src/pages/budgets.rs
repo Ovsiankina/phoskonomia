@@ -1250,7 +1250,7 @@ fn EnvCard(
             }
             div { class: "env-amt",
                 span { class: "sp", "CHF {spent_txt}" }
-                span { class: "cap", "/ {cap_txt}" }
+                span { class: "cap", if cap.is_some() { "/ {cap_txt}" } else { "· {cap_txt}" } }
                 span { class: "{pct_amt_cls}", "{pct_txt}" }
             }
             EnvMeter { c: c.clone(), cap, show_proj }

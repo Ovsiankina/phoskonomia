@@ -425,11 +425,11 @@ pub fn DashboardPage() -> Element {
 
     // category lists.
     let categories: Vec<CategoryDto> = cats_v.clone().unwrap_or_default();
-    // The five busiest categories this cycle (stable on ties, so an empty store
-    // keeps its own order).
+    // The five busiest tunable categories this cycle, fixed charges after them
+    // (stable on ties, so an empty store keeps its own order).
     let channels: Vec<CategoryDto> = {
         let mut by_spend = categories.clone();
-        by_spend.sort_by_key(|c| std::cmp::Reverse(c.spent.centimes()));
+        by_spend.sort_by_key(|c| (c.fixed, std::cmp::Reverse(c.spent.centimes())));
         by_spend.into_iter().take(5).collect()
     };
     let cat_rows: Vec<Cat> = categories.iter().map(cat_of).collect();

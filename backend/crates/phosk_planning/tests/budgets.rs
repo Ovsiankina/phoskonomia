@@ -711,7 +711,7 @@ async fn history_is_derived_from_receipts_when_none_is_stored() {
     let d = category_detail(&db, as_of(), "Groceries")
         .await
         .expect("detail ok");
-    assert_eq!(d.hist_avg.centimes(), (30_000 + 26_000) / 2);
+    assert_eq!(d.hist_avg.centimes(), 28_000, "(30_000 + 26_000) / 2");
 }
 
 /// A store with no past receipts has no history bars at all (not six zeros).
