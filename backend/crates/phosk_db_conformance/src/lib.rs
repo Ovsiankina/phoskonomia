@@ -76,6 +76,7 @@ macro_rules! database_adapter_conformance {
             ledger::receipt_lookups_report_not_found,
             ledger::update_line_item_replaces_the_stored_line,
             ledger::line_items_keep_insertion_order,
+            ledger::line_items_for_reads_many_receipts_in_order,
             ledger::record_correction_accepts_events,
             ids::category_ids_round_trip_as_typed_ids,
             ids::receipt_ids_round_trip_as_typed_ids,

@@ -394,6 +394,27 @@ impl DatabaseAdapter for SurrealDb {
             .collect())
     }
 
+    async fn line_items_for(&self, receipts: &[ReceiptId]) -> Result<Vec<LineItem>, PhoskError> {
+        // One read of the table, grouped by receipt, then emitted in the
+        // order asked for (same contract as `line_items`, per receipt).
+        let all: Vec<LineItem> = self
+            .store
+            .list_in_insertion_order(Bucket::LineItem, |l: &LineItem| l.id.to_string())
+            .await?;
+        let mut by_receipt: std::collections::HashMap<ReceiptId, Vec<LineItem>> =
+            std::collections::HashMap::new();
+        for l in all {
+            by_receipt.entry(l.receipt_id).or_default().push(l);
+        }
+        let mut out = Vec::new();
+        for id in receipts {
+            if let Some(lines) = by_receipt.remove(id) {
+                out.extend(lines);
+            }
+        }
+        Ok(out)
+    }
+
     async fn all_receipts(&self) -> Result<Vec<Receipt>, PhoskError> {
         self.store.list(Bucket::Receipt).await
     }
