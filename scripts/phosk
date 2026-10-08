@@ -2,7 +2,8 @@
 # phosk — start Phoskonomia for daily use.
 #
 #   scripts/phosk           your own data (PHOSK_DB=surreal, real date)
-#   scripts/phosk --demo    the seeded demo (2026-06-18, in-memory, port 3718)
+#   scripts/phosk --demo    the seeded demo (2026-06-18, port 3718) in a fresh
+#                           temp dir, deleted on exit; never your data dir
 #   scripts/phosk --build   force a fresh release build first
 #   scripts/phosk --no-open do not open a browser
 #
@@ -10,8 +11,8 @@
 # newer than the binary), runs the server on 127.0.0.1 only, waits until it
 # answers and opens the browser. Ctrl-C stops the server.
 #
-# Every default below can be overridden from the environment; see
-# docs/USING.md for the full list.
+# Every default below can be overridden from the environment (except the
+# demo's data dir); see docs/USING.md for the full list.
 set -euo pipefail
 
 repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,7 +33,7 @@ for arg in "$@"; do
         --build | --rebuild) force_build=1 ;;
         --no-open) open_browser=0 ;;
         -h | --help)
-            sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -103,7 +104,11 @@ if needs_build; then
         exit 1
     }
     say "building the release app (first run or sources changed; this takes a while)"
-    (cd "$app" && CARGO_TARGET_DIR="$target_dir" dx build --release --platform web --fullstack true)
+    # --debug-symbols false: dx keeps DWARF by default, and the wasm-opt it
+    # runs aborts on the DWARF wasm-bindgen writes ("this may be an
+    # unsupported version of DWARF"), leaving the wasm unoptimised.
+    (cd "$app" && CARGO_TARGET_DIR="$target_dir" dx build --release --platform web \
+        --fullstack true --debug-symbols false)
 fi
 [ -x "$server_bin" ] || {
     echo "phosk: build finished but $server_bin is missing" >&2
@@ -117,10 +122,32 @@ if curl -fsS --max-time 1 "http://$ip:$port/" >/dev/null 2>&1; then
     exit 0
 fi
 
+# Stop the server (and wait, so it lets go of its files), then remove the
+# demo's temp dir. Runs on every exit, Ctrl-C included.
+server_pid=""
+demo_dir=""
+cleanup() {
+    if [ -n "$server_pid" ]; then
+        kill "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+    fi
+    if [ -n "$demo_dir" ]; then
+        rm -rf -- "$demo_dir"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [ "$demo" -eq 1 ]; then
+    # The demo never sees your data dir: an exported PHOSK_DATA_DIR is
+    # replaced by a fresh temp dir, so demo uploads (and, with
+    # PHOSK_DEMO_DB=surreal, the demo database) never land next to your data.
+    demo_dir="$(mktemp -d "${TMPDIR:-/tmp}/phosk-demo.XXXXXXXX")"
+    export PHOSK_DATA_DIR="$demo_dir"
     export PHOSK_DB="${PHOSK_DEMO_DB:-memory}"
     export PHOSK_DEMO=1
-    say "demo mode: seeded data, nothing you enter is kept"
+    say "demo mode: seeded data in $demo_dir, deleted when it stops"
 else
     export PHOSK_DB=surreal
     unset PHOSK_DEMO
@@ -132,7 +159,6 @@ export IP="$ip" PORT="$port"
 cd "$out_dir"
 ./server &
 server_pid=$!
-trap 'kill "$server_pid" 2>/dev/null || true' INT TERM EXIT
 
 url="http://$ip:$port/"
 for _ in $(seq 1 60); do

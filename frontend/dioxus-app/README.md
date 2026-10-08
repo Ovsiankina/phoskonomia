@@ -43,15 +43,26 @@ database and a fake OCR — no external services needed.
 | Variable          | Values                                | Default                  |
 |-------------------|---------------------------------------|--------------------------|
 | `PHOSK_DB`        | `memory` \| `surreal` (file-backed)   | `memory` (seeded)        |
-| `PHOSK_OCR`       | `auto` \| `paddle` \| `vision`        | `auto` (fake if none reachable) |
+| `PHOSK_DEMO`      | `1` = the seeded demo even with `PHOSK_DB=surreal` | unset       |
+| `PHOSK_OCR`       | `auto` \| `paddle` \| `vision`        | `auto` (fake if none reachable; in real mode the photo is refused instead) |
 | `PHOSK_LLM_MODEL` | any Ollama model tag                  | see `src/data/mod.rs`    |
-| `PHOSK_DATA_DIR`  | path for file-backed adapters         | `./phosk-data`           |
+| `PHOSK_DATA_DIR`  | path for file-backed adapters         | `~/.local/share/phoskonomia` in real mode, `./phosk-data` otherwise |
+
+Real mode is `PHOSK_DB=surreal` without `PHOSK_DEMO=1`: an empty starter
+store and the real date. Anything else is the demo (seed dated 2026-06-18).
 
 `PHOSK_DATA_DIR` holds encrypted photos and keys at runtime — never commit it.
 
 To use the app on your own data, run `scripts/phosk` from the repository
-root (a release build on 127.0.0.1). `docs/USING.md` covers it and lists
-every variable.
+root (a release build on 127.0.0.1; `scripts/phosk --demo` runs the demo in a
+throw-away temp dir). `docs/USING.md` covers it and lists every variable.
+
+A release build by hand needs `--debug-symbols false`, or `wasm-opt` aborts
+on the DWARF data and the client wasm stays unoptimised:
+
+```bash
+dx build --release --platform web --fullstack true --debug-symbols false
+```
 
 ## Check
 

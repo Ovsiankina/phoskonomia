@@ -332,9 +332,10 @@ impl Session {
 /// | env var          | values                              | default                  |
 /// |------------------|-------------------------------------|--------------------------|
 /// | `PHOSK_DB`       | `surreal` (file) \| `memory`        | `memory` (seeded)        |
+/// | `PHOSK_DEMO`     | `1` = demo seed even on `surreal`   | unset                    |
 /// | `PHOSK_LLM_MODEL`| any Ollama model tag                | `qwen3.6:35b-custom`     |
-/// | `PHOSK_OCR`      | `paddle` \| `vision` \| `auto`      | `auto` (→ fake if none)  |
-/// | `PHOSK_DATA_DIR` | a path for file-backed adapters     | `./phosk-data`           |
+/// | `PHOSK_OCR`      | `paddle` \| `vision` \| `auto`      | `auto` (→ fake if none; refused in real mode) |
+/// | `PHOSK_DATA_DIR` | a path for file-backed adapters     | `~/.local/share/phoskonomia` in real mode, else `./phosk-data` |
 ///
 /// Server fns and feature services are untouched by a swap because they only
 /// ever see the `&dyn _` PORT objects [`Session`] exposes.
