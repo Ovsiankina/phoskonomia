@@ -362,8 +362,7 @@ async fn envelope_for(
     prior: &PriorCycles,
     window: CycleWindow,
 ) -> Result<CategoryDto, PhoskError> {
-    let in_cat: Vec<&CategoryPart<'_>> =
-        parts.iter().filter(|p| p.category == cap.name).collect();
+    let in_cat: Vec<&CategoryPart<'_>> = parts.iter().filter(|p| p.category == cap.name).collect();
     let spent = Money::sum(in_cat.iter().map(|p| p.amount))?;
     let cap_money = cap.cap.unwrap_or(Money::ZERO);
     let proj = project_parts(in_cat.iter().copied(), caps, window)?;

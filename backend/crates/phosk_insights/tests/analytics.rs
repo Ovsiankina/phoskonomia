@@ -1021,13 +1021,17 @@ async fn momentum_and_budget_export_split_a_receipt_by_line_category() {
         cards
             .iter()
             .find(|c| c.name == name)
-            .map(|c| c.now.centimes())
             .unwrap_or_else(|| panic!("{name} card"))
+            .now
+            .centimes()
     };
     assert_eq!(now("Groceries"), 2_295 + 1_000);
     assert_eq!(now("Health"), 495);
 
-    let csv = export_budget_csv(&db, today()).await.expect("export ok").csv;
+    let csv = export_budget_csv(&db, today())
+        .await
+        .expect("export ok")
+        .csv;
     let row = |name: &str| {
         csv.lines()
             .find(|l| l.starts_with(name))

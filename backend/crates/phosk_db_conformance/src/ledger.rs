@@ -308,13 +308,22 @@ pub async fn line_items_for_reads_many_receipts_in_order(db: &dyn DatabaseAdapte
         .iter()
         .map(|n| line(b, n, 250))
         .collect();
-    db.insert_receipt(receipt(a, "conf-bulk-a", date(2027, 1, 10)?, 900), a_lines.clone())
-        .await?;
-    db.insert_receipt(receipt(b, "conf-bulk-b", date(2027, 1, 11)?, 500), b_lines.clone())
-        .await?;
+    db.insert_receipt(
+        receipt(a, "conf-bulk-a", date(2027, 1, 10)?, 900),
+        a_lines.clone(),
+    )
+    .await?;
+    db.insert_receipt(
+        receipt(b, "conf-bulk-b", date(2027, 1, 11)?, 500),
+        b_lines.clone(),
+    )
+    .await?;
     let lone = ReceiptId::new();
-    db.insert_receipt(receipt(lone, "conf-bulk-none", date(2027, 1, 12)?, 700), Vec::new())
-        .await?;
+    db.insert_receipt(
+        receipt(lone, "conf-bulk-none", date(2027, 1, 12)?, 700),
+        Vec::new(),
+    )
+    .await?;
 
     let got = db
         .line_items_for(&[b, ReceiptId::new(), a, lone, b])

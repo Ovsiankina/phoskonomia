@@ -851,7 +851,10 @@ async fn a_mixed_receipt_splits_its_spend_by_line_category() {
 
     let cats = categories(&db, as_of()).await.expect("categories ok");
     let groceries = find(&cats, "Groceries");
-    assert_eq!(groceries.spent.centimes(), 195 + 350 + 420 + 240 + 780 + 310 + 1_000);
+    assert_eq!(
+        groceries.spent.centimes(),
+        195 + 350 + 420 + 240 + 780 + 310 + 1_000
+    );
     assert_eq!(groceries.items, 2, "the Migros receipt + the manual entry");
     let health = find(&cats, "Health");
     assert_eq!(health.spent.centimes(), 495);

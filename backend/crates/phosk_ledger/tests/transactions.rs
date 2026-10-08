@@ -586,7 +586,11 @@ async fn category_spend_groceries_aggregates_three_receipts() {
         .iter()
         .find(|c| c.category == "Groceries")
         .expect("Groceries present");
-    assert_eq!(groceries.total.centimes(), 12_535, "t1's grocery lines + t3 + t6");
+    assert_eq!(
+        groceries.total.centimes(),
+        12_535,
+        "t1's grocery lines + t3 + t6"
+    );
     assert_eq!(groceries.txns, 3, "three Groceries receipts aggregated");
     assert_eq!(
         cats.iter().filter(|c| c.category == "Groceries").count(),

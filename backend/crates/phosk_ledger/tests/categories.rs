@@ -205,7 +205,10 @@ async fn category_spend_totals_and_counts_are_exhaustive() {
     );
 
     let shares: u32 = rows.iter().map(|r| r.txns).sum();
-    assert_eq!(shares, 10, "nine June receipts, t1 split over two categories");
+    assert_eq!(
+        shares, 10,
+        "nine June receipts, t1 split over two categories"
+    );
 }
 
 /// The fixed standing charges (Rent, Health insurance) are present in the spend

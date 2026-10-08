@@ -210,7 +210,6 @@ async fn category_spend(
     )
 }
 
-
 /// Act on a dashboard alert (`POST /alerts/{id}/{dismiss|snooze|apply}`).
 ///
 /// `as_of` is the caller's "today", the same day it reads [`alerts`] with:

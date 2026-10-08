@@ -292,8 +292,8 @@ mod tests {
         fee.fixed = true;
         let receipts = [fee, receipt("Sport", 10)];
         let caps = [cap("Sport", Some(120))];
-        let i = compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10))
-            .expect("insight");
+        let i =
+            compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10)).expect("insight");
         assert!(i.text.starts_with("CHF 100.00 spent so far"), "{}", i.text);
     }
 
@@ -338,8 +338,8 @@ mod tests {
         // Day 10 of 30: projections are ×3.
         let receipts = [receipt("Coffee", 30), receipt("Food", 100)];
         let caps = [cap("Coffee", Some(50)), cap("Food", Some(200))];
-        let i = compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10))
-            .expect("insight");
+        let i =
+            compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10)).expect("insight");
         // Coffee → 90 vs 50 (40 over); Food → 300 vs 200 (100 over).
         assert_eq!(
             i.text,
@@ -352,8 +352,8 @@ mod tests {
     fn a_blown_cap_counts_only_the_still_avoidable_spend() {
         let receipts = [receipt("Coffee", 60)];
         let caps = [cap("Coffee", Some(50))];
-        let i = compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10))
-            .expect("insight");
+        let i =
+            compose_insight(&parts(&receipts), &caps, Money::ZERO, window(10)).expect("insight");
         assert_eq!(
             i.text,
             "Coffee is already CHF 10.00 over its CHF 50.00 cap, with 20 days left in the cycle."

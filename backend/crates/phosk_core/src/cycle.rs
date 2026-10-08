@@ -233,10 +233,14 @@ mod tests {
     fn linear_projection_scales_to_the_window_end() {
         // Day 10 of 30: ×3, truncated to the centime.
         let w = resolve(Period::Month, d(2026, 6, 10));
-        let p = w.project_linear(Money::from_centimes(10_001)).expect("fits");
+        let p = w
+            .project_linear(Money::from_centimes(10_001))
+            .expect("fits");
         assert_eq!(p, Money::from_centimes(30_003));
         let day1 = resolve(Period::Month, d(2026, 6, 1));
-        let p = day1.project_linear(Money::from_centimes(100)).expect("fits");
+        let p = day1
+            .project_linear(Money::from_centimes(100))
+            .expect("fits");
         assert_eq!(p, Money::from_centimes(3_000));
     }
 
