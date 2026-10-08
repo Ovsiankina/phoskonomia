@@ -50,7 +50,7 @@ use crate::data::signals::{get_signal, SignalDetailDto};
 use crate::data::transactions::{
     correct_transaction_line, correction_error_text, correction_needs_reload, get_transaction,
     get_transaction_lines, list_transactions, TransactionDto, TxnFilter, TxnLineCorrection,
-    TxnLineDraft, TxnLineDto, TxnLinesDto,
+    TxnLineDraft, TxnLineDto, TxnLinesDto, TxnSourceDto,
 };
 use crate::data::{chf2, cycle::get_cycle};
 
@@ -100,6 +100,50 @@ fn conf_tone(c: f64) -> &'static str {
         "ok"
     } else {
         "blue"
+    }
+}
+
+/// Whether an entry came from a scanned receipt (a photo read by OCR), so it
+/// has an annotated scan and a reading confidence to show. A manual or
+/// imported entry has neither.
+fn is_scanned(src: &TxnSourceDto) -> bool {
+    src.kind.eq_ignore_ascii_case("PHOTO") || !src.ocr_engine.trim().is_empty()
+}
+
+/// The footer's source line for an entry, e.g. `SOURCE · PHOTO · OCR + LLM`
+/// or `SOURCE · MANUAL ENTRY`.
+fn source_label(src: &TxnSourceDto) -> String {
+    let kind = src.kind.trim().to_uppercase();
+    if is_scanned(src) {
+        "SOURCE · PHOTO · OCR + LLM".to_string()
+    } else if kind == "MANUAL" || kind.is_empty() {
+        "SOURCE · MANUAL ENTRY".to_string()
+    } else {
+        format!("SOURCE · {kind}")
+    }
+}
+
+/// The list row's item mark: `· 3 items`, `· 1 item`, or `· total only` for
+/// an entry recorded as a single total.
+fn items_label(count: u32) -> String {
+    match count {
+        0 => "· total only".to_string(),
+        1 => "· 1 item".to_string(),
+        n => format!("· {n} items"),
+    }
+}
+
+/// The empty-list text: what to do next, and whether a filter is the reason.
+fn empty_list_message(filtered: bool, horizon: &str, period: &str) -> String {
+    if filtered {
+        "No transactions match this filter. Clear the shop, category or search to see more."
+            .to_string()
+    } else if horizon != "ALL" {
+        format!(
+            "No transactions in {period}. Pick ALL to see older ones, add one with + NEW or upload a receipt."
+        )
+    } else {
+        "No transactions yet — add one with + NEW or upload a receipt.".to_string()
     }
 }
 
@@ -583,10 +627,17 @@ fn TxnRowBody(
     on_changed: EventHandler<()>,
 ) -> Element {
     let id = t.id.clone();
+    let id2 = t.id.clone();
     let rev = try_use_context::<LinesRev>();
     let lines_res = use_resource(move || {
         track_lines_rev(rev);
         get_transaction_lines(id.clone())
+    });
+    // The source descriptor: a manual or imported entry has no scan, so its
+    // footer must not claim one.
+    let detail_res = use_resource(move || {
+        track_lines_rev(rev);
+        get_transaction(id2.clone())
     });
     let mut editing = use_signal(|| Option::<usize>::None);
 
@@ -596,10 +647,23 @@ fn TxnRowBody(
         .and_then(|r| r.as_ref().ok())
         .cloned();
     let loading = lines_res.read().is_none();
+    let failed = matches!(&*lines_res.read(), Some(Err(_)));
+    let source = detail_res
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|d| d.source.clone());
 
     let lines: Vec<TxnLineDto> = body.as_ref().map(|b| b.lines.clone()).unwrap_or_default();
     let low_conf = body.as_ref().map_or(t.low_conf_count, |b| b.low_conf);
     let has_lines = !lines.is_empty();
+    let scanned = source.as_ref().is_some_and(is_scanned);
+    let src_label = source.as_ref().map_or_else(String::new, source_label);
+    let open_label = if scanned {
+        "OPEN RECEIPT ⤢"
+    } else {
+        "OPEN ⤢"
+    };
 
     let sel_str = sel.clone();
     let t_for_review = t.clone();
@@ -608,38 +672,54 @@ fn TxnRowBody(
 
     rsx! {
         div { class: "trow-body",
-            if !has_lines {
-                Awaiting { label: "RECEIPT LINES".to_string(), loading, tone: "blue".to_string() }
-            } else {
-                div { class: "lh",
-                    span { "ITEM" }
-                    span { "TRACK / CATEGORY" }
-                    span { "CHF" }
+            if loading {
+                Awaiting { label: "RECEIPT LINES".to_string(), loading: true, tone: "blue".to_string() }
+            } else if failed {
+                Awaiting {
+                    label: "RECEIPT LINES".to_string(),
+                    error: "Could not load this entry's line items.".to_string(),
+                    tone: "blue".to_string(),
                 }
-                for (i , l) in lines.iter().enumerate() {
-                    LineItem {
-                        key: "{i}",
-                        l: l.clone(),
-                        active: sel_str.as_deref() == Some(l.signal_id.as_str()) && !l.signal_id.is_empty(),
-                        on_select_sig,
-                        receipt_id: receipt_id.clone(),
-                        index: i,
-                        editing: editing() == Some(i),
-                        on_pick: move |pick: usize| {
-                            let next = if editing() == Some(pick) { None } else { Some(pick) };
-                            editing.set(next);
-                        },
-                        on_saved: move |()| {
-                            editing.set(None);
-                            on_changed.call(());
-                        },
-                        on_refresh: move |()| on_changed.call(()),
+            } else {
+                if has_lines {
+                    div { class: "lh",
+                        span { "ITEM" }
+                        span { "TRACK / CATEGORY" }
+                        span { "CHF" }
+                    }
+                    for (i , l) in lines.iter().enumerate() {
+                        LineItem {
+                            key: "{i}",
+                            l: l.clone(),
+                            active: sel_str.as_deref() == Some(l.signal_id.as_str()) && !l.signal_id.is_empty(),
+                            on_select_sig,
+                            receipt_id: receipt_id.clone(),
+                            index: i,
+                            editing: editing() == Some(i),
+                            on_pick: move |pick: usize| {
+                                let next = if editing() == Some(pick) { None } else { Some(pick) };
+                                editing.set(next);
+                            },
+                            on_saved: move |()| {
+                                editing.set(None);
+                                on_changed.call(());
+                            },
+                            on_refresh: move |()| on_changed.call(()),
+                        }
+                    }
+                } else {
+                    div {
+                        class: "dim",
+                        style: "padding:var(--s-3) 0 var(--s-1);font-size:var(--t-xs);letter-spacing:var(--tracking-body)",
+                        "Total only — no line items were entered for this entry."
                     }
                 }
                 div { class: "trow-foot",
-                    span { class: "src",
-                        Dot { tone: "ok".to_string(), size: 5 }
-                        " SOURCE · PHOTO · OCR + LLM"
+                    if !src_label.is_empty() {
+                        span { class: "src",
+                            Dot { tone: "ok".to_string(), size: 5 }
+                            " {src_label}"
+                        }
                     }
                     if low_conf > 0 {
                         div { class: "ai-nudge",
@@ -670,7 +750,7 @@ fn TxnRowBody(
                             e.stop_propagation();
                             on_details.call(t_for_open.clone());
                         },
-                        "OPEN RECEIPT ⤢"
+                        "{open_label}"
                     }
                 }
             }
@@ -701,7 +781,7 @@ fn TxnRow(
     let fixed = t.fixed;
 
     let row_cls = if open { "trow open" } else { "trow" };
-    let items_str = format!("· {item_count} items");
+    let items_str = items_label(item_count);
     let amt_str = chf2(t.amount);
 
     let t_body = t.clone();
@@ -953,6 +1033,8 @@ fn ReceiptScreen(
         .and_then(|r| r.as_ref().ok())
         .cloned();
     let lines_loading = lines_res.read().is_none();
+    let lines_failed = matches!(&*lines_res.read(), Some(Err(_)));
+    let detail_failed = matches!(&*detail_res.read(), Some(Err(_)));
     let detail = detail_res
         .read()
         .as_ref()
@@ -964,14 +1046,33 @@ fn ReceiptScreen(
     let low_conf = lbody.as_ref().map_or(t.low_conf_count, |b| b.low_conf);
     let has_lines = !lines.is_empty();
 
-    // detail (avg confidence / source / region count)
-    let avg_conf: Option<f64> = detail.as_ref().map(|d| d.avg_confidence);
-    let ocr_engine = detail.as_ref().map_or("PADDLEOCR".to_string(), |d| {
-        d.source.ocr_engine.to_uppercase()
-    });
-    let source_type = detail
+    // detail (avg confidence / source / region count). A manual or imported
+    // entry has no scan: `scanned` is `Some(false)` and the scan pane, the
+    // OCR meta and the reading confidence are not shown at all. Until the
+    // detail lands (`None`) the scan pane shows its loading state.
+    // A failed detail read keeps the scan pane (the lines still show there).
+    let scanned: Option<bool> = detail
         .as_ref()
-        .map_or("PHOTO".to_string(), |d| d.source.kind.to_uppercase());
+        .map(|d| is_scanned(&d.source))
+        .or(detail_failed.then_some(true));
+    let manual = scanned == Some(false);
+    let avg_conf: Option<f64> = detail.as_ref().map(|d| d.avg_confidence);
+    let ocr_engine = detail.as_ref().map_or(String::new(), |d| {
+        let e = d.source.ocr_engine.trim().to_uppercase();
+        if e.is_empty() {
+            "OCR".to_string()
+        } else {
+            e
+        }
+    });
+    let source_type = detail.as_ref().map_or(String::new(), |d| {
+        let k = d.source.kind.trim().to_uppercase();
+        if k.is_empty() {
+            "MANUAL".to_string()
+        } else {
+            k
+        }
+    });
     let region_count = detail.as_ref().map_or(lines.len(), |d| {
         let r = d.ocr_regions as usize;
         if r > 0 {
@@ -987,8 +1088,15 @@ fn ReceiptScreen(
     let total_str = chf2(t.amount);
     let items_val = if has_lines {
         lines.len().to_string()
-    } else {
+    } else if t.item_count > 0 {
         t.item_count.to_string()
+    } else {
+        "—".to_string()
+    };
+    let body_style = if manual {
+        "grid-template-columns:1fr"
+    } else {
+        ""
     };
     let conf_pct = avg_conf.map_or(0, |c| {
         if c.is_nan() {
@@ -1004,7 +1112,11 @@ fn ReceiptScreen(
         "var(--warn)"
     };
     let conf_label = avg_conf.map_or("—".to_string(), |_| format!("{conf_pct}%"));
-    let badge_str = format!("SOURCE · {source_type}");
+    let badge_str = if source_type.is_empty() {
+        "SOURCE".to_string()
+    } else {
+        format!("SOURCE · {source_type}")
+    };
     let low_conf_word = if low_conf > 1 { "items" } else { "item" };
     let sigs_count = sigs.len();
     let sigs_word = if sigs_count > 1 { "signals" } else { "signal" };
@@ -1033,15 +1145,25 @@ fn ReceiptScreen(
                         "✕"
                     }
                 }
-                div { class: "rscreen-b",
-                    // OCR photo reference
+                div { class: "rscreen-b", style: "{body_style}",
+                    // OCR photo reference — only for a scanned receipt.
+                    if !manual {
                     div { class: "ocr-pane",
                         div { class: "ph-h",
                             span { class: "t", "⌁ OCR · ANNOTATED SCAN" }
-                            span { class: "s", "{ocr_meta}" }
+                            if scanned.is_some() {
+                                span { class: "s", "{ocr_meta}" }
+                            }
                         }
-                        if !has_lines {
-                            Awaiting { label: "ANNOTATED SCAN".to_string(), loading: lines_loading, tone: "blue".to_string() }
+                        if lines_loading || scanned.is_none() {
+                            Awaiting { label: "ANNOTATED SCAN".to_string(), loading: true, tone: "blue".to_string() }
+                        } else if !has_lines {
+                            Awaiting {
+                                label: "ANNOTATED SCAN".to_string(),
+                                legend: "EMPTY".to_string(),
+                                message: "No lines were read from this receipt.".to_string(),
+                                tone: "blue".to_string(),
+                            }
                         } else {
                             div { class: "receipt-paper",
                                 div { class: "rp-shop", "{t.shop}" }
@@ -1063,6 +1185,7 @@ fn ReceiptScreen(
                             span { style: "color:var(--neon-hot)", "⌁" }
                             " = rolled into a tracked item-signal."
                         }
+                    }
                     }
 
                     // structured items + AI
@@ -1092,12 +1215,14 @@ fn ReceiptScreen(
                             on_edited,
                             on_deleted,
                         }
-                        div { class: "conf-sum",
-                            span { "READING CONFIDENCE" }
-                            div { class: "bar",
-                                i { style: "width:{conf_w};background:{conf_bar_bg}" }
+                        if scanned == Some(true) && has_lines {
+                            div { class: "conf-sum",
+                                span { "READING CONFIDENCE" }
+                                div { class: "bar",
+                                    i { style: "width:{conf_w};background:{conf_bar_bg}" }
+                                }
+                                span { style: "font-family:var(--font-display);color:var(--ink)", "{conf_label}" }
                             }
-                            span { style: "font-family:var(--font-display);color:var(--ink)", "{conf_label}" }
                         }
 
                         if low_conf > 0 {
@@ -1116,15 +1241,33 @@ fn ReceiptScreen(
                             }
                         }
 
-                        div {
-                            class: "lh",
-                            style: "display:grid;grid-template-columns:1fr auto auto;gap:14px;padding:12px 0 7px;font-size:8.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);border-bottom:1px solid var(--hairline)",
-                            span { "ITEM" }
-                            span { "TRACK / CATEGORY" }
-                            span { "CHF" }
+                        if has_lines {
+                            div {
+                                class: "lh",
+                                style: "display:grid;grid-template-columns:1fr auto auto;gap:14px;padding:12px 0 7px;font-size:8.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);border-bottom:1px solid var(--hairline)",
+                                span { "ITEM" }
+                                span { "TRACK / CATEGORY" }
+                                span { "CHF" }
+                            }
                         }
-                        if !has_lines {
-                            Awaiting { label: "LINE ITEMS".to_string(), loading: lines_loading, tone: "blue".to_string() }
+                        if lines_loading {
+                            Awaiting { label: "LINE ITEMS".to_string(), loading: true, tone: "blue".to_string() }
+                        } else if lines_failed {
+                            Awaiting {
+                                label: "LINE ITEMS".to_string(),
+                                error: "Could not load this entry's line items.".to_string(),
+                                tone: "blue".to_string(),
+                            }
+                        } else if !has_lines {
+                            div {
+                                class: "dim",
+                                style: "padding:var(--s-4) 0;font-size:var(--t-xs);line-height:var(--lh-body)",
+                                if manual {
+                                    "Entered by hand as a single total — there are no line items. Use EDIT to change the total, shop, date or category."
+                                } else {
+                                    "No line items were read from this receipt."
+                                }
+                            }
                         } else {
                             for (i , l) in lines.iter().enumerate() {
                                 ReceiptItem {
@@ -1290,6 +1433,9 @@ pub fn TransactionsPage() -> Element {
         |b| b.summary.period_label.clone(),
     );
     let has_rows = !rows.is_empty();
+    let list_failed = matches!(&*txns.read(), Some(Err(_)));
+    let filtered = !shop().is_empty() || !cat().is_empty() || !q().trim().is_empty();
+    let empty_msg = empty_list_message(filtered, &horizon(), &period_label);
 
     let grouped = group_by_day(&rows);
 
@@ -1398,8 +1544,16 @@ pub fn TransactionsPage() -> Element {
                             }
 
                             div { class: "txn-list",
-                                if !has_rows {
-                                    Awaiting { label: "TX · LIST".to_string(), loading: list_loading, tone: "blue".to_string() }
+                                if list_loading {
+                                    Awaiting { label: "TX · LIST".to_string(), loading: true, tone: "blue".to_string() }
+                                } else if list_failed {
+                                    Awaiting {
+                                        label: "TX · LIST".to_string(),
+                                        error: "Could not load your transactions. Reload the page to try again.".to_string(),
+                                        tone: "blue".to_string(),
+                                    }
+                                } else if !has_rows {
+                                    Awaiting { label: "TX · LIST".to_string(), legend: "EMPTY".to_string(), message: empty_msg.clone(), tone: "blue".to_string() }
                                 } else {
                                     for (day , items) in grouped.iter() {
                                         {
@@ -1563,5 +1717,52 @@ mod conf_tone_tests {
     #[test]
     fn mid_confidence_is_blue() {
         assert_eq!(conf_tone(0.75), "blue");
+    }
+}
+
+#[cfg(test)]
+mod entry_presentation_tests {
+    use super::{empty_list_message, is_scanned, items_label, source_label};
+    use crate::data::transactions::TxnSourceDto;
+
+    fn src(kind: &str, ocr: &str) -> TxnSourceDto {
+        TxnSourceDto {
+            kind: kind.to_string(),
+            ocr_engine: ocr.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_total_only_entry_does_not_claim_zero_items() {
+        assert_eq!(items_label(0), "· total only");
+        assert_eq!(items_label(1), "· 1 item");
+        assert_eq!(items_label(4), "· 4 items");
+    }
+
+    #[test]
+    fn a_manual_entry_is_not_a_scan() {
+        assert!(!is_scanned(&src("MANUAL", "")));
+        assert_eq!(source_label(&src("MANUAL", "")), "SOURCE · MANUAL ENTRY");
+        assert!(is_scanned(&src("PHOTO", "PADDLEOCR")));
+        assert!(is_scanned(&src("PHOTO", "")));
+        assert_eq!(source_label(&src("IMPORT", "")), "SOURCE · IMPORT");
+    }
+
+    #[test]
+    fn the_empty_list_says_what_to_do_next() {
+        let fresh = empty_list_message(false, "ALL", "");
+        assert!(
+            fresh.contains("+ NEW") && fresh.contains("receipt"),
+            "{fresh}"
+        );
+        let month = empty_list_message(false, "MONTH", "OCT 2026");
+        assert!(
+            month.contains("OCT 2026") && month.contains("ALL"),
+            "{month}"
+        );
+        assert!(empty_list_message(true, "MONTH", "OCT 2026").contains("filter"));
+        for m in [fresh, month] {
+            assert!(!m.to_lowercase().contains("backend"), "{m}");
+        }
     }
 }

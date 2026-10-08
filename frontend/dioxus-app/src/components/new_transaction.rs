@@ -18,7 +18,7 @@ use dioxus::prelude::*;
 use crate::components::states::Awaiting;
 use crate::data::budgets::get_categories;
 use crate::data::new_transaction::{
-    create_error_text, create_transaction, NewTxnForm, NewTxnLineForm,
+    create_error_text, create_transaction, new_transaction_date, NewTxnForm, NewTxnLineForm,
 };
 
 /// The form panel. `on_saved` fires after a successful save (the page closes
@@ -27,6 +27,15 @@ use crate::data::new_transaction::{
 pub fn NewTransactionForm(on_close: EventHandler<()>, on_saved: EventHandler<()>) -> Element {
     let cats = use_resource(get_categories);
     let mut form = use_signal(NewTxnForm::default);
+    // The date starts on the server's "today"; a date already typed wins.
+    let today = use_resource(new_transaction_date);
+    use_effect(move || {
+        if let Some(Ok(d)) = &*today.read() {
+            if form.peek().date.is_empty() {
+                form.write().date = d.clone();
+            }
+        }
+    });
     let mut itemised = use_signal(|| false);
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
