@@ -291,7 +291,7 @@ async fn assert_colour_cleared(db: &dyn DatabaseAdapter, slug: &str) {
 #[tokio::test]
 async fn delete_clears_the_vanished_category_colour() {
     let db = fresh_db();
-    let before = phosk_settings::settings_summary(&db)
+    let before = phosk_settings::settings_summary(&db, "OLLAMA", "m")
         .await
         .expect("summary");
     let view = create_category_with(&db, "Pets", "", "indigo-3")
@@ -300,7 +300,7 @@ async fn delete_clears_the_vanished_category_colour() {
     let slug = row(&view, "Pets").slug.clone();
     delete_category_with(&db, "Pets").await.expect("deleted");
     assert_colour_cleared(&db, &slug).await;
-    let after = phosk_settings::settings_summary(&db)
+    let after = phosk_settings::settings_summary(&db, "OLLAMA", "m")
         .await
         .expect("summary");
     assert_eq!(after.total_preferences, before.total_preferences);

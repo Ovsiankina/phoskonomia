@@ -107,19 +107,18 @@ fn enqueue(mut suggestion: AiSuggestion, model: &str) -> ProposedWrite {
 /// Chat turn (READ tool): ask the model for a reply via the PORT, then persist
 /// the user line and the reply, and return the reply.
 ///
-/// Unlike the canned [`crate::ai_spine::send_message`] (which the build-contract
-/// freezes for the seeded read-model), this routes the reply through
-/// `llm.complete`. The model's prose is trimmed and cut to
-/// [`CHAT_REPLY_MAX_CHARS`]; an empty completion falls back to a deterministic
-/// acknowledgement so the transcript never gains a blank line.
+/// The reply always comes from `llm.complete`. The model's prose is trimmed and
+/// cut to [`CHAT_REPLY_MAX_CHARS`]; an empty completion is an error (nothing is
+/// saved), never a stand-in sentence.
 ///
 /// Nothing is persisted until the model has answered, so a failed turn (model
 /// down, not loaded, timed out) leaves the transcript untouched and can be
 /// retried without saving the user line twice.
 ///
 /// # Errors
-/// [`PhoskError::Invalid`] for empty `text`; [`PhoskError::NotFound`] if there is
-/// no chat to append to; otherwise propagates adapter / model errors.
+/// [`PhoskError::Invalid`] for empty `text` or a blank model reply;
+/// [`PhoskError::NotFound`] if there is no chat to append to; otherwise
+/// propagates adapter / model errors.
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn chat_reply(
     db: &dyn DatabaseAdapter,
@@ -147,7 +146,7 @@ pub async fn chat_reply(
     let raw = llm
         .complete(&chat_prompt(&context, recent, trimmed))
         .await?;
-    let reply_text = normalize_reply(&raw);
+    let reply_text = normalize_reply(&raw)?;
 
     // Persist the user turn verbatim, then the reply.
     db.append_message(Message {
@@ -174,29 +173,33 @@ pub async fn chat_reply(
     })
 }
 
-/// The narrative dashboard insight (READ tool): ask the model for the one-liner
-/// via the PORT, keep the seeded estimated saving (exact centimes).
+/// A model-written narrative insight (READ tool): the model reads the same
+/// data snapshot the chat gets ([`chat_context`]) and writes one sentence.
 ///
-/// The sentence now comes from `llm.complete`; the `model` badge is the live
-/// model id (provenance). The estimated saving stays the pinned seed value —
-/// computing it is the planning slice's job, not the model's.
+/// `source` is the live model id (provenance). No saving is estimated here
+/// (`estimated_savings` is zero): money figures come from arithmetic, not from
+/// the model. The dashboard uses the computed
+/// [`crate::ai_features::dashboard_insight`] instead; this stays for a surface
+/// that explicitly asks the model.
 ///
 /// # Errors
-/// Propagates adapter / model errors; a blank completion falls back to a
-/// deterministic sentence (never an empty insight).
+/// Propagates adapter / model errors; a blank completion is
+/// [`PhoskError::Invalid`] (never a stand-in sentence).
 #[tracing::instrument(level = "debug", skip_all, fields(as_of = %as_of))]
 pub async fn narrative_insight(
     db: &dyn DatabaseAdapter,
     llm: &dyn LlmAdapter,
     as_of: chrono::NaiveDate,
 ) -> Result<InsightDto, PhoskError> {
-    let _ = (db, as_of);
-    let raw = llm.complete(INSIGHT_PROMPT).await?;
-    let text = normalize_insight(&raw);
+    let context = chat_context(db, as_of).await?;
+    let raw = llm
+        .complete(&format!("DATA\n{context}\n{INSIGHT_PROMPT}"))
+        .await?;
+    let text = normalize_insight(&raw)?;
     Ok(InsightDto {
-        model: llm.model().to_owned(),
+        source: llm.model().to_owned(),
         text,
-        estimated_savings: Money::from_centimes(4_200),
+        estimated_savings: Money::ZERO,
     })
 }
 
@@ -261,8 +264,9 @@ pub async fn auto_categorize(
 /// constrained-output PORT — for a structured suggestion, schema-check it, and
 /// ENQUEUE it. **Never writes.**
 ///
-/// `db` is READ context only. The returned [`ProposedWrite`] is a candidate
-/// awaiting approval; `estimatedSavings` is carried as exact i64 centimes.
+/// `db` is READ context only: the model sees the [`chat_context`] snapshot.
+/// The returned [`ProposedWrite`] is a candidate awaiting approval;
+/// `estimatedSavings` is carried as exact i64 centimes.
 ///
 /// # Errors
 /// Propagates adapter / model / schema errors; a model answer missing required
@@ -273,9 +277,11 @@ pub async fn suggest(
     llm: &dyn LlmAdapter,
     as_of: chrono::NaiveDate,
 ) -> Result<ProposedWrite, PhoskError> {
-    let _ = (db, as_of);
+    let context = chat_context(db, as_of).await?;
     let schema = suggestion_schema();
-    let out = llm.generate_structured(SUGGEST_PROMPT, &schema).await?;
+    let out = llm
+        .generate_structured(&format!("DATA\n{context}\n{SUGGEST_PROMPT}"), &schema)
+        .await?;
 
     let text = out
         .get("text")
@@ -313,13 +319,12 @@ pub async fn suggest(
 // prompts (const) + JSON schemas + reply normalization
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The narrative-insight prompt (const, per the prompts-as-`const`s rule).
-const INSIGHT_PROMPT: &str =
-    "Summarise this spending cycle in one short, plain sentence of budgeting advice.";
+/// The narrative-insight prompt (const, per the prompts-as-`const`s rule). It
+/// follows the data snapshot.
+pub const INSIGHT_PROMPT: &str = "Using only the data above, summarise this spending cycle in one short, plain sentence of budgeting advice. If there is no spending yet, say so.";
 
-/// The suggestion prompt (const).
-const SUGGEST_PROMPT: &str =
-    "Propose one concrete budgeting action for this cycle as structured JSON.";
+/// The suggestion prompt (const). It follows the data snapshot.
+pub const SUGGEST_PROMPT: &str = "Using only the data above, propose one concrete budgeting action for this cycle as structured JSON.";
 
 /// How many earlier chat messages the model sees with each new turn.
 const CHAT_HISTORY_TURNS: usize = 8;
@@ -447,28 +452,38 @@ fn suggestion_schema() -> serde_json::Value {
     })
 }
 
-/// Normalize a model chat completion: trim, cut to [`CHAT_REPLY_MAX_CHARS`]
-/// (the cut marked with `…`), and fall back to a deterministic acknowledgement
-/// when the model returns nothing usable (never a blank line).
-fn normalize_reply(raw: &str) -> String {
+/// Normalize a model chat completion: trim and cut to [`CHAT_REPLY_MAX_CHARS`]
+/// (the cut marked with `…`).
+///
+/// # Errors
+/// [`PhoskError::Invalid`] when the model returned nothing usable: an empty
+/// answer is reported, never replaced by a sentence the model did not write.
+fn normalize_reply(raw: &str) -> Result<String, PhoskError> {
     let t = raw.trim();
     if t.is_empty() {
-        return "I tracked that. Ask me about a category, signal, or your cycle pace.".to_owned();
+        return Err(PhoskError::Invalid(
+            "the model returned an empty reply".to_owned(),
+        ));
     }
     let mut chars = t.chars();
     let mut out: String = chars.by_ref().take(CHAT_REPLY_MAX_CHARS).collect();
     if chars.next().is_some() {
         out.push('…');
     }
-    out
+    Ok(out)
 }
 
-/// Normalize a model insight completion (trim + non-empty fallback).
-fn normalize_insight(raw: &str) -> String {
+/// Normalize a model insight completion (trim; blank is an error).
+///
+/// # Errors
+/// [`PhoskError::Invalid`] when the model returned nothing usable.
+fn normalize_insight(raw: &str) -> Result<String, PhoskError> {
     let t = raw.trim();
     if t.is_empty() {
-        "Coffee runs are up 28% this cycle. Capping them at CHF 70 keeps you on budget".to_owned()
+        Err(PhoskError::Invalid(
+            "the model returned an empty insight".to_owned(),
+        ))
     } else {
-        t.to_owned()
+        Ok(t.to_owned())
     }
 }

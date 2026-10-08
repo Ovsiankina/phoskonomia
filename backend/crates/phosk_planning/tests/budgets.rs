@@ -363,11 +363,11 @@ async fn allocation_segment_share_is_cap_over_sum_of_caps() {
 }
 
 #[tokio::test]
-async fn allocation_carries_an_ai_advice_line() {
+async fn allocation_carries_a_computed_advice_line() {
     let a = allocation(&seeded(), as_of()).await.expect("allocation ok");
-    assert!(
-        !a.ai_advice.model.is_empty(),
-        "advice carries a model badge"
+    assert_eq!(
+        a.ai_advice.source, "COMPUTED",
+        "advice is labelled as computed, not as a model"
     );
     assert!(!a.ai_advice.text.is_empty(), "advice carries a sentence");
 }

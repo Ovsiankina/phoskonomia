@@ -2,7 +2,7 @@
 //!
 //! The retrospective read: a 12-cycle SPEND TREND oscilloscope (hand-written
 //! inline SVG, no F2 primitive — ported verbatim as a page-local component), the
-//! ITEM-SIGNAL matrix, the fastest riser/faller mover cards + GEMMA4 read,
+//! ITEM-SIGNAL matrix, the fastest riser/faller mover cards + computed read,
 //! per-category MOMENTUM small-multiples, and a weekday SPENDING RHYTHM heatmap.
 //!
 //! Shape preserved 1:1 with the JSX: the `.pk` root + `ScannerBg`, the
@@ -32,7 +32,7 @@ use dioxus::prelude::*;
 use phosk_core::money::Money;
 
 use crate::components::prims::{Dot, ScannerBg, Spark};
-use crate::components::shell::{AiPanel, Sig, SigOcc, SigSpark, SignalPanel, TopBar};
+use crate::components::shell::{AiPanel, NumText, Sig, SigOcc, SigSpark, SignalPanel, TopBar};
 use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::analytics::{
     get_analytics_insight, get_category_momentum, get_rhythm, get_spend_history, get_spend_stats,
@@ -1042,9 +1042,9 @@ pub fn AnalyticsPage() -> Element {
 
     let ins = insights_v.clone();
     let suggested_cap = ins.as_ref().map(|i| i.suggested_cap.clone());
-    let ins_model = ins
+    let ins_head = ins
         .as_ref()
-        .map_or("GEMMA4".to_string(), |i| i.model.clone());
+        .map_or("READ".to_string(), |i| format!("{} · READ", i.source));
 
     let cycle_label = if c.label.is_empty() {
         "THIS CYCLE".to_string()
@@ -1512,10 +1512,10 @@ pub fn AnalyticsPage() -> Element {
                                 div { class: "an-insight",
                                     div { class: "ih",
                                         Dot { tone: "blue".to_string(), size: 6 }
-                                        "{ins_model} · READ"
+                                        "{ins_head}"
                                     }
                                     if insights_ok && ins.as_ref().is_some_and(|i| !i.text.is_empty()) {
-                                        div { class: "q", "{ins.as_ref().unwrap().text}" }
+                                        div { class: "q", NumText { text: ins.as_ref().unwrap().text.clone() } }
                                         if let Some(label) = cap_label.clone() {
                                             div { class: "an-cap",
                                                 if cap_confirm() {
@@ -1562,7 +1562,7 @@ pub fn AnalyticsPage() -> Element {
                                         }
                                     } else {
                                         Awaiting {
-                                            label: "GEMMA4 READ".to_string(),
+                                            label: "READ".to_string(),
                                             loading: insights_loading,
                                             message: insights_err.clone(),
                                             tone: "blue".to_string(),
@@ -1677,8 +1677,7 @@ const SIGNAL_ACTION_FAILED: &str = "could not update this signal, try again";
 /// The panel owns its chat (persisted history, send, `/clear`), so this wrapper
 /// only carries the page wiring: `on_toggle` flips the rail; `on_track` selects
 /// the candidate in the page's `sel` (opening the dock/drawer) when a feed
-/// item's track fires. Feed/status keep their (empty / offline /
-/// GEMMA4·OLLAMA·LOCAL) defaults.
+/// item's track fires. The panel loads its own feed and model status.
 #[component]
 fn AiPanelAnalytics(
     collapsed: bool,

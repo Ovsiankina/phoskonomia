@@ -30,7 +30,7 @@ use crate::components::comps::{
     Alert, AlertAction, AlertItem, Cat, CatRows, Rec, RecRow, Txn, TxnTape,
 };
 use crate::components::prims::{pct_tone, Dot, PhoskChart, SavingsDial, ScannerBg, Spark};
-use crate::components::shell::{Sig, SigOcc, SignalPanel, SignalStrip, TopBar};
+use crate::components::shell::{NumText, Sig, SigOcc, SignalPanel, SignalStrip, TopBar};
 use crate::components::states::{Awaiting, InlineStatus};
 use crate::data::budgets::{get_categories, CategoryDto};
 use crate::data::dashboard::{
@@ -520,9 +520,9 @@ pub fn DashboardPage() -> Element {
     };
     let monthly_total_str =
         monthly_total.map_or(DASH.to_string(), |m| format!("CHF {}/MO", chf0(m)));
-    let insight_model = insight_v
+    let insight_head = insight_v
         .as_ref()
-        .map_or("GEMMA4".to_string(), |i| i.model.clone());
+        .map_or("INSIGHT".to_string(), |i| format!("{} · INSIGHT", i.source));
     // Spend-trace HUD numerals.
     let trace_hud = totals_v.as_ref().map_or(DASH.to_string(), |t| {
         if budget_set {
@@ -1063,10 +1063,10 @@ pub fn DashboardPage() -> Element {
                                     div { class: "b-insight osc-bkt blue",
                                         div { class: "hud sm", style: "display:flex;align-items:center;gap:7px",
                                             Dot { tone: "blue".to_string(), size: 6 }
-                                            "{insight_model} · INSIGHT"
+                                            "{insight_head}"
                                         }
                                         if insight_v.is_none() {
-                                            Awaiting { label: "GEMMA4 INSIGHT".to_string(), loading: insight_loading }
+                                            Awaiting { label: "INSIGHT".to_string(), loading: insight_loading }
                                         } else {
                                             div { class: "q",
                                                 {
@@ -1077,10 +1077,10 @@ pub fn DashboardPage() -> Element {
                                                         None
                                                     };
                                                     rsx! {
-                                                        "{iv.text}"
+                                                        NumText { text: iv.text.clone() }
                                                         if let Some(e) = est {
                                                             " · est. "
-                                                            b { "CHF {e}" }
+                                                            b { NumText { text: format!("CHF {e}") } }
                                                         }
                                                     }
                                                 }
@@ -1210,10 +1210,8 @@ pub fn DashboardPage() -> Element {
 /// rail and `on_track` selects the signal in the dashboard's `sel` signal (the
 /// React `selectSig`, opening the dock or drawer) when a feed item's "track"
 /// action fires — but `AiPanel` lives outside the dashboard's state closure, so
-/// this tiny component owns that wiring and re-exposes both. The feed is left
-/// to its (empty) default until an AI feed server fn lands, so the panel renders
-/// its "awaiting backend (/ai/feed)" body, faithful to React. The chat needs no
-/// wiring here: the panel loads and sends it itself.
+/// this tiny component owns that wiring and re-exposes both. The feed, model
+/// status and chat need no wiring here: the panel loads them itself.
 #[component]
 fn AiPanelDash(
     collapsed: bool,

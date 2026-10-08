@@ -59,7 +59,8 @@ async fn get_rhythm_covers_the_week() {
 #[tokio::test]
 async fn get_analytics_insight_suggests_a_cap() {
     let i = get_analytics_insight().await.expect("insight");
-    assert!(!i.model.is_empty() && !i.text.is_empty());
+    assert_eq!(i.source, "COMPUTED", "labelled as computed, not a model");
+    assert!(!i.text.is_empty());
     assert!(!i.suggested_cap.signal_id.is_empty());
 
     let backend = svc::analytics_insight(&fresh_db(), today())

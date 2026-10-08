@@ -51,9 +51,9 @@ pub struct AiChatMsgDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiStatusDto {
-    /// Model reachable / loaded → green pulse.
+    /// The model server answers and has the configured model → green pulse.
     pub online: bool,
-    /// Model badge, e.g. `"GEMMA4"`.
+    /// The configured model id (e.g. `"qwen3.6:35b-custom"`).
     pub model: String,
     /// Inference engine, e.g. `"OLLAMA"`.
     pub engine: String,
@@ -74,18 +74,23 @@ pub struct AiPanelDto {
     pub status: AiStatusDto,
 }
 
+/// The inference engine the composition root wires: `data::build_llm` only
+/// ever builds the Ollama adapter (the LLM port itself does not name it).
+#[cfg(feature = "server-deps")]
+pub const LLM_ENGINE: &str = "OLLAMA";
+
 /// The shared assistant read (`/ai/feed` + `/ai/chat` + `/ai/status`).
 ///
-/// REAL: composes `phosk_ai::ai_spine::ai_panel` — the live activity feed and
-/// chat transcript come from the PORT (seeded), the status line is the
-/// GEMMA4-on-Ollama pulse. The real local-model inference lands with the LLM
-/// adapter; the feed/chat reads here are already live against the adapter.
+/// REAL: composes `phosk_ai::ai_spine::ai_panel` — the activity feed and chat
+/// transcript come from the database port; the status line is the session's
+/// LLM adapter: its real model id, and `online` from a health probe (bounded by
+/// the adapter's short timeout). A down model is `online: false`, not an error.
 #[server]
 pub async fn get_ai_panel() -> Result<AiPanelDto, ServerFnError> {
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        let p = phosk_ai::ai_spine::ai_panel(session.db())
+        let p = phosk_ai::ai_spine::ai_panel(session.db(), session.llm(), LLM_ENGINE)
             .await
             .map_err(crate::data::server_err)?;
         Ok(AiPanelDto {

@@ -39,9 +39,9 @@ pub struct SettingsDto {
     pub rows: Vec<PreferenceRowDto>,
     /// How many rows are user overrides.
     pub changed_count: u32,
-    /// Active OCR/LLM engine label, e.g. `"OLLAMA"`.
+    /// Active LLM engine label, e.g. `"OLLAMA"`.
     pub engine: String,
-    /// Active model label, e.g. `"GEMMA4"`.
+    /// Active model id, from the session's LLM adapter (e.g. `"qwen3.6:35b-custom"`).
     pub model: String,
 }
 
@@ -61,7 +61,7 @@ pub async fn get_preferences() -> Result<SettingsDto, ServerFnError> {
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        get_preferences_with(session.db())
+        get_preferences_with(session.db(), session.llm())
             .await
             .map_err(crate::data::server_err)
     }
@@ -79,7 +79,7 @@ pub async fn set_preference(key: String, value: String) -> Result<SettingsDto, S
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        set_preference_with(session.db(), &key, &value)
+        set_preference_with(session.db(), session.llm(), &key, &value)
             .await
             .map_err(crate::data::server_err)
     }
@@ -98,7 +98,7 @@ pub async fn reset_preference(key: String) -> Result<SettingsDto, ServerFnError>
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        reset_preference_with(session.db(), &key)
+        reset_preference_with(session.db(), session.llm(), &key)
             .await
             .map_err(crate::data::server_err)
     }
@@ -117,7 +117,7 @@ pub async fn reset_all_preferences() -> Result<SettingsDto, ServerFnError> {
     #[cfg(feature = "server-deps")]
     {
         let session = crate::data::build_session().await?;
-        reset_all_preferences_with(session.db())
+        reset_all_preferences_with(session.db(), session.llm())
             .await
             .map_err(crate::data::server_err)
     }
@@ -132,9 +132,11 @@ pub async fn reset_all_preferences() -> Result<SettingsDto, ServerFnError> {
 #[cfg(feature = "server-deps")]
 pub(crate) async fn get_preferences_with(
     db: &dyn DatabaseAdapter,
+    llm: &dyn phosk_adapter_llm::LlmAdapter,
 ) -> Result<SettingsDto, PhoskError> {
     let stored = phosk_settings::preferences(db).await?;
-    let summary = phosk_settings::settings_summary(db).await?;
+    let summary =
+        phosk_settings::settings_summary(db, crate::data::ai::LLM_ENGINE, llm.model()).await?;
     let rows: Vec<PreferenceRowDto> = phosk_settings::PREFERENCE_RULES
         .iter()
         .map(|rule| {
@@ -162,23 +164,25 @@ pub(crate) async fn get_preferences_with(
 #[cfg(feature = "server-deps")]
 pub(crate) async fn set_preference_with(
     db: &dyn DatabaseAdapter,
+    llm: &dyn phosk_adapter_llm::LlmAdapter,
     key: &str,
     value: &str,
 ) -> Result<SettingsDto, PhoskError> {
     let rule = phosk_settings::validate_preference(key, value)?;
     phosk_settings::set_preference(db, rule.key, value).await?;
-    get_preferences_with(db).await
+    get_preferences_with(db, llm).await
 }
 
 /// Reset a key from the rule table; an unknown key is rejected, not created.
 #[cfg(feature = "server-deps")]
 pub(crate) async fn reset_preference_with(
     db: &dyn DatabaseAdapter,
+    llm: &dyn phosk_adapter_llm::LlmAdapter,
     key: &str,
 ) -> Result<SettingsDto, PhoskError> {
     let rule = phosk_settings::known_preference(key)?;
     phosk_settings::reset_preference(db, rule.key).await?;
-    get_preferences_with(db).await
+    get_preferences_with(db, llm).await
 }
 
 /// Reset every key in the rule table, in order. Not atomic: a store failure
@@ -186,9 +190,10 @@ pub(crate) async fn reset_preference_with(
 #[cfg(feature = "server-deps")]
 pub(crate) async fn reset_all_preferences_with(
     db: &dyn DatabaseAdapter,
+    llm: &dyn phosk_adapter_llm::LlmAdapter,
 ) -> Result<SettingsDto, PhoskError> {
     for rule in phosk_settings::PREFERENCE_RULES {
         phosk_settings::reset_preference(db, rule.key).await?;
     }
-    get_preferences_with(db).await
+    get_preferences_with(db, llm).await
 }

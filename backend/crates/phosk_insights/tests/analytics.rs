@@ -680,7 +680,7 @@ async fn analytics_insight_json_shape_is_camel_case() {
     let v = to_json(&dto);
     assert_eq!(
         keys(&v),
-        vec!["model", "suggestedCap", "text"],
+        vec!["source", "suggestedCap", "text"],
         "insight camelCase keys"
     );
     assert_eq!(
@@ -702,7 +702,7 @@ async fn analytics_insight_carries_a_cap_suggestion() {
     let dto = analytics_insight(&seeded(), today())
         .await
         .expect("insight ok");
-    assert!(!dto.model.is_empty(), "model badge present");
+    assert_eq!(dto.source, "COMPUTED", "labelled as computed, not a model");
     assert!(!dto.text.is_empty(), "narrative present");
     assert!(
         !dto.suggested_cap.signal_id.is_empty(),

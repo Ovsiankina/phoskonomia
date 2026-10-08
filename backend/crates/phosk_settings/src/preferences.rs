@@ -15,11 +15,6 @@ use phosk_model::Source;
 /// unparseable (build-contract §6).
 pub const DEFAULT_MOMENTUM_BASELINE_CYCLES: u32 = 3;
 
-/// The active OCR/LLM engine label surfaced in the settings summary (seeded).
-const ENGINE_LABEL: &str = "OLLAMA";
-/// The active model label surfaced in the settings summary (seeded).
-const MODEL_LABEL: &str = "GEMMA4";
-
 /// A known preference key: its factory default and the closed set of values a
 /// user may write through [`validate_preference`].
 ///
@@ -149,9 +144,10 @@ pub struct SettingsSummaryDto {
     pub total_preferences: u32,
     /// Count of preferences whose `provenance.source == UserModified`.
     pub changed_count: u32,
-    /// Active OCR/LLM engine label (seeded), e.g. `"OLLAMA"`.
+    /// Active LLM engine label, as the composition root names it (e.g. `"OLLAMA"`).
     pub engine: String,
-    /// Active model label (seeded), e.g. `"GEMMA4"`.
+    /// Active model id, as the session's LLM adapter reports it (e.g.
+    /// `"qwen3.6:35b-custom"`).
     pub model: String,
 }
 
@@ -179,15 +175,21 @@ pub async fn preferences(db: &dyn DatabaseAdapter) -> Result<Vec<PreferenceDto>,
         .collect())
 }
 
-/// The `/config` header summary: preference counts + active engine/model labels.
+/// The `/config` header summary: preference counts + the active engine/model.
 ///
 /// `changed_count` = preferences whose `provenance.source == UserModified`.
 /// Category colour rows ([`CATEGORY_COLOUR_PREFIX`]) count in neither.
+/// `engine` and `model` are passed in by the caller, which holds the session's
+/// LLM adapter (this crate never assumes a model).
 ///
 /// # Errors
 /// Returns a [`PhoskError`] if the underlying store fails to answer.
 #[tracing::instrument(skip_all)]
-pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummaryDto, PhoskError> {
+pub async fn settings_summary(
+    db: &dyn DatabaseAdapter,
+    engine: &str,
+    model: &str,
+) -> Result<SettingsSummaryDto, PhoskError> {
     let mut prefs = db.preferences().await?;
     prefs.retain(|p| !p.key.starts_with(CATEGORY_COLOUR_PREFIX));
     let total_preferences = u32::try_from(prefs.len()).unwrap_or(u32::MAX);
@@ -201,8 +203,8 @@ pub async fn settings_summary(db: &dyn DatabaseAdapter) -> Result<SettingsSummar
     Ok(SettingsSummaryDto {
         total_preferences,
         changed_count,
-        engine: ENGINE_LABEL.to_owned(),
-        model: MODEL_LABEL.to_owned(),
+        engine: engine.to_owned(),
+        model: model.to_owned(),
     })
 }
 

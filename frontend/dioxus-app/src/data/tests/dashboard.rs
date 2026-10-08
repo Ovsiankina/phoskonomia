@@ -98,11 +98,11 @@ async fn get_alerts_serves_the_active_alert_log() {
 }
 
 #[tokio::test]
-async fn get_insight_carries_the_model_line_and_saving() {
+async fn get_insight_is_the_computed_line_and_saving() {
     let i = get_insight().await.expect("insight");
-    assert_eq!(i.model, "GEMMA4");
+    assert_eq!(i.source, "COMPUTED", "no model wrote the dashboard line");
     assert!(!i.text.is_empty());
-    assert_eq!(i.estimated_savings, money(4_200));
+    assert!(i.estimated_savings >= money(0));
 
     let backend = phosk_ai::ai_features::dashboard_insight(&fresh_db(), today())
         .await

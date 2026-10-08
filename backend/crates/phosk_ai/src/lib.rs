@@ -2,8 +2,8 @@
 //!
 //! Composes the shared **`AiPanel`** read-model (live feed + chat transcript +
 //! model status — [`ai_spine`]) and the AI feature surfaces (feed dismiss +
-//! dashboard insight — [`ai_features`]) from the PORT, and exposes the chat /
-//! feed write paths, plus the approval service ([`ai_approval`]) — the only
+//! computed dashboard insight — [`ai_features`]) from the PORTs, and exposes
+//! the chat / feed write paths, plus the approval service ([`ai_approval`]) — the only
 //! path from a model proposal to the ledger.
 //!
 //! **Layering (ADR-010).** Every service fn takes a `&dyn DatabaseAdapter` (the
@@ -28,9 +28,9 @@ pub use ai_approval::{
     known_category_names, pending_suggestions, reject_suggestion, unknown_categories,
     validate_proposal,
 };
-pub use ai_features::{InsightDto, dashboard_insight, dismiss_feed_item};
+pub use ai_features::{COMPUTED_SOURCE, InsightDto, dashboard_insight, dismiss_feed_item};
 pub use ai_spine::{
-    AiChatMsgDto, AiFeedItemDto, AiPanelDto, AiStatusDto, ai_panel, clear_chat, send_message,
+    AiChatMsgDto, AiFeedItemDto, AiPanelDto, AiStatusDto, ai_panel, ai_status, clear_chat,
 };
 pub use ai_tools::{
     CHAT_REPLY_MAX_CHARS, CONFIDENCE_THRESHOLD, ProposedWrite, ToolEffect, auto_categorize,

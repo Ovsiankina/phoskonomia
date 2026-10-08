@@ -174,7 +174,7 @@ async fn preference_dto_serializes_camel_case_stored_on_device() {
 #[tokio::test]
 async fn settings_summary_total_preferences_matches_seed() {
     let db = seeded_db();
-    let summary = settings_summary(&db)
+    let summary = settings_summary(&db, "OLLAMA", "test-model:7b")
         .await
         .expect("settings_summary should succeed");
     assert_eq!(summary.total_preferences, 5);
@@ -183,7 +183,7 @@ async fn settings_summary_total_preferences_matches_seed() {
 #[tokio::test]
 async fn settings_summary_changed_count_is_user_modified_count() {
     let db = seeded_db();
-    let summary = settings_summary(&db)
+    let summary = settings_summary(&db, "OLLAMA", "test-model:7b")
         .await
         .expect("settings_summary should succeed");
     // low_confidence_threshold + telemetry are the two UserModified rows.
@@ -191,13 +191,16 @@ async fn settings_summary_changed_count_is_user_modified_count() {
 }
 
 #[tokio::test]
-async fn settings_summary_engine_and_model_are_non_empty() {
+async fn settings_summary_reports_the_engine_and_model_it_is_given() {
     let db = seeded_db();
-    let summary = settings_summary(&db)
+    let summary = settings_summary(&db, "OLLAMA", "test-model:7b")
         .await
         .expect("settings_summary should succeed");
-    assert!(!summary.engine.is_empty(), "engine label must be populated");
-    assert!(!summary.model.is_empty(), "model label must be populated");
+    assert_eq!(summary.engine, "OLLAMA");
+    assert_eq!(
+        summary.model, "test-model:7b",
+        "the real model id, not a stock label"
+    );
 }
 
 #[tokio::test]
@@ -209,7 +212,7 @@ async fn settings_summary_changed_count_reacts_to_a_user_edit() {
         .await
         .expect("set_preference should succeed");
 
-    let summary = settings_summary(&db)
+    let summary = settings_summary(&db, "OLLAMA", "test-model:7b")
         .await
         .expect("settings_summary should succeed");
     assert_eq!(summary.total_preferences, 5, "editing must not add a key");
@@ -226,7 +229,7 @@ async fn settings_summary_ignores_category_colour_rows() {
         .await
         .expect("set_preference should succeed");
 
-    let summary = settings_summary(&db)
+    let summary = settings_summary(&db, "OLLAMA", "test-model:7b")
         .await
         .expect("settings_summary should succeed");
     assert_eq!(summary.total_preferences, 5, "colour rows are not settings");
@@ -240,7 +243,7 @@ async fn settings_summary_dto_serializes_camel_case() {
         total_preferences: 5,
         changed_count: 2,
         engine: "OLLAMA".to_owned(),
-        model: "GEMMA4".to_owned(),
+        model: "qwen3.6:35b-custom".to_owned(),
     };
     let json = serde_json::to_value(&dto).expect("serialize SettingsSummaryDto");
     let obj = json.as_object().expect("serializes to an object");
@@ -331,7 +334,7 @@ async fn reset_preference_drops_user_modified_from_changed_count() {
         .await
         .expect("reset_preference should succeed");
 
-    let summary = settings_summary(&db)
+    let summary = settings_summary(&db, "OLLAMA", "test-model:7b")
         .await
         .expect("settings_summary should succeed");
     assert_eq!(

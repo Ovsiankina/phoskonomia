@@ -5,15 +5,16 @@
 //! Dioxus `ai.rs` view DTOs (`AiFeedItemDto` / `AiChatMsgDto` / `AiStatusDto` /
 //! `AiPanelDto`), composed here from the PORT instead of seeded inline.
 //!
-//! No LLM wiring yet: the read-models are composed from the PORT, while the real
-//! Ollama/GEMMA4 spine lands later (see `backend-features-todo.md` §7).
+//! Feed and transcript come from the database PORT; the status line asks the
+//! LLM PORT which model it runs and whether that model answers right now. Chat
+//! turns go through [`crate::ai_tools::chat_reply`] (the model), never through a
+//! canned reply.
 
 use serde::{Deserialize, Serialize};
 
 use phosk_adapter_db::DatabaseAdapter;
+use phosk_adapter_llm::LlmAdapter;
 use phosk_core::error::PhoskError;
-use phosk_id::MessageId;
-use phosk_model::Message;
 
 /// One AI-feed activity item (`/ai/feed` element). Shapes the panel's `FeedItem`
 /// prop. Mirrors `dioxus-app/src/data/ai.rs::AiFeedItemDto`.
@@ -49,16 +50,18 @@ pub struct AiChatMsgDto {
     pub text: String,
 }
 
-/// AI status line + online pulse (`/ai/status`). Seeded for now (`online`, model
-/// `"GEMMA4"`, engine `"OLLAMA"`, location `"LOCAL"`). Mirrors `ai.rs::AiStatusDto`.
+/// AI status line + online pulse (`/ai/status`), read from the LLM PORT: the
+/// configured model id and whether it answers a health probe. Mirrors
+/// `ai.rs::AiStatusDto`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiStatusDto {
-    /// Model reachable / loaded → green pulse.
+    /// The model server is reachable AND lists the configured model → green pulse.
     pub online: bool,
-    /// Model badge, e.g. `"GEMMA4"`.
+    /// The configured model id, as the LLM adapter reports it (e.g.
+    /// `"qwen3.6:35b-custom"`).
     pub model: String,
-    /// Inference engine, e.g. `"OLLAMA"`.
+    /// Inference engine, as named by the composition root (e.g. `"OLLAMA"`).
     pub engine: String,
     /// Where it runs, e.g. `"LOCAL"`.
     pub location: String,
@@ -77,13 +80,39 @@ pub struct AiPanelDto {
     pub status: AiStatusDto,
 }
 
-/// The shared assistant read (`/ai/feed` + `/ai/chat` + `/ai/status`): composes
-/// the panel from the PORT (feed items, latest chat transcript, seeded status).
+/// Where the model runs. The composition root only ever wires a model server on
+/// this machine (Ollama on localhost), never a remote service.
+const LOCATION: &str = "LOCAL";
+
+/// The model status line: the adapter's model id, and `online` only when the
+/// health probe says the model server is up and has that model. An unreachable
+/// server and a missing model both read as offline; the probe's own timeout
+/// (a few seconds in the Ollama adapter) bounds the wait.
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn ai_status(llm: &dyn LlmAdapter, engine: &str) -> AiStatusDto {
+    let online = matches!(llm.health().await, Ok(true));
+    AiStatusDto {
+        online,
+        model: llm.model().to_owned(),
+        engine: engine.to_owned(),
+        location: LOCATION.to_owned(),
+    }
+}
+
+/// The shared assistant read (`/ai/feed` + `/ai/chat` + `/ai/status`): the
+/// feed items and latest chat transcript from the database PORT, the status
+/// line from the LLM PORT ([`ai_status`]). `engine` names the inference engine
+/// the composition root wired (the LLM port does not know it).
 ///
 /// # Errors
-/// Propagates any [`PhoskError`] from the adapter reads.
+/// Propagates any [`PhoskError`] from the adapter reads. A down model is not an
+/// error: it shows as `status.online == false`.
 #[tracing::instrument(level = "debug", skip_all)]
-pub async fn ai_panel(db: &dyn DatabaseAdapter) -> Result<AiPanelDto, PhoskError> {
+pub async fn ai_panel(
+    db: &dyn DatabaseAdapter,
+    llm: &dyn LlmAdapter,
+    engine: &str,
+) -> Result<AiPanelDto, PhoskError> {
     let feed = db
         .feed_items()
         .await?
@@ -116,76 +145,13 @@ pub async fn ai_panel(db: &dyn DatabaseAdapter) -> Result<AiPanelDto, PhoskError
     Ok(AiPanelDto {
         feed,
         msgs,
-        status: status(),
+        status: ai_status(llm, engine).await,
     })
 }
 
-/// The seeded local-model status pulse (GEMMA4 on OLLAMA, LOCAL, online).
-fn status() -> AiStatusDto {
-    AiStatusDto {
-        online: true,
-        model: "GEMMA4".to_owned(),
-        engine: "OLLAMA".to_owned(),
-        location: "LOCAL".to_owned(),
-    }
-}
-
-/// A non-empty relative-time label derived from a feed item's date. The seed has
-/// no wall clock, so the date string is a stable, render-ready stand-in.
+/// A non-empty, render-ready date label for a feed item (`18 Jun`).
 fn relative_time(at: chrono::NaiveDate) -> String {
     at.format("%d %b").to_string()
-}
-
-/// Produce the model's (canned) reply to a user message. Real GEMMA4 inference
-/// lands later; this keeps the spine deterministic for tests.
-fn canned_reply(_text: &str) -> String {
-    "I tracked that. Ask me about a category, signal, or your cycle pace.".to_owned()
-}
-
-/// Append a user message to the latest chat and return the model's reply (a canned
-/// reply for now; real GEMMA4 inference lands later).
-///
-/// # Errors
-/// Propagates any [`PhoskError`] from the adapter reads/writes.
-#[tracing::instrument(level = "debug", skip_all)]
-pub async fn send_message(
-    db: &dyn DatabaseAdapter,
-    text: &str,
-) -> Result<AiChatMsgDto, PhoskError> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err(PhoskError::Invalid("empty chat message".to_owned()));
-    }
-
-    let Some(chat) = db.latest_chat().await? else {
-        return Err(PhoskError::NotFound("no chat to append to".to_owned()));
-    };
-
-    // Persist the user turn verbatim, then the canned model reply. `at` mirrors
-    // the chat's start date (the seed has no wall clock); ordering is by append.
-    let user = Message {
-        id: MessageId::new(),
-        chat_id: chat.id,
-        who: "usr".to_owned(),
-        text: text.to_owned(),
-        at: chat.started,
-    };
-    db.append_message(user).await?;
-
-    let reply_text = canned_reply(text);
-    let reply = Message {
-        id: MessageId::new(),
-        chat_id: chat.id,
-        who: "sys".to_owned(),
-        text: reply_text.clone(),
-        at: chat.started,
-    };
-    db.append_message(reply).await?;
-
-    Ok(AiChatMsgDto {
-        who: "sys".to_owned(),
-        text: reply_text,
-    })
 }
 
 /// Clear the latest chat transcript.
