@@ -1400,7 +1400,7 @@ pub fn AnalyticsPage() -> Element {
                                 Awaiting {
                                     label: "SPEND TREND".to_string(),
                                     loading: history_loading,
-                                    message: history_err.clone(),
+                                    error: history_err.clone(),
                                     tone: "blue".to_string(),
                                 }
                             }
@@ -1472,7 +1472,7 @@ pub fn AnalyticsPage() -> Element {
                                 Awaiting {
                                     label: "ITEM-SIGNALS".to_string(),
                                     loading: signals_loading,
-                                    message: signals_err.clone(),
+                                    error: signals_err.clone(),
                                     tone: "blue".to_string(),
                                 }
                             }
@@ -1491,7 +1491,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "FASTEST RISER".to_string(),
                                         loading: movers_loading,
-                                        message: movers_err.clone(),
+                                        error: movers_err.clone(),
                                         tone: "coral".to_string(),
                                     }
                                 }
@@ -1507,7 +1507,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "FASTEST FALLER".to_string(),
                                         loading: movers_loading,
-                                        message: movers_err.clone(),
+                                        error: movers_err.clone(),
                                         tone: "blue".to_string(),
                                     }
                                 }
@@ -1566,7 +1566,7 @@ pub fn AnalyticsPage() -> Element {
                                         Awaiting {
                                             label: "READ".to_string(),
                                             loading: insights_loading,
-                                            message: insights_err.clone(),
+                                            error: insights_err.clone(),
                                             tone: "blue".to_string(),
                                         }
                                     }
@@ -1597,7 +1597,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "CATEGORY MOMENTUM".to_string(),
                                         loading: momentum_loading,
-                                        message: momentum_err.clone(),
+                                        error: momentum_err.clone(),
                                         tone: "blue".to_string(),
                                     }
                                 }
@@ -1622,7 +1622,7 @@ pub fn AnalyticsPage() -> Element {
                                     Awaiting {
                                         label: "SPENDING RHYTHM".to_string(),
                                         loading: rhythm_loading,
-                                        message: rhythm_err.clone(),
+                                        error: rhythm_err.clone(),
                                         tone: "coral".to_string(),
                                     }
                                 }

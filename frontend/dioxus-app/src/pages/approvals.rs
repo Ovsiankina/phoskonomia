@@ -186,7 +186,7 @@ pub fn ApprovalsPage() -> Element {
                             }
                             match (groups, load_error) {
                                 (None, Some(err)) => rsx! {
-                                    Awaiting { label: "APPROVAL QUEUE", message: err }
+                                    Awaiting { label: "APPROVAL QUEUE", error: err }
                                 },
                                 (None, None) => rsx! {
                                     Awaiting { label: "APPROVAL QUEUE", loading: true }
