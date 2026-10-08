@@ -585,10 +585,10 @@ async fn a_proposal_into_an_unknown_category_is_refused() {
             (|p| p.receipt.category = "Made up".to_owned()) as fn(&mut ReceiptProposal),
         ),
         ("line category", |p| {
-            p.line_items[1].category = "Made up".to_owned()
+            p.line_items[1].category = "Made up".to_owned();
         }),
         ("case-only spelling", |p| {
-            p.receipt.category = "groceries".to_owned()
+            p.receipt.category = "groceries".to_owned();
         }),
     ] {
         let mut p = proposal(&format!("rcpt:cat-{}", what.len()));

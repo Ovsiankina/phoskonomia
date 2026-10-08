@@ -239,7 +239,7 @@ async fn merge_keeps_the_target_record_and_folds_the_caps() {
         panic!("both seeded envelopes are capped");
     };
     assert_eq!(
-        after.cap.map(|m| m.centimes()),
+        after.cap.map(Money::centimes),
         Some(a.centimes() + b.centimes()),
         "the caps are summed"
     );

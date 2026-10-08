@@ -111,11 +111,11 @@ async fn category_writes_keep_both_views_aligned() {
     let aligned = |cats: Vec<phosk_model::Category>, caps: Vec<phosk_model::CategoryCap>| {
         let mut a: Vec<(String, Option<i64>)> = cats
             .into_iter()
-            .map(|c| (c.name, c.cap.map(|m| m.centimes())))
+            .map(|c| (c.name, c.cap.map(Money::centimes)))
             .collect();
         let mut b: Vec<(String, Option<i64>)> = caps
             .into_iter()
-            .map(|c| (c.name, c.cap.map(|m| m.centimes())))
+            .map(|c| (c.name, c.cap.map(Money::centimes)))
             .collect();
         a.sort();
         b.sort();
