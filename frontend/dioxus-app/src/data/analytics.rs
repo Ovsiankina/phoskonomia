@@ -63,37 +63,49 @@ pub struct CyclePointDto {
 }
 
 /// `GET /analytics/spend-history/stats` — the trend roll-ups.
+///
+/// Mirrors `phosk_insights::analytics::SpendStatsDto`: "on record" starts at
+/// the first cycle with any spend; averages, `total_saved`, `peak` and `low`
+/// cover the settled cycles on record only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendStatsDto {
-    /// Cycles on record.
+    /// Cycles on record, the current one included (at least 1).
     pub months: u32,
-    /// 6-month average spend.
+    /// Average spend of the last `avg_cycles` settled cycles (zero if none).
     #[serde(with = "phosk_model::money_centimes")]
     pub avg: Money,
-    /// Average savings rate, 0–1.
+    /// How many settled cycles `avg` / `avg_rate` average (0–6).
+    pub avg_cycles: u32,
+    /// Average savings rate (saved / budget) over those cycles, 0–1.
     pub avg_rate: f64,
-    /// Total saved over the window.
+    /// Total saved over the settled cycles on record.
     #[serde(with = "phosk_model::money_centimes")]
     pub total_saved: Money,
-    /// This cycle (run-rate).
+    /// This cycle so far.
     pub cur: CyclePointDto,
     /// Previous cycle.
     pub prev: CyclePointDto,
-    /// Peak (highest-spend) cycle.
+    /// Peak (highest-spend) settled cycle (`cur` if none).
     pub peak: CyclePointDto,
-    /// Leanest (lowest-spend) cycle.
+    /// Leanest (lowest-spend) settled cycle (`cur` if none).
     pub low: CyclePointDto,
-    /// Signed percent vs 6-mo avg.
+    /// Signed percent of `cur` vs `avg` (0 without a settled cycle).
     pub cur_vs_avg_pct: i32,
     /// Signed percent vs the previous cycle.
     pub cur_vs_prev_pct: i32,
+    /// This cycle projected to its end at the pace so far.
+    #[serde(with = "phosk_model::money_centimes")]
+    pub run_rate: Money,
+    /// Signed percent of `run_rate` vs `avg` (0 without a settled cycle).
+    pub run_rate_vs_avg_pct: i32,
 }
 
 /// One category's momentum card (`GET /analytics/category-momentum` element).
 ///
 /// `now` is this cycle's spend; `series` the 12-cycle spark; `delta_pct` the
-/// signed momentum vs the 3-cycle average; `fixed` marks an untunable channel.
+/// signed momentum vs the `baseline_cycles`-cycle average; `fixed` marks an
+/// untunable channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MomentumDto {
@@ -107,11 +119,14 @@ pub struct MomentumDto {
     pub budget: Money,
     /// 12-point spark.
     pub series: Vec<f64>,
-    /// Signed momentum percent vs the 3-cycle average.
+    /// Signed momentum percent vs the baseline average.
     pub delta_pct: i32,
-    /// 3-cycle average spend.
+    /// Baseline (trailing-N cycle) average spend.
     #[serde(with = "phosk_model::money_centimes")]
     pub prior_avg: Money,
+    /// Settled cycles the baseline averages: the `momentum_baseline_cycles`
+    /// setting, or fewer while less history exists (0 = no baseline yet).
+    pub baseline_cycles: u32,
     /// `true` for a fixed channel.
     pub fixed: bool,
 }
@@ -233,6 +248,9 @@ pub async fn get_spend_stats() -> Result<SpendStatsDto, ServerFnError> {
             low: map_cycle(s.low),
             cur_vs_avg_pct: s.cur_vs_avg_pct,
             cur_vs_prev_pct: s.cur_vs_prev_pct,
+            avg_cycles: s.avg_cycles,
+            run_rate: s.run_rate,
+            run_rate_vs_avg_pct: s.run_rate_vs_avg_pct,
         })
     }
     #[cfg(not(feature = "server-deps"))]
@@ -262,6 +280,7 @@ pub async fn get_category_momentum() -> Result<Vec<MomentumDto>, ServerFnError> 
                 series: c.series,
                 delta_pct: c.delta_pct,
                 prior_avg: c.prior_avg,
+                baseline_cycles: c.baseline_cycles,
                 fixed: c.fixed,
             })
             .collect())
